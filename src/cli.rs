@@ -2,10 +2,11 @@
 
 use clap::{Parser, Subcommand};
 
-/// `gz log` の既定取得件数。
+/// コミット候補の既定取得件数。
 ///
-/// コミット数の多いリポジトリでも初期表示の応答性を確保するための上限。
-pub const DEFAULT_LOG_LIMIT: usize = 1000;
+/// コミット数の多いリポジトリでも初期表示の応答性を確保するための上限で、
+/// `gz log --limit` の既定値と `gz cherry-pick` の候補数上限に用いる。
+pub const DEFAULT_COMMIT_LIMIT: usize = 1000;
 
 /// fuzzy finder で「選ぶ」「探す」「辿る」git 操作 CLI。
 #[derive(Debug, Parser)]
@@ -34,7 +35,7 @@ pub enum Command {
     /// コミット履歴を辿り、選択したコミットのフルハッシュを標準出力へ出す
     Log {
         /// 取得するコミットの最大件数
-        #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_LOG_LIMIT)]
+        #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_COMMIT_LIMIT)]
         limit: usize,
     },
 
@@ -115,7 +116,7 @@ mod tests {
         let cli = Cli::try_parse_from(["gz", "log"]).expect("log should parse without options");
 
         match cli.command {
-            Command::Log { limit } => assert_eq!(limit, DEFAULT_LOG_LIMIT),
+            Command::Log { limit } => assert_eq!(limit, DEFAULT_COMMIT_LIMIT),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }

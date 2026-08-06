@@ -6,10 +6,11 @@
 use anyhow::{Result, bail};
 
 use crate::cli::Command;
-use crate::git::read::BranchScope;
+use crate::git::read::{BranchScope, CommitScope};
 use crate::git::repo;
 
 pub mod branch;
+pub mod cherry_pick;
 pub mod log;
 
 /// サブコマンドを対応する実装へ振り分ける。
@@ -32,7 +33,13 @@ pub fn dispatch(command: &Command) -> Result<()> {
             branch::run(&repository, scope)
         }
         Command::Log { limit } => log::run(&repository, *limit),
-        Command::CherryPick { .. } => bail!("`gz cherry-pick` は未実装です"),
+        Command::CherryPick { branch } => {
+            let scope = match branch {
+                Some(name) => CommitScope::Branch(name),
+                None => CommitScope::AllBranches,
+            };
+            cherry_pick::run(&repository, scope)
+        }
         Command::Restore { .. } => bail!("`gz restore` は未実装です"),
         Command::Add => bail!("`gz add` は未実装です"),
         Command::Stash { .. } => bail!("`gz stash` は未実装です"),

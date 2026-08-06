@@ -55,6 +55,19 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    /// HEAD が指すブランチにまだコミットが 1 件も存在しない（unborn HEAD）。
+    ///
+    /// 候補が 0 件になる原因のうち、`git init` 直後のように「まだコミットが無い」場合は
+    /// [`Error::NoCandidates`] と区別して原因と次の操作を伝える。
+    #[error(
+        "現在のブランチ `{branch}` にはまだコミットがありません。\
+         `git commit` で最初のコミットを作成してから実行してください"
+    )]
+    UnbornHead {
+        /// HEAD が指している（まだ実体の無い）ブランチ名。
+        branch: String,
+    },
+
     /// ユーザーが fuzzy finder を中断した（Esc / Ctrl-C）。
     #[error("選択が中断されました")]
     Cancelled,

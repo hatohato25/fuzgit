@@ -27,6 +27,17 @@ pub struct BranchInfo {
     pub is_remote: bool,
 }
 
+/// 候補に含めるコミットの範囲。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitScope<'a> {
+    /// HEAD から辿れるコミットのみを対象にする（`gz log`）。
+    Head,
+    /// すべてのブランチ（ローカル・リモート追跡）の先端から辿れるコミットを対象にする。
+    AllBranches,
+    /// 指定したブランチ（リビジョン）から辿れるコミットを対象にする。
+    Branch(&'a str),
+}
+
 /// コミット 1 件分の情報。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitInfo {
@@ -61,6 +72,31 @@ fn to_utf8(bytes: &BStr, operation: &str) -> Result<String> {
         .map_err(|source| read_error(operation, source))
 }
 
+/// HEAD がまだ 1 件もコミットを持たないブランチ（unborn HEAD）を指している場合、その短縮名を返す。
+fn unborn_branch(repository: &gix::Repository) -> Result<Option<String>> {
+    let head = repository
+        .head()
+        .map_err(|source| read_error("HEAD の読み取り", source))?;
+
+    match &head.kind {
+        gix::head::Kind::Unborn(name) => {
+            to_utf8(name.shorten(), "HEAD のブランチ名の解釈").map(Some)
+        }
+        gix::head::Kind::Symbolic(_) | gix::head::Kind::Detached { .. } => Ok(None),
+    }
+}
+
+/// 候補が 0 件になった原因が unborn HEAD であれば [`Error::UnbornHead`] を返す。
+///
+/// `git init` 直後のリポジトリでは「候補がありません」だけでは原因が分からないため、
+/// 単なる候補ゼロと区別して原因と次に取れる操作を伝える。
+fn reject_unborn_head(repository: &gix::Repository) -> Result<()> {
+    match unborn_branch(repository)? {
+        Some(branch) => Err(Error::UnbornHead { branch }),
+        None => Ok(()),
+    }
+}
+
 /// HEAD が指しているローカルブランチの短縮名を返す。detached HEAD の場合は `None`。
 fn current_branch(repository: &gix::Repository) -> Result<Option<String>> {
     let Some(name) = repository
@@ -79,8 +115,9 @@ fn current_branch(repository: &gix::Repository) -> Result<Option<String>> {
 ///
 /// # Errors
 ///
-/// 参照の列挙・読み取りに失敗した場合、または参照名が UTF-8 でない場合に
-/// [`Error::RepositoryReadFailed`] を返す。
+/// - 参照の列挙・読み取りに失敗した場合、または参照名が UTF-8 でない場合は
+///   [`Error::RepositoryReadFailed`]
+/// - ブランチが 1 件も無く、その原因が unborn HEAD である場合は [`Error::UnbornHead`]
 pub fn branches(repository: &gix::Repository, scope: BranchScope) -> Result<Vec<BranchInfo>> {
     let current = current_branch(repository)?;
     let platform = repository
@@ -104,6 +141,9 @@ pub fn branches(repository: &gix::Repository, scope: BranchScope) -> Result<Vec<
     locals.sort_by(|left, right| left.name.cmp(&right.name));
 
     if scope == BranchScope::Local {
+        if locals.is_empty() {
+            reject_unborn_head(repository)?;
+        }
         return Ok(locals);
     }
 
@@ -131,31 +171,87 @@ pub fn branches(repository: &gix::Repository, scope: BranchScope) -> Result<Vec<
     remotes.sort_by(|left, right| left.name.cmp(&right.name));
 
     locals.extend(remotes);
+    if locals.is_empty() {
+        reject_unborn_head(repository)?;
+    }
     Ok(locals)
 }
 
-/// HEAD から辿れるコミットを新しい順に最大 `limit` 件取得する。
+/// 走査の起点となるコミット（tip）を [`CommitScope`] に応じて集める。
 ///
-/// コミットが 1 件も無いリポジトリ（unborn HEAD）では空の `Vec` を返す。
+/// 起点が存在しない場合（unborn HEAD、ブランチが 1 件も無いリポジトリ）は空の `Vec` を返す。
+fn commit_tips(repository: &gix::Repository, scope: CommitScope<'_>) -> Result<Vec<gix::ObjectId>> {
+    match scope {
+        CommitScope::Head => {
+            let mut head = repository
+                .head()
+                .map_err(|source| read_error("HEAD の読み取り", source))?;
+            let head_id = head
+                .try_peel_to_id()
+                .map_err(|source| read_error("HEAD の解決", source))?;
+            Ok(head_id.map(|id| id.detach()).into_iter().collect())
+        }
+        CommitScope::AllBranches => {
+            let platform = repository
+                .references()
+                .map_err(|source| read_error("参照の列挙", source))?;
+            let locals = platform
+                .local_branches()
+                .map_err(|source| read_error("ローカルブランチの列挙", source))?;
+            let remotes = platform
+                .remote_branches()
+                .map_err(|source| read_error("リモート追跡ブランチの列挙", source))?;
+
+            let mut tips = Vec::new();
+            for reference in locals.chain(remotes) {
+                let reference =
+                    reference.map_err(|source| read_error("ブランチの読み取り", source))?;
+                let id = reference
+                    .into_fully_peeled_id()
+                    .map_err(|source| read_error("ブランチ先端の解決", source))?;
+                tips.push(id.detach());
+            }
+            // 複数ブランチが同じコミットを指していても rev_walk 側で重複は除かれる
+            Ok(tips)
+        }
+        CommitScope::Branch(name) => {
+            let id = repository
+                .rev_parse_single(name)
+                .map_err(|source| read_error(&format!("ブランチ `{name}` の解決"), source))?;
+            Ok(vec![id.detach()])
+        }
+    }
+}
+
+/// 走査の並び順を [`CommitScope`] に応じて決める。
+fn sorting(scope: CommitScope<'_>) -> gix::revision::walk::Sorting {
+    match scope {
+        // 起点が 1 つの場合、グラフ順はそのまま HEAD からの祖先順になる（P1 の `log` と同じ順序）
+        CommitScope::Head | CommitScope::Branch(_) => gix::revision::walk::Sorting::BreadthFirst,
+        // 複数の起点をグラフ順で辿るとブランチごとにコミットが偏り、limit で打ち切った際に
+        // 一部のブランチの新しいコミットが候補から漏れるため、コミット日時の新しい順に揃える
+        CommitScope::AllBranches => gix::revision::walk::Sorting::ByCommitTime(
+            gix::traverse::commit::simple::CommitTimeOrder::NewestFirst,
+        ),
+    }
+}
+
+/// `scope` の範囲のコミットを新しい順に最大 `limit` 件取得する。
 ///
 /// # Errors
 ///
-/// HEAD の解決・履歴の走査・コミットの復号に失敗した場合に
-/// [`Error::RepositoryReadFailed`] を返す。
-pub fn commits(repository: &gix::Repository, limit: usize) -> Result<Vec<CommitInfo>> {
-    let mut head = repository
-        .head()
-        .map_err(|source| read_error("HEAD の読み取り", source))?;
+/// - 起点の解決・履歴の走査・コミットの復号に失敗した場合は [`Error::RepositoryReadFailed`]
+/// - コミットが 1 件も無く、その原因が unborn HEAD である場合は [`Error::UnbornHead`]
+pub fn commits(
+    repository: &gix::Repository,
+    scope: CommitScope<'_>,
+    limit: usize,
+) -> Result<Vec<CommitInfo>> {
+    let tips = commit_tips(repository, scope)?;
 
-    let Some(head_id) = head
-        .try_peel_to_id()
-        .map_err(|source| read_error("HEAD の解決", source))?
-    else {
-        return Ok(Vec::new());
-    };
-
-    let walk = head_id
-        .ancestors()
+    let walk = repository
+        .rev_walk(tips)
+        .sorting(sorting(scope))
         .all()
         .map_err(|source| read_error("コミット履歴の走査", source))?;
 
@@ -167,6 +263,10 @@ pub fn commits(repository: &gix::Repository, limit: usize) -> Result<Vec<CommitI
             .object()
             .map_err(|source| read_error("コミットオブジェクトの取得", source))?;
         commits.push(commit_info(&commit)?);
+    }
+
+    if commits.is_empty() {
+        reject_unborn_head(repository)?;
     }
 
     Ok(commits)
@@ -204,7 +304,7 @@ mod tests {
     use super::*;
     use crate::git::repo::discover;
     use crate::test_support::{
-        COMMIT_DATE_SHORT, TempDir, commit, create_branch, create_remote_branch,
+        COMMIT_DATE_SHORT, TempDir, commit, commit_at, create_branch, create_remote_branch,
         create_remote_symbolic_ref, git_in, init_repository,
     };
 
@@ -219,6 +319,13 @@ mod tests {
 
     fn names(branches: &[BranchInfo]) -> Vec<&str> {
         branches.iter().map(|branch| branch.name.as_str()).collect()
+    }
+
+    fn summaries(commits: &[CommitInfo]) -> Vec<&str> {
+        commits
+            .iter()
+            .map(|commit| commit.summary.as_str())
+            .collect()
     }
 
     #[test]
@@ -240,14 +347,31 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_without_commits_has_no_branches() {
+    fn a_repository_without_commits_reports_the_unborn_branch_instead_of_an_empty_list() {
         let dir = TempDir::new("read-unborn-branches");
         init_repository(dir.path());
         let repository = discover(dir.path()).expect("test repository should be discoverable");
 
-        let branches = branches(&repository, BranchScope::All).expect("branches should be read");
+        for scope in [BranchScope::Local, BranchScope::All] {
+            let err = branches(&repository, scope)
+                .expect_err("an unborn HEAD should be reported as its own error");
 
-        assert!(branches.is_empty(), "unexpected branches: {branches:?}");
+            match err {
+                Error::UnbornHead { branch } => assert_eq!(branch, "main"),
+                other => panic!("unexpected error for {scope:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_orphan_branch_does_not_hide_the_existing_branches() {
+        let (dir, _repository, _head) = repository_with_one_commit("read-orphan-branch");
+        git_in(dir.path(), &["checkout", "--quiet", "--orphan", "orphan"]);
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let branches = branches(&repository, BranchScope::Local).expect("branches should be read");
+
+        assert_eq!(names(&branches), ["main"]);
     }
 
     #[test]
@@ -300,10 +424,9 @@ mod tests {
         let third = commit(dir.path(), "third");
         let repository = discover(dir.path()).expect("test repository should be discoverable");
 
-        let commits = commits(&repository, 10).expect("commits should be read");
+        let commits = commits(&repository, CommitScope::Head, 10).expect("commits should be read");
 
-        let summaries: Vec<&str> = commits.iter().map(|c| c.summary.as_str()).collect();
-        assert_eq!(summaries, ["third", "second", "first"]);
+        assert_eq!(summaries(&commits), ["third", "second", "first"]);
         assert_eq!(commits[0].id, third);
     }
 
@@ -316,37 +439,171 @@ mod tests {
         commit(dir.path(), "third");
         let repository = discover(dir.path()).expect("test repository should be discoverable");
 
-        let commits = commits(&repository, 2).expect("commits should be read");
+        let commits = commits(&repository, CommitScope::Head, 2).expect("commits should be read");
 
-        let summaries: Vec<&str> = commits.iter().map(|c| c.summary.as_str()).collect();
-        assert_eq!(summaries, ["third", "second"]);
+        assert_eq!(summaries(&commits), ["third", "second"]);
     }
 
     #[test]
     fn a_limit_of_zero_yields_no_commits() {
         let (_dir, repository, _head) = repository_with_one_commit("read-commits-zero");
 
-        let commits = commits(&repository, 0).expect("commits should be read");
+        let commits = commits(&repository, CommitScope::Head, 0).expect("commits should be read");
 
         assert!(commits.is_empty(), "unexpected commits: {commits:?}");
     }
 
     #[test]
-    fn a_repository_without_commits_yields_no_commits() {
+    fn a_repository_without_commits_reports_the_unborn_branch() {
         let dir = TempDir::new("read-commits-unborn");
         init_repository(dir.path());
         let repository = discover(dir.path()).expect("test repository should be discoverable");
 
-        let commits = commits(&repository, 10).expect("unborn HEAD should not be an error");
+        let err = commits(&repository, CommitScope::Head, 10)
+            .expect_err("an unborn HEAD should be reported as its own error");
 
-        assert!(commits.is_empty(), "unexpected commits: {commits:?}");
+        match err {
+            Error::UnbornHead { branch } => assert_eq!(branch, "main"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_orphan_branch_is_reported_as_unborn_even_when_other_commits_exist() {
+        let (dir, _repository, _head) = repository_with_one_commit("read-commits-orphan");
+        git_in(dir.path(), &["checkout", "--quiet", "--orphan", "orphan"]);
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let err = commits(&repository, CommitScope::Head, 10)
+            .expect_err("an unborn HEAD should be reported as its own error");
+
+        match err {
+            Error::UnbornHead { branch } => assert_eq!(branch, "orphan"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// 2 本のブランチに分岐した履歴を持つテストリポジトリを用意する。
+    ///
+    /// ```text
+    /// first (01-01) ─┬─ main only    (01-02)  <- main（HEAD）
+    ///                └─ feature only (01-03)  <- feature
+    /// ```
+    ///
+    /// コミット日時をずらしてあるため、日時順とブランチのまとまりが一致しない。
+    fn repository_with_two_branches(label: &str) -> (TempDir, gix::Repository) {
+        let dir = TempDir::new(label);
+        init_repository(dir.path());
+        commit_at(dir.path(), "first", "2024-01-01T00:00:00+00:00");
+        git_in(dir.path(), &["switch", "--quiet", "-c", "feature"]);
+        commit_at(dir.path(), "feature only", "2024-01-03T00:00:00+00:00");
+        git_in(dir.path(), &["switch", "--quiet", "main"]);
+        commit_at(dir.path(), "main only", "2024-01-02T00:00:00+00:00");
+
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+        (dir, repository)
+    }
+
+    #[test]
+    fn the_head_scope_ignores_commits_of_other_branches() {
+        let (_dir, repository) = repository_with_two_branches("read-commits-head-scope");
+
+        let commits = commits(&repository, CommitScope::Head, 10).expect("commits should be read");
+
+        assert_eq!(summaries(&commits), ["main only", "first"]);
+    }
+
+    #[test]
+    fn the_all_branches_scope_merges_every_branch_by_commit_time() {
+        let (_dir, repository) = repository_with_two_branches("read-commits-all-scope");
+
+        let commits =
+            commits(&repository, CommitScope::AllBranches, 10).expect("commits should be read");
+
+        assert_eq!(
+            summaries(&commits),
+            ["feature only", "main only", "first"],
+            "commits of all branches should be interleaved by commit time"
+        );
+    }
+
+    #[test]
+    fn a_commit_shared_by_several_branches_is_listed_once() {
+        let (_dir, repository) = repository_with_two_branches("read-commits-shared");
+
+        let commits =
+            commits(&repository, CommitScope::AllBranches, 10).expect("commits should be read");
+
+        let shared = commits
+            .iter()
+            .filter(|commit| commit.summary == "first")
+            .count();
+        assert_eq!(shared, 1, "the shared ancestor should not be duplicated");
+    }
+
+    #[test]
+    fn the_all_branches_scope_includes_remote_tracking_branches() {
+        let (dir, _repository) = repository_with_two_branches("read-commits-remote-scope");
+        git_in(dir.path(), &["switch", "--quiet", "-c", "temporary"]);
+        let head = commit_at(dir.path(), "remote only", "2024-01-04T00:00:00+00:00");
+        git_in(dir.path(), &["switch", "--quiet", "main"]);
+        // ローカルブランチを消し、リモート追跡ブランチからのみ辿れるコミットにする
+        git_in(dir.path(), &["branch", "--delete", "--force", "temporary"]);
+        create_remote_branch(dir.path(), "origin/temporary", &head);
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let commits =
+            commits(&repository, CommitScope::AllBranches, 10).expect("commits should be read");
+
+        assert_eq!(
+            summaries(&commits),
+            ["remote only", "feature only", "main only", "first"]
+        );
+    }
+
+    #[test]
+    fn the_all_branches_scope_is_truncated_to_the_limit_across_branches() {
+        let (_dir, repository) = repository_with_two_branches("read-commits-all-limit");
+
+        let commits =
+            commits(&repository, CommitScope::AllBranches, 2).expect("commits should be read");
+
+        assert_eq!(summaries(&commits), ["feature only", "main only"]);
+    }
+
+    #[test]
+    fn a_branch_scope_is_limited_to_that_branch() {
+        let (_dir, repository) = repository_with_two_branches("read-commits-branch-scope");
+
+        let commits = commits(&repository, CommitScope::Branch("feature"), 10)
+            .expect("commits should be read");
+
+        assert_eq!(summaries(&commits), ["feature only", "first"]);
+    }
+
+    #[test]
+    fn an_unknown_branch_is_reported_with_its_name() {
+        let (_dir, repository) = repository_with_two_branches("read-commits-unknown-branch");
+
+        let err = commits(&repository, CommitScope::Branch("no-such-branch"), 10)
+            .expect_err("an unknown branch must not be silently ignored");
+
+        match err {
+            Error::RepositoryReadFailed { operation, .. } => {
+                assert!(
+                    operation.contains("no-such-branch"),
+                    "the branch should be named: {operation}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
     fn commit_metadata_is_exposed_without_gix_types() {
         let (_dir, repository, head) = repository_with_one_commit("read-commit-metadata");
 
-        let commits = commits(&repository, 1).expect("commits should be read");
+        let commits = commits(&repository, CommitScope::Head, 1).expect("commits should be read");
         let commit = commits.first().expect("one commit should be present");
 
         assert_eq!(commit.id, head);

@@ -5,7 +5,7 @@ use std::io::Write as _;
 use anyhow::{Context as _, Result};
 
 use crate::finder::{FinderItem, PreviewSource, select_one};
-use crate::git::read::{CommitInfo, commits};
+use crate::git::read::{CommitInfo, CommitScope, commits};
 
 /// コミット履歴から 1 件選び、そのフルハッシュを標準出力へ書き出す。
 ///
@@ -13,7 +13,8 @@ use crate::git::read::{CommitInfo, commits};
 ///
 /// コミット履歴の取得、選択（中断を含む）、標準出力への書き込みに失敗した場合にエラーを返す。
 pub fn run(repository: &gix::Repository, limit: usize) -> Result<()> {
-    let candidates = commits(repository, limit).context("コミット履歴の取得に失敗しました")?;
+    let candidates = commits(repository, CommitScope::Head, limit)
+        .context("コミット履歴の取得に失敗しました")?;
 
     let items = candidates.iter().map(to_item).collect();
     let selected = select_one(items)?;

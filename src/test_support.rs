@@ -61,6 +61,13 @@ impl Drop for TempDir {
 /// 実行環境のユーザー設定・タイムゾーンに結果が左右されないよう、
 /// グローバル/システム設定を無効化し、署名と日時を固定する。
 pub fn git_in(directory: &Path, args: &[&str]) -> String {
+    git_in_at(directory, args, COMMIT_DATE)
+}
+
+/// [`git_in`] と同じだが、コミット日時を明示的に指定する。
+///
+/// コミット日時順の並びを検証するテストで用いる。
+fn git_in_at(directory: &Path, args: &[&str], date: &str) -> String {
     let output = Command::new("git")
         .args(args)
         .current_dir(directory)
@@ -70,8 +77,8 @@ pub fn git_in(directory: &Path, args: &[&str]) -> String {
         .env("GIT_AUTHOR_EMAIL", AUTHOR_EMAIL)
         .env("GIT_COMMITTER_NAME", AUTHOR_NAME)
         .env("GIT_COMMITTER_EMAIL", AUTHOR_EMAIL)
-        .env("GIT_AUTHOR_DATE", COMMIT_DATE)
-        .env("GIT_COMMITTER_DATE", COMMIT_DATE)
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
         .output()
         .unwrap_or_else(|err| panic!("failed to run git {args:?}: {err}"));
 
@@ -98,6 +105,13 @@ pub fn init_repository(path: &Path) {
 ///
 /// 空コミットを避けるため、メッセージを追記したファイルを一緒にコミットする。
 pub fn commit(path: &Path, message: &str) -> String {
+    commit_at(path, message, COMMIT_DATE)
+}
+
+/// [`commit`] と同じだが、コミット日時を明示的に指定する。
+///
+/// `date` は `2024-01-02T03:04:05+00:00` 形式で与える。
+pub fn commit_at(path: &Path, message: &str, date: &str) -> String {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -106,9 +120,9 @@ pub fn commit(path: &Path, message: &str) -> String {
     writeln!(file, "{message}").expect("failed to write history file");
     drop(file);
 
-    git_in(path, &["add", "--", HISTORY_FILE]);
-    git_in(path, &["commit", "--quiet", "-m", message]);
-    git_in(path, &["rev-parse", "HEAD"])
+    git_in_at(path, &["add", "--", HISTORY_FILE], date);
+    git_in_at(path, &["commit", "--quiet", "-m", message], date);
+    git_in_at(path, &["rev-parse", "HEAD"], date)
 }
 
 /// 現在の HEAD からローカルブランチを作成する（切り替えは行わない）。

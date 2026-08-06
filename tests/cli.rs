@@ -22,8 +22,14 @@ const SUBCOMMANDS: [&str; 8] = [
     "reflog",
 ];
 
-/// `gz log --limit` の既定値（`fuzgit::cli::DEFAULT_LOG_LIMIT` と対応）。
-const DEFAULT_LOG_LIMIT: &str = "1000";
+/// `gz log --limit` の既定値（`fuzgit::cli::DEFAULT_COMMIT_LIMIT` と対応）。
+const DEFAULT_COMMIT_LIMIT: &str = "1000";
+
+/// unborn HEAD のエラーメッセージが伝えるべき原因（`fuzgit::error::Error::UnbornHead` と対応）。
+const UNBORN_HEAD_CAUSE: &str = "まだコミットがありません";
+
+/// unborn HEAD のエラーメッセージが伝えるべき次の操作。
+const UNBORN_HEAD_NEXT_STEP: &str = "git commit";
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -163,7 +169,7 @@ fn log_help_documents_the_default_limit() {
 
     let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
     assert!(
-        stdout.contains(&format!("[default: {DEFAULT_LOG_LIMIT}]")),
+        stdout.contains(&format!("[default: {DEFAULT_COMMIT_LIMIT}]")),
         "default limit missing from help:\n{stdout}"
     );
 }
@@ -198,7 +204,7 @@ fn log_accepts_the_limit_and_reports_when_there_are_no_commits() {
         vec!["log"],
         vec!["log", "--limit", "5"],
         vec!["log", "-n", "5"],
-        vec!["log", "--limit", DEFAULT_LOG_LIMIT],
+        vec!["log", "--limit", DEFAULT_COMMIT_LIMIT],
     ] {
         let output = gz()
             .args(&arguments)
@@ -213,7 +219,7 @@ fn log_accepts_the_limit_and_reports_when_there_are_no_commits() {
 
         let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
         assert!(
-            stderr.contains("選択できる候補がありません"),
+            stderr.contains(UNBORN_HEAD_CAUSE),
             "unexpected stderr for gz {arguments:?}:\n{stderr}"
         );
         assert!(
@@ -223,25 +229,58 @@ fn log_accepts_the_limit_and_reports_when_there_are_no_commits() {
     }
 }
 
-/// `gz branch` も候補が 0 件のときは TUI を起動しないことを確認する。
+/// コミットがまだ 1 件も無いリポジトリでは、候補ゼロではなくその原因を伝えることを確認する。
 #[test]
-fn branch_reports_when_there_are_no_branches() {
-    let dir = empty_repository("branch-empty");
+fn an_unborn_head_is_reported_with_its_cause_and_next_step() {
+    let dir = empty_repository("unborn-head");
+
+    for subcommand in ["branch", "log", "cherry-pick"] {
+        let output = gz()
+            .arg(subcommand)
+            .current_dir(dir.path())
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {subcommand}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {subcommand} should exit non-zero when there are no commits"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains(UNBORN_HEAD_CAUSE),
+            "the cause should be explained for gz {subcommand}:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(UNBORN_HEAD_NEXT_STEP),
+            "the next step should be suggested for gz {subcommand}:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("選択できる候補がありません"),
+            "the generic message should not be used for gz {subcommand}:\n{stderr}"
+        );
+    }
+}
+
+/// `gz cherry-pick --branch` に存在しないブランチを渡した場合、その名前を含むエラーになることを確認する。
+#[test]
+fn cherry_pick_reports_an_unknown_branch_by_name() {
+    let dir = empty_repository("cherry-pick-unknown-branch");
 
     let output = gz()
-        .arg("branch")
+        .args(["cherry-pick", "--branch", "no-such-branch"])
         .current_dir(dir.path())
         .output()
-        .expect("failed to run gz branch");
+        .expect("failed to run gz cherry-pick --branch no-such-branch");
 
     assert!(
         !output.status.success(),
-        "gz branch should exit non-zero when there are no branches"
+        "an unknown branch should exit non-zero"
     );
 
     let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
     assert!(
-        stderr.contains("選択できる候補がありません"),
-        "unexpected stderr:\n{stderr}"
+        stderr.contains("no-such-branch"),
+        "the unknown branch should be named:\n{stderr}"
     );
 }

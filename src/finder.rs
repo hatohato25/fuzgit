@@ -162,6 +162,24 @@ pub fn select_one(items: Vec<FinderItem>) -> Result<String> {
     Ok(selected.swap_remove(0))
 }
 
+/// fuzzy finder を複数選択モードで起動し、選択された 1 件以上のキーを返す。
+///
+/// # Errors
+///
+/// - 候補が空の場合は [`Error::NoCandidates`]
+/// - 中断された場合、および 1 件も選ばれずに決定された場合は [`Error::Cancelled`]
+/// - skim の初期化・実行に失敗した場合は [`Error::FinderFailed`]
+pub fn select_many(items: Vec<FinderItem>) -> Result<Vec<String>> {
+    let selected = run_finder(items, SelectionMode::Multi)?;
+
+    // 単一選択と同様に、何も選ばれていない状態での決定は git 操作を行わずに終了する
+    if selected.is_empty() {
+        return Err(Error::Cancelled);
+    }
+
+    Ok(selected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +244,14 @@ mod tests {
     fn select_one_rejects_empty_candidates_without_starting_the_tui() {
         let err =
             select_one(Vec::new()).expect_err("empty candidate list must not start the finder");
+
+        assert!(matches!(err, Error::NoCandidates));
+    }
+
+    #[test]
+    fn select_many_rejects_empty_candidates_without_starting_the_tui() {
+        let err =
+            select_many(Vec::new()).expect_err("empty candidate list must not start the finder");
 
         assert!(matches!(err, Error::NoCandidates));
     }
