@@ -1,0 +1,26 @@
+[package]
+name = "fuzgit"
+version = "0.1.0"
+edition = "2024"
+description = "fuzzy finder で「選ぶ」「探す」「辿る」git 操作 CLI ツール"
+license = "MIT"
+repository = "https://github.com/nasu-hayato/fuzgit"
+
+[lib]
+name = "fuzgit"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gz"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+gix = "0.86.0"
+# ライブラリとしてのみ利用するため、`sk` バイナリ用の cli / 画像プレビュー / IPC listen 機能は無効化する
+skim = { version = "5.6.1", default-features = false, features = ["frizbee"] }
+thiserror = "2.0.19"
+
+[dev-dependencies]
+assert_cmd = "2.2.2"
