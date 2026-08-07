@@ -10,11 +10,21 @@
 //! 端末に依存しない純ロジックに限定する。
 
 use std::borrow::Cow;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 
 use skim::prelude::*;
 
 use crate::error::{Error, Result};
 use crate::git::exec::capture_git;
+
+/// ファイル内容のプレビューで読み込む最大バイト数。
+///
+/// 巨大なファイルを選択した際にプレビュー生成で待たされないよう上限を設ける。
+const FILE_PREVIEW_LIMIT: usize = 64 * 1024;
+
+/// 内容が上限で打ち切られたことを示す注記。
+const TRUNCATION_NOTICE: &str = "\n… （以降は省略しました）";
 
 /// 候補ごとのプレビュー内容の生成方法。
 ///
@@ -28,6 +38,32 @@ pub enum PreviewSource {
     None,
     /// `git <args>` の出力を ANSI カラー付きで表示する。
     Git(Vec<String>),
+    /// ローカルファイルの内容をそのまま表示する。
+    ///
+    /// 未追跡ファイルは git の管理下に無く差分を取れないため、内容を直接読んで表示する。
+    /// カレントディレクトリに依存しないよう絶対パスを渡すこと。
+    File(PathBuf),
+}
+
+/// ファイルの先頭を [`FILE_PREVIEW_LIMIT`] バイトまで読み、表示用の文字列を返す。
+///
+/// 内容が UTF-8 でない場合（バイナリファイル等）も選択操作を止めたくないため、
+/// ここではロッシー変換を行う。表示のみに使う値であり、git へ渡す値ではない。
+fn read_preview(path: &Path) -> std::io::Result<String> {
+    let mut buffer = Vec::new();
+    // 打ち切りを検出するために上限より 1 バイト多く読む
+    std::fs::File::open(path)?
+        .take(FILE_PREVIEW_LIMIT as u64 + 1)
+        .read_to_end(&mut buffer)?;
+
+    let truncated = buffer.len() > FILE_PREVIEW_LIMIT;
+    buffer.truncate(FILE_PREVIEW_LIMIT);
+
+    let mut text = String::from_utf8_lossy(&buffer).into_owned();
+    if truncated {
+        text.push_str(TRUNCATION_NOTICE);
+    }
+    Ok(text)
 }
 
 /// fuzzy finder に渡す汎用の候補アイテム。
@@ -82,6 +118,13 @@ impl SkimItem for FinderItem {
                     Err(err) => ItemPreview::Text(err.to_string()),
                 }
             }
+            PreviewSource::File(path) => match read_preview(path) {
+                Ok(text) => ItemPreview::Text(text),
+                Err(err) => ItemPreview::Text(format!(
+                    "{path} を読み込めません: {err}",
+                    path = path.display()
+                )),
+            },
         }
     }
 }
@@ -200,23 +243,70 @@ mod tests {
         assert_eq!(item.key(), "main");
     }
 
-    #[test]
-    fn preview_of_a_non_previewable_item_is_empty_text() {
-        let item = FinderItem::new("main".to_string(), "main".to_string(), PreviewSource::None);
-        let context = PreviewContext {
+    /// プレビュー生成の呼び出しに必要な最小限のコンテキスト。
+    fn preview_context() -> PreviewContext<'static> {
+        PreviewContext {
             query: "",
             cmd_query: "",
             width: 80,
             height: 24,
             current_index: 0,
-            current_selection: "main",
+            current_selection: "",
             selected_indices: &[],
             selections: &[],
-        };
+        }
+    }
 
-        match item.preview(context) {
+    #[test]
+    fn preview_of_a_non_previewable_item_is_empty_text() {
+        let item = FinderItem::new("main".to_string(), "main".to_string(), PreviewSource::None);
+
+        match item.preview(preview_context()) {
             ItemPreview::Text(text) => assert!(text.is_empty()),
             _ => panic!("PreviewSource::None must produce empty text"),
+        }
+    }
+
+    #[test]
+    fn a_file_preview_shows_the_contents_of_the_file() {
+        let dir = crate::test_support::TempDir::new("finder-file-preview");
+        crate::test_support::write_file(dir.path(), "untracked.txt", "line 1\nline 2\n");
+
+        let text = read_preview(&dir.path().join("untracked.txt"))
+            .expect("an existing file should be readable");
+
+        assert_eq!(text, "line 1\nline 2\n");
+    }
+
+    #[test]
+    fn a_large_file_preview_is_truncated_with_a_notice() {
+        let dir = crate::test_support::TempDir::new("finder-file-preview-large");
+        let contents = "x".repeat(FILE_PREVIEW_LIMIT + 100);
+        crate::test_support::write_file(dir.path(), "large.txt", &contents);
+
+        let text =
+            read_preview(&dir.path().join("large.txt")).expect("a large file should be readable");
+
+        assert_eq!(text.len(), FILE_PREVIEW_LIMIT + TRUNCATION_NOTICE.len());
+        assert!(text.ends_with(TRUNCATION_NOTICE), "the notice is missing");
+    }
+
+    #[test]
+    fn a_missing_file_is_reported_in_the_preview_instead_of_failing() {
+        let dir = crate::test_support::TempDir::new("finder-file-preview-missing");
+        let missing = dir.path().join("missing.txt");
+        let item = FinderItem::new(
+            "missing.txt".to_string(),
+            "missing.txt".to_string(),
+            PreviewSource::File(missing.clone()),
+        );
+
+        match item.preview(preview_context()) {
+            ItemPreview::Text(text) => assert!(
+                text.contains(&missing.display().to_string()),
+                "the path should be named: {text}"
+            ),
+            _ => panic!("a file preview must produce plain text"),
         }
     }
 

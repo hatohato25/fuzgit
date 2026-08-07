@@ -1,11 +1,18 @@
-//! `gix` によるリポジトリ情報の読み取り。
+//! リポジトリ情報の読み取り。
 //!
 //! ブランチ・コミット・タグ・reflog・変更ファイルの一覧を、`gix` の型を
 //! `commands` 層へ漏らさないプレーンな構造体として返す。
+//!
+//! 基本は `gix` で読むが、作業ツリーの状態（`git status`）とツリーのファイル一覧
+//! （`git ls-tree`）は `git` コマンドのキャプチャで取得する。gix の status 実装は
+//! 設定（`status.renames` 等）の解釈まで含めると挙動互換の担保が難しく、
+//! ここでは git 本体の判定をそのまま利用するほうが確実なため。
 
 use gix::bstr::{BStr, ByteSlice as _};
 
 use crate::error::{Error, Result};
+use crate::git::exec::capture_git_in;
+use crate::git::repo::workdir;
 
 /// 候補に含めるブランチの範囲。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,13 +306,215 @@ fn commit_info(commit: &gix::Commit<'_>) -> Result<CommitInfo> {
     })
 }
 
+/// `git status` の実行引数。
+///
+/// - `-z`: パスを NUL 区切り・エスケープなしで出力させる。既定の出力は空白や非 ASCII を含むパスを
+///   ダブルクォートとバックスラッシュでエスケープする（`core.quotepath`）ため、解析側でその復元が
+///   必要になるうえ、パス中の空白と区切りの空白を区別できない。NUL 区切りならどちらの問題も起きない
+/// - `--untracked-files=all`: 未追跡ディレクトリを 1 エントリにまとめず、ファイル単位で列挙させる
+///   （`gz add` でファイル単位に選択・プレビューできるようにするため）
+const STATUS_ARGS: [&str; 4] = ["status", "--porcelain", "-z", "--untracked-files=all"];
+
+/// `git status --porcelain` の 1 エントリのうち、状態コードと区切り空白が占める幅（`XY `）。
+const STATUS_FIELD_WIDTH: usize = 3;
+
+/// 未追跡を表す状態コード（`??`）。
+const UNTRACKED_CODE: char = '?';
+
+/// 変更なしを表す状態コード。
+const UNMODIFIED_CODE: char = ' ';
+
+/// 候補に含める変更ファイルの範囲。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeScope {
+    /// ステージ済みの変更（`gz restore --staged` の対象）。
+    Staged,
+    /// 作業ツリーの変更（`gz restore` の対象）。
+    Worktree,
+    /// 未ステージの変更と未追跡ファイル（`gz add` の対象）。
+    Stageable,
+}
+
+impl ChangeScope {
+    /// 変更がこの範囲に含まれるかどうかを判定する。
+    fn includes(self, change: &FileChange) -> bool {
+        match self {
+            ChangeScope::Staged => change.has_staged_change(),
+            ChangeScope::Worktree => change.has_worktree_change(),
+            ChangeScope::Stageable => change.is_untracked() || change.has_worktree_change(),
+        }
+    }
+}
+
+/// 変更ファイル 1 件分の情報。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChange {
+    /// 作業ツリールートからの相対パス。リネーム・コピーの場合は変更後のパス。
+    pub path: String,
+    /// リネーム・コピー元のパス（`R` / `C` のエントリのみ）。
+    pub original_path: Option<String>,
+    /// index 側の状態コード（`git status --porcelain` の 1 文字目。未追跡は `?`）。
+    pub index_status: char,
+    /// 作業ツリー側の状態コード（2 文字目。未追跡は `?`）。
+    pub worktree_status: char,
+}
+
+impl FileChange {
+    /// 未追跡ファイル（`??`）かどうか。
+    #[must_use]
+    pub fn is_untracked(&self) -> bool {
+        self.index_status == UNTRACKED_CODE
+    }
+
+    /// HEAD と index の間に差分がある（ステージ済みの変更を持つ）かどうか。
+    #[must_use]
+    pub fn has_staged_change(&self) -> bool {
+        !self.is_untracked() && self.index_status != UNMODIFIED_CODE
+    }
+
+    /// index と作業ツリーの間に差分がある（未ステージの変更を持つ）かどうか。
+    #[must_use]
+    pub fn has_worktree_change(&self) -> bool {
+        !self.is_untracked() && self.worktree_status != UNMODIFIED_CODE
+    }
+
+    /// `git status --porcelain` と同じ 2 文字の状態コード（`MM` / ` M` / `??` など）。
+    #[must_use]
+    pub fn status_code(&self) -> String {
+        [self.index_status, self.worktree_status].iter().collect()
+    }
+}
+
+/// リビジョンが指すツリーのファイル一覧。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionFiles {
+    /// 解決済みのフルハッシュ。
+    ///
+    /// `git` へ渡す際は指定された文字列ではなくこちらを使う。ユーザー入力が
+    /// オプションとして解釈される余地を排除し、存在しないリビジョンを早期に弾くため。
+    pub id: String,
+    /// 作業ツリールートからの相対パス（git が返す辞書順）。
+    pub paths: Vec<String>,
+}
+
+/// NUL 区切りの出力をレコード列へ分割する。
+///
+/// 末尾の区切り文字が生む空レコードは取り除く。git が返すパスは空文字になり得ないため、
+/// 空レコードを捨てても情報は失われない。
+fn nul_records(output: &[u8]) -> impl Iterator<Item = &[u8]> {
+    output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+}
+
+/// `git status --porcelain -z` の出力をパースする。
+///
+/// 1 エントリは `XY <path>` で、リネーム・コピー（`R` / `C`）の場合のみ変更元のパスが
+/// 次のレコードとして続く（`-z` では `<変更後>` `<変更元>` の順になる）。
+///
+/// # Errors
+///
+/// エントリの形式が想定と異なる場合、変更元のレコードが欠けている場合、
+/// パスが UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+fn parse_status(output: &[u8]) -> Result<Vec<FileChange>> {
+    let mut records = nul_records(output);
+    let mut changes = Vec::new();
+
+    while let Some(record) = records.next() {
+        if record.len() <= STATUS_FIELD_WIDTH || record[2] != b' ' {
+            return Err(read_error(
+                "git status 出力の解釈",
+                format!(
+                    "エントリの形式が想定と異なります: {:?}",
+                    record.as_bstr().to_str_lossy()
+                ),
+            ));
+        }
+
+        let index_status = char::from(record[0]);
+        let worktree_status = char::from(record[1]);
+        let path = to_utf8(record[STATUS_FIELD_WIDTH..].as_bstr(), "パスの解釈")?;
+
+        let original_path = if is_rename_or_copy(index_status) || is_rename_or_copy(worktree_status)
+        {
+            let original = records.next().ok_or_else(|| {
+                read_error(
+                    "git status 出力の解釈",
+                    format!("`{path}` のリネーム元のパスが見つかりません"),
+                )
+            })?;
+            Some(to_utf8(original.as_bstr(), "リネーム元のパスの解釈")?)
+        } else {
+            None
+        };
+
+        changes.push(FileChange {
+            path,
+            original_path,
+            index_status,
+            worktree_status,
+        });
+    }
+
+    Ok(changes)
+}
+
+/// 状態コードがリネーム（`R`）・コピー（`C`）かどうか。
+fn is_rename_or_copy(status: char) -> bool {
+    status == 'R' || status == 'C'
+}
+
+/// 作業ツリーの変更ファイルを `scope` で絞り込んで取得する。
+///
+/// # Errors
+///
+/// - 作業ツリーを持たない bare リポジトリの場合は [`Error::NoWorktree`]
+/// - `git status` の実行に失敗した場合は [`Error::GitCommandFailed`] 等
+/// - 出力のパースに失敗した場合は [`Error::RepositoryReadFailed`]
+pub fn changes(repository: &gix::Repository, scope: ChangeScope) -> Result<Vec<FileChange>> {
+    let output = capture_git_in(workdir(repository)?, &STATUS_ARGS)?;
+
+    Ok(parse_status(&output)?
+        .into_iter()
+        .filter(|change| scope.includes(change))
+        .collect())
+}
+
+/// `revision` が指すツリーに含まれるファイルの一覧を取得する。
+///
+/// # Errors
+///
+/// - リビジョンを解決できない場合は [`Error::RepositoryReadFailed`]
+/// - 作業ツリーを持たない bare リポジトリの場合は [`Error::NoWorktree`]
+/// - `git ls-tree` の実行・出力のパースに失敗した場合はそれぞれのエラー
+pub fn revision_files(repository: &gix::Repository, revision: &str) -> Result<RevisionFiles> {
+    let id = repository
+        .rev_parse_single(revision)
+        .map_err(|source| read_error(&format!("リビジョン `{revision}` の解決"), source))?
+        .to_string();
+
+    // `--full-tree` を付けないと ls-tree はカレントディレクトリ基準のパスを返すため、
+    // `git status` と同じく作業ツリールート基準へ揃える
+    let output = capture_git_in(
+        workdir(repository)?,
+        &["ls-tree", "-r", "--name-only", "-z", "--full-tree", &id],
+    )?;
+
+    let mut paths = Vec::new();
+    for record in nul_records(&output) {
+        paths.push(to_utf8(record.as_bstr(), "パスの解釈")?);
+    }
+
+    Ok(RevisionFiles { id, paths })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::git::repo::discover;
     use crate::test_support::{
         COMMIT_DATE_SHORT, TempDir, commit, commit_at, create_branch, create_remote_branch,
-        create_remote_symbolic_ref, git_in, init_repository,
+        create_remote_symbolic_ref, git_in, init_repository, write_file,
     };
 
     /// `main` に 1 コミットだけ持つテストリポジトリを用意する。
@@ -595,6 +804,404 @@ mod tests {
                     "the branch should be named: {operation}"
                 );
             }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// `git status --porcelain -z` の出力を組み立てる（各レコードの末尾に NUL を置く）。
+    fn status_output(records: &[&str]) -> Vec<u8> {
+        let mut output = Vec::new();
+        for record in records {
+            output.extend_from_slice(record.as_bytes());
+            output.push(0);
+        }
+        output
+    }
+
+    fn change(path: &str, code: &str) -> FileChange {
+        let mut codes = code.chars();
+        FileChange {
+            path: path.to_owned(),
+            original_path: None,
+            index_status: codes.next().expect("a status code has two characters"),
+            worktree_status: codes.next().expect("a status code has two characters"),
+        }
+    }
+
+    fn paths(changes: &[FileChange]) -> Vec<&str> {
+        changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>()
+    }
+
+    #[test]
+    fn an_empty_status_yields_no_changes() {
+        let changes = parse_status(&[]).expect("empty output should parse");
+
+        assert!(changes.is_empty(), "unexpected changes: {changes:?}");
+    }
+
+    #[test]
+    fn staged_unstaged_and_untracked_entries_are_distinguished() {
+        let output = status_output(&["M  staged.txt", " M unstaged.txt", "?? new.txt"]);
+
+        let changes = parse_status(&output).expect("status output should parse");
+
+        assert_eq!(paths(&changes), ["staged.txt", "unstaged.txt", "new.txt"]);
+        assert_eq!(
+            changes
+                .iter()
+                .map(FileChange::status_code)
+                .collect::<Vec<_>>(),
+            ["M ", " M", "??"]
+        );
+        assert_eq!(
+            changes
+                .iter()
+                .map(FileChange::has_staged_change)
+                .collect::<Vec<_>>(),
+            [true, false, false]
+        );
+        assert_eq!(
+            changes
+                .iter()
+                .map(FileChange::has_worktree_change)
+                .collect::<Vec<_>>(),
+            [false, true, false]
+        );
+        assert_eq!(
+            changes
+                .iter()
+                .map(FileChange::is_untracked)
+                .collect::<Vec<_>>(),
+            [false, false, true]
+        );
+    }
+
+    #[test]
+    fn an_entry_can_be_staged_and_unstaged_at_the_same_time() {
+        let output = status_output(&["MM both.txt"]);
+
+        let changes = parse_status(&output).expect("status output should parse");
+
+        let change = changes.first().expect("one entry should be parsed");
+        assert!(change.has_staged_change());
+        assert!(change.has_worktree_change());
+        assert!(!change.is_untracked());
+    }
+
+    #[test]
+    fn a_path_containing_spaces_is_kept_verbatim() {
+        let output = status_output(&[" M dir/with space.txt", "?? another one.txt"]);
+
+        let changes = parse_status(&output).expect("status output should parse");
+
+        assert_eq!(
+            paths(&changes),
+            ["dir/with space.txt", "another one.txt"],
+            "NUL separated records must not be split on spaces"
+        );
+    }
+
+    #[test]
+    fn a_path_starting_with_a_dash_is_kept_verbatim() {
+        let output = status_output(&["?? --looks-like-an-option"]);
+
+        let changes = parse_status(&output).expect("status output should parse");
+
+        assert_eq!(paths(&changes), ["--looks-like-an-option"]);
+    }
+
+    #[test]
+    fn a_rename_keeps_both_the_new_and_the_original_path() {
+        // `-z` では変更後のパスが先、変更元が次のレコードになる
+        let output = status_output(&["R  new.txt", "old.txt", "?? other.txt"]);
+
+        let changes = parse_status(&output).expect("status output should parse");
+
+        assert_eq!(paths(&changes), ["new.txt", "other.txt"]);
+        let rename = changes.first().expect("the rename should be parsed");
+        assert_eq!(rename.original_path.as_deref(), Some("old.txt"));
+        assert_eq!(rename.status_code(), "R ");
+    }
+
+    #[test]
+    fn a_rename_with_a_worktree_change_is_reported_once() {
+        let output = status_output(&["RM new name.txt", "old name.txt"]);
+
+        let changes = parse_status(&output).expect("status output should parse");
+
+        assert_eq!(changes.len(), 1);
+        let rename = changes.first().expect("the rename should be parsed");
+        assert_eq!(rename.path, "new name.txt");
+        assert_eq!(rename.original_path.as_deref(), Some("old name.txt"));
+        assert!(rename.has_staged_change());
+        assert!(rename.has_worktree_change());
+    }
+
+    #[test]
+    fn a_copy_also_carries_the_original_path() {
+        let output = status_output(&["C  copy.txt", "source.txt"]);
+
+        let changes = parse_status(&output).expect("status output should parse");
+
+        let copy = changes.first().expect("the copy should be parsed");
+        assert_eq!(copy.original_path.as_deref(), Some("source.txt"));
+    }
+
+    #[test]
+    fn a_rename_detected_in_the_work_tree_also_carries_the_original_path() {
+        let output = status_output(&[" R new.txt", "old.txt"]);
+
+        let changes = parse_status(&output).expect("status output should parse");
+
+        let rename = changes.first().expect("the rename should be parsed");
+        assert_eq!(rename.original_path.as_deref(), Some("old.txt"));
+        assert!(rename.has_worktree_change());
+        assert!(!rename.has_staged_change());
+    }
+
+    #[test]
+    fn an_unmerged_entry_is_reported_for_both_sides() {
+        let output = status_output(&["UU conflict.txt"]);
+
+        let changes = parse_status(&output).expect("status output should parse");
+
+        let conflict = changes.first().expect("the conflict should be parsed");
+        assert!(conflict.has_staged_change());
+        assert!(conflict.has_worktree_change());
+        assert!(!conflict.is_untracked());
+    }
+
+    #[test]
+    fn a_deletion_is_reported_on_the_side_it_happened() {
+        let output = status_output(&["D  staged-delete.txt", " D worktree-delete.txt"]);
+
+        let changes = parse_status(&output).expect("status output should parse");
+
+        assert!(changes[0].has_staged_change());
+        assert!(!changes[0].has_worktree_change());
+        assert!(changes[1].has_worktree_change());
+        assert!(!changes[1].has_staged_change());
+    }
+
+    #[test]
+    fn a_malformed_entry_is_rejected_instead_of_being_skipped() {
+        for record in ["M", "M  ", "M-path.txt"] {
+            let output = status_output(&[record]);
+
+            let err =
+                parse_status(&output).expect_err("a malformed entry must not be silently ignored");
+
+            assert!(
+                matches!(err, Error::RepositoryReadFailed { .. }),
+                "unexpected error for {record:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rename_without_its_original_path_is_rejected() {
+        let output = status_output(&["R  new.txt"]);
+
+        let err = parse_status(&output).expect_err("a truncated rename entry must not be accepted");
+
+        match err {
+            Error::RepositoryReadFailed { operation, source } => {
+                assert_eq!(operation, "git status 出力の解釈");
+                assert!(
+                    source.to_string().contains("new.txt"),
+                    "the affected path should be named: {source}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_utf8_path_is_rejected_instead_of_being_converted_lossily() {
+        let mut output = b"?? invalid-".to_vec();
+        output.push(0xff);
+        output.push(0);
+
+        let err = parse_status(&output).expect_err("a non utf-8 path must not be accepted");
+
+        assert!(
+            matches!(err, Error::RepositoryReadFailed { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_scope_selects_the_matching_side_of_a_change() {
+        let staged = change("a.txt", "M ");
+        let unstaged = change("b.txt", " M");
+        let both = change("c.txt", "MM");
+        let untracked = change("d.txt", "??");
+
+        for (scope, expected) in [
+            (ChangeScope::Staged, [true, false, true, false]),
+            (ChangeScope::Worktree, [false, true, true, false]),
+            (ChangeScope::Stageable, [false, true, true, true]),
+        ] {
+            let actual =
+                [&staged, &unstaged, &both, &untracked].map(|change| scope.includes(change));
+            assert_eq!(actual, expected, "unexpected selection for {scope:?}");
+        }
+    }
+
+    /// 各種の変更を持つテストリポジトリを用意する。
+    ///
+    /// ```text
+    /// staged.txt        M    ステージ済みの変更のみ
+    /// unstaged.txt       M   未ステージの変更のみ
+    /// both.txt          MM   両方
+    /// dir/new file.txt  ??   未追跡（空白入りのパス）
+    /// renamed.txt       R    ステージ済みのリネーム（元: history.txt）
+    /// ```
+    fn repository_with_changes(label: &str) -> (TempDir, gix::Repository) {
+        let dir = TempDir::new(label);
+        init_repository(dir.path());
+        for name in ["staged.txt", "unstaged.txt", "both.txt"] {
+            write_file(dir.path(), name, "original\n");
+        }
+        git_in(dir.path(), &["add", "--all"]);
+        commit(dir.path(), "first commit");
+
+        write_file(dir.path(), "staged.txt", "staged\n");
+        write_file(dir.path(), "both.txt", "staged\n");
+        git_in(dir.path(), &["add", "--", "staged.txt", "both.txt"]);
+        write_file(dir.path(), "unstaged.txt", "unstaged\n");
+        write_file(dir.path(), "both.txt", "unstaged\n");
+        write_file(dir.path(), "dir/new file.txt", "untracked\n");
+        git_in(dir.path(), &["mv", "history.txt", "renamed.txt"]);
+
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+        (dir, repository)
+    }
+
+    #[test]
+    fn the_staged_scope_lists_the_index_side_of_the_changes() {
+        let (_dir, repository) = repository_with_changes("read-status-staged");
+
+        let changes = changes(&repository, ChangeScope::Staged).expect("status should be read");
+
+        assert_eq!(paths(&changes), ["both.txt", "renamed.txt", "staged.txt"]);
+    }
+
+    #[test]
+    fn the_worktree_scope_lists_the_unstaged_changes_only() {
+        let (_dir, repository) = repository_with_changes("read-status-worktree");
+
+        let changes = changes(&repository, ChangeScope::Worktree).expect("status should be read");
+
+        assert_eq!(paths(&changes), ["both.txt", "unstaged.txt"]);
+    }
+
+    #[test]
+    fn the_stageable_scope_lists_unstaged_changes_together_with_untracked_files() {
+        let (_dir, repository) = repository_with_changes("read-status-stageable");
+
+        let changes = changes(&repository, ChangeScope::Stageable).expect("status should be read");
+
+        assert_eq!(
+            paths(&changes),
+            ["both.txt", "unstaged.txt", "dir/new file.txt"],
+            "untracked files with spaces should be listed individually"
+        );
+        let untracked = changes.last().expect("the untracked file should be listed");
+        assert!(untracked.is_untracked());
+    }
+
+    #[test]
+    fn a_staged_rename_reports_both_of_its_paths() {
+        let (_dir, repository) = repository_with_changes("read-status-rename");
+
+        let changes = changes(&repository, ChangeScope::Staged).expect("status should be read");
+
+        let rename = changes
+            .iter()
+            .find(|change| change.path == "renamed.txt")
+            .expect("the rename should be listed");
+        assert_eq!(rename.original_path.as_deref(), Some("history.txt"));
+        assert_eq!(rename.index_status, 'R');
+    }
+
+    #[test]
+    fn an_unmodified_repository_has_no_changes() {
+        let (_dir, repository, _head) = repository_with_one_commit("read-status-clean");
+
+        for scope in [
+            ChangeScope::Staged,
+            ChangeScope::Worktree,
+            ChangeScope::Stageable,
+        ] {
+            let changes = changes(&repository, scope).expect("status should be read");
+            assert!(changes.is_empty(), "unexpected changes for {scope:?}");
+        }
+    }
+
+    #[test]
+    fn a_bare_repository_has_no_work_tree_to_inspect() {
+        let dir = TempDir::new("read-status-bare");
+        crate::test_support::init_bare_repository(dir.path());
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let err = changes(&repository, ChangeScope::Worktree)
+            .expect_err("a bare repository has no work tree");
+
+        assert!(
+            matches!(err, Error::NoWorktree),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn revision_files_lists_the_files_of_that_revision_with_its_resolved_id() {
+        let (dir, repository) = repository_with_changes("read-revision-files");
+        let head = git_in(dir.path(), &["rev-parse", "HEAD"]);
+
+        let files = revision_files(&repository, "HEAD").expect("HEAD should be listed");
+
+        assert_eq!(files.id, head, "the revision should be resolved to its id");
+        assert_eq!(
+            files.paths,
+            ["both.txt", "history.txt", "staged.txt", "unstaged.txt"],
+            "the listing must reflect the commit, not the work tree"
+        );
+    }
+
+    #[test]
+    fn revision_files_lists_nested_paths_from_the_repository_root() {
+        let dir = TempDir::new("read-revision-files-nested");
+        init_repository(dir.path());
+        write_file(dir.path(), "dir/with space.txt", "content\n");
+        git_in(dir.path(), &["add", "--all"]);
+        commit(dir.path(), "first commit");
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let files = revision_files(&repository, "HEAD").expect("HEAD should be listed");
+
+        assert!(
+            files.paths.contains(&"dir/with space.txt".to_owned()),
+            "unexpected listing: {:?}",
+            files.paths
+        );
+    }
+
+    #[test]
+    fn an_unknown_revision_is_reported_with_its_name() {
+        let (_dir, repository, _head) = repository_with_one_commit("read-revision-unknown");
+
+        let err = revision_files(&repository, "no-such-revision")
+            .expect_err("an unknown revision must not be silently ignored");
+
+        match err {
+            Error::RepositoryReadFailed { operation, .. } => assert!(
+                operation.contains("no-such-revision"),
+                "the revision should be named: {operation}"
+            ),
             other => panic!("unexpected error: {other:?}"),
         }
     }

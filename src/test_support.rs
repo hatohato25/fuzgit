@@ -125,6 +125,25 @@ pub fn commit_at(path: &Path, message: &str, date: &str) -> String {
     git_in_at(path, &["rev-parse", "HEAD"], date)
 }
 
+/// 指定ディレクトリに bare リポジトリ（作業ツリーを持たないリポジトリ）を作成する。
+pub fn init_bare_repository(path: &Path) {
+    git_in(
+        path,
+        &["init", "--quiet", "--bare", "--initial-branch=main"],
+    );
+}
+
+/// テストリポジトリ内にファイルを作成・上書きする。
+///
+/// `relative` にはディレクトリ区切りを含めてよく、親ディレクトリは自動的に作成する。
+pub fn write_file(path: &Path, relative: &str, contents: &str) {
+    let file = path.join(relative);
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).expect("failed to create parent directory");
+    }
+    std::fs::write(file, contents).expect("failed to write file");
+}
+
 /// 現在の HEAD からローカルブランチを作成する（切り替えは行わない）。
 pub fn create_branch(path: &Path, name: &str) {
     git_in(path, &["branch", name]);

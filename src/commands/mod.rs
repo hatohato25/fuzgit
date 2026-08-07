@@ -6,12 +6,16 @@
 use anyhow::{Result, bail};
 
 use crate::cli::Command;
+use crate::commands::restore::RestoreTarget;
 use crate::git::read::{BranchScope, CommitScope};
 use crate::git::repo;
 
+pub mod add;
 pub mod branch;
 pub mod cherry_pick;
+pub mod file_selection;
 pub mod log;
+pub mod restore;
 
 /// サブコマンドを対応する実装へ振り分ける。
 ///
@@ -40,8 +44,15 @@ pub fn dispatch(command: &Command) -> Result<()> {
             };
             cherry_pick::run(&repository, scope)
         }
-        Command::Restore { .. } => bail!("`gz restore` は未実装です"),
-        Command::Add => bail!("`gz add` は未実装です"),
+        Command::Restore { source, staged } => {
+            let target = if *staged {
+                RestoreTarget::Index
+            } else {
+                RestoreTarget::Worktree
+            };
+            restore::run(&repository, target, source.as_deref())
+        }
+        Command::Add => add::run(&repository),
         Command::Stash { .. } => bail!("`gz stash` は未実装です"),
         Command::Tag { .. } => bail!("`gz tag` は未実装です"),
         Command::Reflog { .. } => bail!("`gz reflog` は未実装です"),

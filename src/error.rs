@@ -68,6 +68,10 @@ pub enum Error {
         branch: String,
     },
 
+    /// 作業ツリーを持たない（bare）リポジトリで、作業ツリーを前提とする操作を行おうとした。
+    #[error("作業ツリーがありません。bare リポジトリでは実行できない操作です")]
+    NoWorktree,
+
     /// ユーザーが fuzzy finder を中断した（Esc / Ctrl-C）。
     #[error("選択が中断されました")]
     Cancelled,

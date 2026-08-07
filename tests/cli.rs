@@ -262,6 +262,54 @@ fn an_unborn_head_is_reported_with_its_cause_and_next_step() {
     }
 }
 
+/// 変更が 1 件も無い場合、`gz restore` / `gz add` は TUI を起動せずに終了することを確認する。
+#[test]
+fn restore_and_add_report_when_there_is_nothing_to_select() {
+    let dir = empty_repository("nothing-to-select");
+
+    for arguments in [vec!["restore"], vec!["restore", "--staged"], vec!["add"]] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should exit non-zero when there is nothing to select"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("選択できる候補がありません"),
+            "unexpected stderr for gz {arguments:?}:\n{stderr}"
+        );
+    }
+}
+
+/// `gz restore --source` に解決できないリビジョンを渡した場合、その名前を含むエラーになることを確認する。
+#[test]
+fn restore_reports_an_unknown_source_revision_by_name() {
+    let dir = empty_repository("restore-unknown-source");
+
+    let output = gz()
+        .args(["restore", "--source", "no-such-revision"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz restore --source no-such-revision");
+
+    assert!(
+        !output.status.success(),
+        "an unknown revision should exit non-zero"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("no-such-revision"),
+        "the unknown revision should be named:\n{stderr}"
+    );
+}
+
 /// `gz cherry-pick --branch` に存在しないブランチを渡した場合、その名前を含むエラーになることを確認する。
 #[test]
 fn cherry_pick_reports_an_unknown_branch_by_name() {
