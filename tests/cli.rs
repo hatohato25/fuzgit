@@ -42,6 +42,12 @@ const UNBORN_HEAD_NEXT_STEP: &str = "git commit";
 /// デバッグログ（`FUZGIT_DEBUG=1`）の行頭に付く接頭辞（`fuzgit::git::exec` と対応）。
 const DEBUG_PREFIX: &str = "[fuzgit]";
 
+/// TUI を起動しないはずの実行に設ける待ち時間の上限。
+///
+/// 候補があるリポジトリで実行するテストは、事前チェックが失われると skim が端末を掴んで
+/// 応答を待ち続ける。テストスイート全体が止まらないよう、明らかに超過した時点で打ち切る。
+const FINDER_GUARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// テストごとに一意な一時ディレクトリ。Drop で再帰削除する。
@@ -86,6 +92,41 @@ fn empty_repository(label: &str) -> TempDir {
         .status()
         .expect("failed to run git init");
     assert!(status.success(), "git init failed in {:?}", dir.path());
+    dir
+}
+
+/// 指定ディレクトリで `git` を実行する（失敗はテストの前提が崩れたことを意味するため panic させる）。
+fn git_in(directory: &Path, arguments: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(arguments)
+        .current_dir(directory)
+        .status()
+        .unwrap_or_else(|err| panic!("failed to run git {arguments:?}: {err}"));
+    assert!(
+        status.success(),
+        "git {arguments:?} failed in {directory:?}"
+    );
+}
+
+/// コミットを 1 件持ち、ステージしていない変更が 1 件ある git リポジトリを用意する。
+fn repository_with_an_unstaged_change(label: &str) -> TempDir {
+    let dir = empty_repository(label);
+    std::fs::write(dir.path().join("a.txt"), "first\n").expect("failed to write a file");
+    git_in(dir.path(), &["add", "--", "a.txt"]);
+    git_in(
+        dir.path(),
+        &[
+            "-c",
+            "user.name=fuzgit test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "--message",
+            "first commit",
+        ],
+    );
+    std::fs::write(dir.path().join("a.txt"), "modified\n").expect("failed to write a file");
     dir
 }
 
@@ -616,6 +657,45 @@ fn other_values_of_the_debug_variable_stay_quiet() {
         assert!(
             !stderr.contains(DEBUG_PREFIX),
             "FUZGIT_DEBUG={value:?} must not enable the debug log:\n{stderr}"
+        );
+    }
+}
+
+/// ステージ済みの変更が無い場合、`gz fixup` は候補を選ばせる前に終了することを確認する。
+///
+/// 選択を終えてから git に失敗させるのは無駄な操作を強いるため、事前チェックで止める
+/// （requirements.md FR-11）。コミットがある状態で確認するのは、コミット履歴の候補が
+/// 空でないにもかかわらず TUI を起動しないことを検証するため。
+#[test]
+fn fixup_requires_staged_changes_before_offering_the_commits() {
+    let dir = repository_with_an_unstaged_change("fixup-nothing-staged");
+
+    for arguments in [vec!["fixup"], vec!["fixup", "--squash"]] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            // 事前チェックが失われた場合に TUI で待ち続けないよう、上限を設けて打ち切る
+            .timeout(FINDER_GUARD_TIMEOUT)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should exit non-zero without staged changes"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("ステージ済みの変更がありません"),
+            "the cause should be explained for gz {arguments:?}:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("gz add"),
+            "the next step should be suggested for gz {arguments:?}:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "nothing should be written to stdout for gz {arguments:?}"
         );
     }
 }

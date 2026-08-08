@@ -193,6 +193,22 @@ pub fn branches(repository: &gix::Repository, scope: BranchScope) -> Result<Vec<
     Ok(locals)
 }
 
+/// 現在のブランチを除いたブランチ一覧（ローカル・リモート追跡）を取得する。
+///
+/// `gz merge` の merge 対象、`gz rebase` の base の候補に用いる。自分自身への merge /
+/// rebase は「取り込むコミットが 1 件も無い」操作であり、選んでも意味を持たないため候補から外す。
+/// detached HEAD では現在のブランチが無いため、すべてのブランチが候補になる。
+///
+/// # Errors
+///
+/// [`branches`] と同じ（unborn HEAD の場合は [`Error::UnbornHead`]）。
+pub fn other_branches(repository: &gix::Repository) -> Result<Vec<BranchInfo>> {
+    Ok(branches(repository, BranchScope::All)?
+        .into_iter()
+        .filter(|branch| !branch.is_current)
+        .collect())
+}
+
 /// リモートの名前一覧を名前順で取得する。
 ///
 /// `gz push` の候補（リモート × 現在ブランチ）を組み立てるために用いる。
@@ -330,6 +346,47 @@ pub fn ahead_behind(
     )?;
 
     parse_ahead_behind(&output).map(Some)
+}
+
+/// `git rev-list --count` の出力をパースする。
+///
+/// 出力は件数だけの 1 行（末尾の改行は無い場合もある）。
+///
+/// # Errors
+///
+/// 数値として解釈できない場合、UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+fn parse_commit_count(output: &[u8]) -> Result<usize> {
+    let malformed = || {
+        read_error(
+            "git rev-list 出力の解釈",
+            format!(
+                "コミット数の形式が想定と異なります: {:?}",
+                output.as_bstr().to_str_lossy()
+            ),
+        )
+    };
+
+    output
+        .to_str()
+        .map_err(|_| malformed())?
+        .trim_end_matches(['\n', '\r'])
+        .parse::<usize>()
+        .map_err(|_| malformed())
+}
+
+/// `range`（`<from>..<to>` 形式）に含まれるコミット数を数える。
+///
+/// `gz merge` で取り込まれるコミット数、`gz rebase` で replay されるコミット数を
+/// 確認プロンプトに提示するために用いる。
+///
+/// # Errors
+///
+/// `git` の実行に失敗した場合、または出力をパースできない場合にエラーを返す。
+pub fn commit_count(workdir: &Path, range: &str) -> Result<usize> {
+    // 末尾の `--` はリビジョンとパスの境界。同名のファイルがあってもパスとして解釈させない
+    let output = capture_git_in(workdir, &["rev-list", "--count", range, "--"])?;
+
+    parse_commit_count(&output)
 }
 
 /// push 先の候補 1 件分の情報（リモート × 現在のブランチ）。
@@ -2296,6 +2353,86 @@ mod tests {
             &[0xff, b'\t', b'1'],
         ] {
             let err = parse_ahead_behind(output)
+                .expect_err("a malformed output must not be silently accepted");
+
+            assert!(
+                matches!(err, Error::RepositoryReadFailed { .. }),
+                "unexpected error for {output:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_current_branch_is_not_offered_as_a_merge_or_rebase_target() {
+        let (dir, repository, head) = repository_with_one_commit("read-other-branches");
+        create_branch(dir.path(), "feature");
+        create_remote_branch(dir.path(), "origin/main", &head);
+
+        let candidates = other_branches(&repository).expect("branches should be listed");
+
+        assert_eq!(
+            names(&candidates),
+            ["feature", "origin/main"],
+            "only the current branch is removed from the `--all` listing"
+        );
+    }
+
+    #[test]
+    fn a_detached_head_keeps_every_branch_as_a_target() {
+        let (dir, _repository, head) = repository_with_one_commit("read-other-branches-detached");
+        create_branch(dir.path(), "feature");
+        git_in(dir.path(), &["switch", "--quiet", "--detach", &head]);
+        let repository = discover(dir.path()).expect("repository should open");
+
+        let candidates = other_branches(&repository).expect("branches should be listed");
+
+        // detached HEAD ではどのブランチも「現在のブランチ」ではないため除外されない
+        assert_eq!(names(&candidates), ["feature", "main"]);
+    }
+
+    #[test]
+    fn the_commits_of_a_range_are_counted() {
+        let (dir, _repository, _head) = repository_with_one_commit("read-commit-count");
+        create_branch(dir.path(), "feature");
+        git_in(dir.path(), &["switch", "--quiet", "feature"]);
+        commit(dir.path(), "feature 1");
+        commit(dir.path(), "feature 2");
+        git_in(dir.path(), &["switch", "--quiet", "main"]);
+
+        assert_eq!(
+            commit_count(dir.path(), "HEAD..feature").expect("the range should be counted"),
+            2,
+            "the commits that would be merged are counted"
+        );
+        assert_eq!(
+            commit_count(dir.path(), "feature..HEAD").expect("the range should be counted"),
+            0,
+            "the current branch has nothing the other branch lacks"
+        );
+    }
+
+    #[test]
+    fn a_commit_count_is_a_single_number() {
+        assert_eq!(
+            parse_commit_count(b"3\n").expect("the output should parse"),
+            3
+        );
+        assert_eq!(
+            parse_commit_count(b"0").expect("the output should parse"),
+            0
+        );
+    }
+
+    #[test]
+    fn a_malformed_commit_count_is_rejected() {
+        for output in [
+            &b""[..],
+            &b"-1\n"[..],
+            &b"3 4\n"[..],
+            &b"many\n"[..],
+            &[0xff],
+        ] {
+            let err = parse_commit_count(output)
                 .expect_err("a malformed output must not be silently accepted");
 
             assert!(

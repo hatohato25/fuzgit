@@ -3,9 +3,11 @@
 //! 各コマンドは「`git::read` で候補取得 → `finder` で選択 → `git::exec` で実行」の
 //! 直列オーケストレーションのみを担う。
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use crate::cli::{Command, StashCommand};
+use crate::commands::fixup::FixupKind;
+use crate::commands::merge::MergeMode;
 use crate::commands::push::UpstreamUpdate;
 use crate::commands::restore::RestoreTarget;
 use crate::commands::stash::{StashAction, UntrackedFiles};
@@ -19,12 +21,25 @@ pub mod cherry_pick;
 pub mod commit;
 pub mod confirmation;
 pub mod file_selection;
+pub mod fixup;
+pub mod in_progress;
 pub mod log;
+pub mod merge;
 pub mod push;
+pub mod rebase;
 pub mod reflog;
 pub mod restore;
 pub mod stash;
 pub mod tag;
+
+/// これから実行する git コマンドを表示用の 1 行に整形する。
+///
+/// 確認プロンプトや復帰メニューで「何が実行されるのか」を示すために用いる。
+/// 表示専用であり、この文字列をコマンドとして実行することはない（実行は常に引数配列渡し）。
+/// 実行する引数配列そのものから組み立てるため、説明と実際の操作が食い違わない。
+pub(crate) fn command_display(args: &[&str]) -> String {
+    format!("git {args}", args = args.join(" "))
+}
 
 /// サブコマンドを対応する実装へ振り分ける。
 ///
@@ -91,17 +106,22 @@ pub fn dispatch(command: &Command) -> Result<()> {
             };
             push::run(&repository, upstream)
         }
-        // FR-11〜FR-13 の 3 コマンドは後続フェーズで実装へ差し替える
-        Command::Fixup { .. } => unimplemented_command("gz fixup"),
-        Command::Merge { .. } => unimplemented_command("gz merge"),
-        Command::Rebase => unimplemented_command("gz rebase"),
+        Command::Fixup { squash } => {
+            let kind = if *squash {
+                FixupKind::Squash
+            } else {
+                FixupKind::Fixup
+            };
+            fixup::run(&repository, kind)
+        }
+        Command::Merge {
+            no_ff,
+            squash,
+            ff_only,
+        } => merge::run(
+            &repository,
+            MergeMode::from_flags(*no_ff, *squash, *ff_only)?,
+        ),
+        Command::Rebase => rebase::run(&repository),
     }
-}
-
-/// 未実装のサブコマンドであることを伝えて失敗する。
-///
-/// 何もせずに成功終了すると「実行したのに何も起きない」ことになるため、
-/// 明示的に非ゼロ終了させる。
-fn unimplemented_command(name: &str) -> Result<()> {
-    bail!("`{name}` は未実装です");
 }
