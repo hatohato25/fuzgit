@@ -1,11 +1,9 @@
 //! `gz restore` — ファイルを選択して復元・アンステージする（FR-4）。
 
-use std::io::Write as _;
-
 use anyhow::{Context as _, Result};
 
+use crate::commands::confirmation::confirm;
 use crate::commands::file_selection::{FileCandidate, RenameOrigin, resolve, target_paths};
-use crate::error::Error;
 use crate::finder::{FinderItem, PreviewSource, select_many};
 use crate::git::exec::{pathspec, run_git};
 use crate::git::read::{ChangeScope, RevisionFiles, changes, revision_files};
@@ -75,7 +73,11 @@ pub fn run(
 
     if target == RestoreTarget::Worktree {
         // 確認プロンプトにはユーザーが指定した文字列をそのまま示す（解決済みハッシュより読み取りやすい）
-        confirm(&selected, source)?;
+        let targets: Vec<&str> = selected
+            .iter()
+            .map(|candidate| candidate.key.as_str())
+            .collect();
+        confirm(&confirmation_header(targets.len(), source), &targets)?;
     }
 
     let paths = target_paths(&selected);
@@ -159,54 +161,6 @@ fn confirmation_header(count: usize, revision: Option<&str>) -> String {
         ),
         None => format!("以下 {count} 件のファイルの変更を破棄します（元に戻せません）:"),
     }
-}
-
-/// 確認応答が承認かどうかを判定する。
-///
-/// 既定は否認（`[y/N]`）とし、`y` / `yes`（大文字小文字を問わない）のみを承認とみなす。
-fn is_affirmative(answer: &str) -> bool {
-    let answer = answer.trim();
-    answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
-}
-
-/// 標準入力から確認応答を 1 行読む。
-///
-/// EOF（パイプ入力など）の場合は空文字列になり、[`is_affirmative`] で否認と判定される。
-/// 応答を得られない状況で破壊的操作を続行しないための挙動。
-fn read_answer() -> Result<String> {
-    let mut answer = String::new();
-    std::io::stdin()
-        .read_line(&mut answer)
-        .context("確認入力の読み取りに失敗しました")?;
-    Ok(answer)
-}
-
-/// 作業ツリーの書き換えは取り消せないため、対象を列挙して明示的な同意を求める。
-///
-/// # Errors
-///
-/// 承認が得られなかった場合は [`Error::Cancelled`]（git 操作は行われない）、
-/// 端末への出力・入力の読み取りに失敗した場合はそのエラーを返す。
-fn confirm(selected: &[&FileCandidate], revision: Option<&str>) -> Result<()> {
-    // 標準出力はパイプ利用のために空けておき、対話用の出力は標準エラーへ出す
-    let mut stderr = std::io::stderr();
-    writeln!(stderr, "{}", confirmation_header(selected.len(), revision))
-        .context("確認メッセージの出力に失敗しました")?;
-    for candidate in selected {
-        writeln!(stderr, "  {key}", key = candidate.key)
-            .context("確認メッセージの出力に失敗しました")?;
-    }
-    write!(stderr, "実行しますか? [y/N]: ").context("確認メッセージの出力に失敗しました")?;
-    stderr
-        .flush()
-        .context("確認メッセージの出力に失敗しました")?;
-
-    if !is_affirmative(&read_answer()?) {
-        writeln!(stderr, "中止しました").context("確認メッセージの出力に失敗しました")?;
-        return Err(Error::Cancelled.into());
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -400,20 +354,6 @@ mod tests {
             header.contains("abc123") && header.contains("1 件"),
             "unexpected header: {header}"
         );
-    }
-
-    #[test]
-    fn only_an_explicit_yes_confirms_the_operation() {
-        for answer in ["y\n", "Y\n", "yes\n", "YES\r\n", " y \n"] {
-            assert!(is_affirmative(answer), "{answer:?} should be affirmative");
-        }
-    }
-
-    #[test]
-    fn anything_else_declines_the_operation() {
-        for answer in ["", "\n", "n\n", "N\n", "no\n", "yeah\n", "ｙ\n", "1\n"] {
-            assert!(!is_affirmative(answer), "{answer:?} should decline");
-        }
     }
 
     #[test]

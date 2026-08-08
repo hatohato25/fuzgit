@@ -159,6 +159,27 @@ pub fn create_remote_branch(path: &Path, name: &str, commit: &str) {
     );
 }
 
+/// lightweight tag（参照が対象を直接指すタグ）を現在の HEAD に作成する。
+pub fn create_lightweight_tag(path: &Path, name: &str) {
+    git_in(path, &["tag", name]);
+}
+
+/// annotated tag（タグオブジェクトを伴うタグ）を現在の HEAD に作成する。
+pub fn create_annotated_tag(path: &Path, name: &str, message: &str) {
+    git_in(path, &["tag", "--annotate", "--message", message, name]);
+}
+
+/// 作業ツリーの変更を stash へ退避する。
+///
+/// `message` を与えた場合は `On <branch>: <message>`、省略した場合は
+/// `WIP on <branch>: <hash> <summary>` 形式のメッセージになる。
+pub fn stash_changes(path: &Path, message: Option<&str>) {
+    match message {
+        Some(message) => git_in(path, &["stash", "push", "--quiet", "--message", message]),
+        None => git_in(path, &["stash", "push", "--quiet"]),
+    };
+}
+
 /// リモート追跡ブランチへのシンボリック参照（`origin/HEAD` 相当）を作成する。
 pub fn create_remote_symbolic_ref(path: &Path, name: &str, target: &str) {
     git_in(

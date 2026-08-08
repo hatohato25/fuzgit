@@ -60,15 +60,12 @@ pub enum Command {
     /// 未ステージ・未追跡ファイルを選択して git add する
     Add,
 
-    /// stash を検索して適用する
+    /// 変更を stash へ退避し、stash を検索して適用・破棄する
+    #[command(subcommand_required = true, arg_required_else_help = true)]
     Stash {
-        /// apply ではなく pop する
-        #[arg(long, conflicts_with = "drop")]
-        pop: bool,
-
-        /// 選択した stash を破棄する
-        #[arg(long)]
-        drop: bool,
+        /// 実行する stash の操作。
+        #[command(subcommand)]
+        command: StashCommand,
     },
 
     /// タグを選択する（既定はタグ名を標準出力へ出す）
@@ -88,6 +85,35 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         restore: Option<String>,
     },
+}
+
+/// `gz stash` のサブコマンド。
+///
+/// `push` が選ぶのは作業ツリーの「ファイル」で、`apply` / `pop` / `drop` が選ぶのは既存の「stash」。
+/// 選択対象そのものが異なるため、オプションではなくサブコマンドで分ける。
+/// 引数なしの `gz stash` はヘルプを表示する（git 慣習の `push` と従来の `apply` が食い違うため、
+/// 暗黙にどちらかへ倒さない）。
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum StashCommand {
+    /// 変更ファイルを選択して stash へ退避する
+    Push {
+        /// stash に付けるメッセージ
+        #[arg(short, long, value_name = "MESSAGE")]
+        message: Option<String>,
+
+        /// 未追跡ファイルも候補に含める（既定は追跡済みの変更のみ）
+        #[arg(short = 'u', long)]
+        include_untracked: bool,
+    },
+
+    /// stash を選択して適用する（stash は残す）
+    Apply,
+
+    /// stash を選択して適用し、その stash を取り除く
+    Pop,
+
+    /// stash を選択して破棄する
+    Drop,
 }
 
 #[cfg(test)]
@@ -122,9 +148,103 @@ mod tests {
     }
 
     #[test]
-    fn stash_pop_and_drop_are_mutually_exclusive() {
-        Cli::try_parse_from(["gz", "stash", "--pop", "--drop"])
-            .expect_err("--pop and --drop must not be combined");
+    fn stash_requires_a_subcommand_so_that_help_is_shown() {
+        let err = Cli::try_parse_from(["gz", "stash"]).expect_err("bare `gz stash` must show help");
+
+        let message = err.to_string();
+        for subcommand in ["push", "apply", "pop", "drop"] {
+            assert!(
+                message.contains(subcommand),
+                "help should list `{subcommand}`: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn stash_push_takes_a_message_and_the_untracked_flag() {
+        let cli = Cli::try_parse_from(["gz", "stash", "push", "-m", "作業中", "-u"])
+            .expect("stash push should parse");
+
+        match cli.command {
+            Command::Stash {
+                command:
+                    StashCommand::Push {
+                        message,
+                        include_untracked,
+                    },
+            } => {
+                assert_eq!(message.as_deref(), Some("作業中"));
+                assert!(include_untracked);
+            }
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stash_push_defaults_to_tracked_changes_without_a_message() {
+        let cli =
+            Cli::try_parse_from(["gz", "stash", "push"]).expect("stash push should parse bare");
+
+        match cli.command {
+            Command::Stash {
+                command:
+                    StashCommand::Push {
+                        message,
+                        include_untracked,
+                    },
+            } => {
+                assert_eq!(message, None);
+                assert!(
+                    !include_untracked,
+                    "untracked files must be opt-in: they cannot be stashed without `-u`"
+                );
+            }
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stash_exposes_apply_pop_and_drop_as_subcommands() {
+        for (argument, expected) in [
+            ("apply", StashCommand::Apply),
+            ("pop", StashCommand::Pop),
+            ("drop", StashCommand::Drop),
+        ] {
+            let cli = Cli::try_parse_from(["gz", "stash", argument])
+                .unwrap_or_else(|err| panic!("`gz stash {argument}` should parse: {err}"));
+
+            match cli.command {
+                Command::Stash { command } => assert_eq!(command, expected),
+                other => panic!("unexpected subcommand: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_replaced_stash_flags_are_no_longer_accepted() {
+        for flag in ["--pop", "--drop"] {
+            assert!(
+                Cli::try_parse_from(["gz", "stash", flag]).is_err(),
+                "`gz stash {flag}` must be rejected after the move to subcommands"
+            );
+        }
+    }
+
+    #[test]
+    fn tag_switch_and_diff_are_mutually_exclusive() {
+        Cli::try_parse_from(["gz", "tag", "--switch", "--diff"])
+            .expect_err("--switch and --diff must not be combined");
+    }
+
+    #[test]
+    fn reflog_restore_takes_the_new_branch_name() {
+        let cli = Cli::try_parse_from(["gz", "reflog", "--restore", "recovered"])
+            .expect("reflog should parse");
+
+        match cli.command {
+            Command::Reflog { restore } => assert_eq!(restore.as_deref(), Some("recovered")),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
     }
 
     #[test]

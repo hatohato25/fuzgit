@@ -333,6 +333,16 @@ pub enum ChangeScope {
     Worktree,
     /// 未ステージの変更と未追跡ファイル（`gz add` の対象）。
     Stageable,
+    /// 追跡済みファイルの変更（`gz stash push` の対象）。
+    ///
+    /// `git stash push -- <paths>` はステージ済みの変更も含めて退避するため、
+    /// [`ChangeScope::Worktree`] と違い index 側だけに変更があるファイルも対象に含める。
+    Tracked,
+    /// 追跡済みファイルの変更と未追跡ファイル（`gz stash push --include-untracked` の対象）。
+    ///
+    /// 未追跡ファイルは `git stash push` に `--include-untracked` を付けたときだけ退避できるため、
+    /// [`ChangeScope::Tracked`] と分けて指定する。
+    TrackedOrUntracked,
 }
 
 impl ChangeScope {
@@ -342,6 +352,10 @@ impl ChangeScope {
             ChangeScope::Staged => change.has_staged_change(),
             ChangeScope::Worktree => change.has_worktree_change(),
             ChangeScope::Stageable => change.is_untracked() || change.has_worktree_change(),
+            ChangeScope::Tracked => change.has_staged_change() || change.has_worktree_change(),
+            ChangeScope::TrackedOrUntracked => {
+                change.is_untracked() || change.has_staged_change() || change.has_worktree_change()
+            }
         }
     }
 }
@@ -382,6 +396,62 @@ impl FileChange {
     #[must_use]
     pub fn status_code(&self) -> String {
         [self.index_status, self.worktree_status].iter().collect()
+    }
+}
+
+/// タグ 1 件分の情報。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagInfo {
+    /// 短縮名（`refs/tags/` を除いた `v1.0` の形式）。
+    pub name: String,
+    /// タグ参照が直接指すオブジェクトの ID。annotated tag ではタグオブジェクト自身。
+    ///
+    /// `git show` へ渡すとタグのメッセージと対象コミットの両方が表示され、
+    /// `git switch --detach` / `git diff` へ渡した場合は git 側でコミットまで peel される。
+    /// タグ名ではなくこの ID を git へ渡すことで、名前がオプションとして解釈される余地を排除する。
+    pub id: String,
+    /// annotated tag のメッセージ 1 行目。lightweight tag では `None`。
+    pub message: Option<String>,
+}
+
+/// reflog エントリ 1 件分の情報。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflogEntry {
+    /// 新しいものから数えた位置。`HEAD@{n}` の `n` に対応する。
+    pub index: usize,
+    /// エントリの適用後に HEAD が指していたオブジェクトのフルハッシュ。
+    pub id: String,
+    /// reflog のメッセージ（`checkout: moving from main to feature` 等）。
+    pub message: String,
+}
+
+impl ReflogEntry {
+    /// エントリを一意に指す表記（`HEAD@{n}`）。
+    ///
+    /// 同じコミット・同じメッセージのエントリが並び得るため、選択結果の照合に用いる。
+    #[must_use]
+    pub fn selector(&self) -> String {
+        format!("HEAD@{{{index}}}", index = self.index)
+    }
+}
+
+/// stash エントリ 1 件分の情報。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StashEntry {
+    /// `stash@{n}` の `n`。
+    pub index: usize,
+    /// stash のメッセージ（`WIP on main: 5d21a8c first` / `On main: 作業中` 等）。
+    pub message: String,
+}
+
+impl StashEntry {
+    /// git へ渡す stash の参照（`stash@{n}`）。
+    ///
+    /// git の出力をそのまま持ち回らず、パース済みの添字から組み立て直すことで、
+    /// 想定外の文字列が git の引数として渡らないことを保証する。
+    #[must_use]
+    pub fn selector(&self) -> String {
+        format!("stash@{{{index}}}", index = self.index)
     }
 }
 
@@ -508,13 +578,203 @@ pub fn revision_files(repository: &gix::Repository, revision: &str) -> Result<Re
     Ok(RevisionFiles { id, paths })
 }
 
+/// 複数行のメッセージから 1 行目を取り出す。
+fn first_line(message: &BStr) -> &BStr {
+    let end = message
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .unwrap_or(message.len());
+    message[..end].as_bstr()
+}
+
+/// タグ一覧を名前順で取得する。
+///
+/// annotated tag（タグオブジェクトを伴うタグ）はそのメッセージの 1 行目も併せて返す。
+///
+/// # Errors
+///
+/// 参照の列挙・解決、タグオブジェクトの復号に失敗した場合、
+/// またはタグ名・メッセージが UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+pub fn tags(repository: &gix::Repository) -> Result<Vec<TagInfo>> {
+    let platform = repository
+        .references()
+        .map_err(|source| read_error("参照の列挙", source))?;
+
+    let mut tags = Vec::new();
+    for reference in platform
+        .tags()
+        .map_err(|source| read_error("タグの列挙", source))?
+    {
+        let mut reference = reference.map_err(|source| read_error("タグの読み取り", source))?;
+        let name = to_utf8(reference.name().shorten(), "タグ名の解釈")?;
+
+        // シンボリック参照は辿るが、annotated tag のタグオブジェクトは peel せずに保持する。
+        // タグのメッセージを読むにはタグオブジェクト自体が必要なため
+        let id = reference
+            .follow_to_object()
+            .map_err(|source| read_error(&format!("タグ `{name}` の解決"), source))?;
+        let object = id
+            .object()
+            .map_err(|source| read_error(&format!("タグ `{name}` の対象の取得"), source))?;
+
+        let message = match object.kind {
+            gix::object::Kind::Tag => {
+                let tag = object
+                    .try_into_tag()
+                    .map_err(|source| read_error(&format!("タグ `{name}` の解釈"), source))?;
+                let decoded = tag
+                    .decode()
+                    .map_err(|source| read_error(&format!("タグ `{name}` の復号"), source))?;
+                Some(to_utf8(
+                    first_line(decoded.message),
+                    "タグメッセージの解釈",
+                )?)
+            }
+            // lightweight tag は参照が直接コミット等を指すためメッセージを持たない
+            _ => None,
+        };
+
+        tags.push(TagInfo {
+            name,
+            id: id.to_string(),
+            message,
+        });
+    }
+
+    tags.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(tags)
+}
+
+/// HEAD の reflog を新しい順に取得する。
+///
+/// 削除されたブランチの調査が用途であり、gc 済みで実体を失ったオブジェクトを指すエントリも
+/// そのまま返す（オブジェクトデータベースは参照しない）。
+///
+/// # Errors
+///
+/// HEAD の参照を開けない場合、reflog の読み取り・解釈に失敗した場合、
+/// またはメッセージが UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+pub fn head_reflog(repository: &gix::Repository) -> Result<Vec<ReflogEntry>> {
+    let reference = repository
+        .find_reference("HEAD")
+        .map_err(|source| read_error("HEAD の読み取り", source))?;
+
+    let mut platform = reference.log_iter();
+    // reflog が 1 度も記録されていないリポジトリでは reflog ファイル自体が存在しない
+    let Some(lines) = platform
+        .rev()
+        .map_err(|source| read_error("HEAD の reflog の読み取り", source))?
+    else {
+        return Ok(Vec::new());
+    };
+
+    let mut entries = Vec::new();
+    for (index, line) in lines.enumerate() {
+        let line = line.map_err(|source| read_error("HEAD の reflog の解釈", source))?;
+        entries.push(ReflogEntry {
+            index,
+            id: line.new_oid.to_string(),
+            message: to_utf8(line.message.as_bstr(), "reflog メッセージの解釈")?,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// `git stash list` の実行引数。
+///
+/// - `--format=%gd%x00%gs`: 参照（`stash@{n}`）とメッセージを NUL で区切って出力させる。
+///   既定の出力形式（`stash@{0}: WIP on main: 5d21a8c first`）はメッセージ自体がコロンを
+///   含み得るため、コロンでの分割では参照とメッセージを確実に切り分けられない
+/// - `-z`: エントリ同士も NUL で区切らせる。メッセージ（reflog subject）は改行を含まないが、
+///   区切りを NUL に統一することでフィールド区切りと同じ規則で解析できる
+///   （`git status` を `-z` で読むのと同じ方針）
+const STASH_LIST_ARGS: [&str; 4] = ["stash", "list", "-z", "--format=%gd%x00%gs"];
+
+/// stash の参照（`stash@{n}`）の前置き。
+const STASH_SELECTOR_PREFIX: &str = "stash@{";
+
+/// stash の参照（`stash@{n}`）の後置き。
+const STASH_SELECTOR_SUFFIX: &str = "}";
+
+/// `stash@{n}` 形式の参照から添字を取り出す。
+fn parse_stash_selector(selector: &str) -> Option<usize> {
+    selector
+        .strip_prefix(STASH_SELECTOR_PREFIX)?
+        .strip_suffix(STASH_SELECTOR_SUFFIX)?
+        .parse()
+        .ok()
+}
+
+/// [`STASH_LIST_ARGS`] の出力をパースする。
+///
+/// 出力は `<参照>\0<メッセージ>\0` の繰り返しで、末尾にも区切りの NUL が付く。
+/// メッセージは空になり得るため空レコードは読み飛ばさず、2 件ずつの組として厳密に扱う。
+///
+/// # Errors
+///
+/// レコード数が奇数の場合、参照が `stash@{n}` 形式でない場合、
+/// メッセージが UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+fn parse_stash_list(output: &[u8]) -> Result<Vec<StashEntry>> {
+    if output.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut records: Vec<&[u8]> = output.split(|byte| *byte == 0).collect();
+    // 最後のエントリの後ろにも区切りが置かれるため、その分の空レコードだけを取り除く
+    if records.last().is_some_and(|record| record.is_empty()) {
+        records.pop();
+    }
+
+    if !records.len().is_multiple_of(2) {
+        return Err(read_error(
+            "git stash list 出力の解釈",
+            format!(
+                "参照とメッセージの組になっていません（{} レコード）",
+                records.len()
+            ),
+        ));
+    }
+
+    let mut entries = Vec::with_capacity(records.len() / 2);
+    for pair in records.chunks_exact(2) {
+        let selector = to_utf8(pair[0].as_bstr(), "stash の参照の解釈")?;
+        let index = parse_stash_selector(&selector).ok_or_else(|| {
+            read_error(
+                "git stash list 出力の解釈",
+                format!("`{selector}` は `stash@{{n}}` 形式ではありません"),
+            )
+        })?;
+
+        entries.push(StashEntry {
+            index,
+            message: to_utf8(pair[1].as_bstr(), "stash メッセージの解釈")?,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// stash 一覧を新しい順（`stash@{0}` から）に取得する。
+///
+/// # Errors
+///
+/// - 作業ツリーを持たない bare リポジトリの場合は [`Error::NoWorktree`]
+/// - `git stash list` の実行に失敗した場合は [`Error::GitCommandFailed`] 等
+/// - 出力のパースに失敗した場合は [`Error::RepositoryReadFailed`]
+pub fn stashes(repository: &gix::Repository) -> Result<Vec<StashEntry>> {
+    let output = capture_git_in(workdir(repository)?, &STASH_LIST_ARGS)?;
+    parse_stash_list(&output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::git::repo::discover;
     use crate::test_support::{
-        COMMIT_DATE_SHORT, TempDir, commit, commit_at, create_branch, create_remote_branch,
-        create_remote_symbolic_ref, git_in, init_repository, write_file,
+        COMMIT_DATE_SHORT, TempDir, commit, commit_at, create_annotated_tag, create_branch,
+        create_lightweight_tag, create_remote_branch, create_remote_symbolic_ref, git_in,
+        init_repository, stash_changes, write_file,
     };
 
     /// `main` に 1 コミットだけ持つテストリポジトリを用意する。
@@ -1044,6 +1304,8 @@ mod tests {
             (ChangeScope::Staged, [true, false, true, false]),
             (ChangeScope::Worktree, [false, true, true, false]),
             (ChangeScope::Stageable, [false, true, true, true]),
+            (ChangeScope::Tracked, [true, true, true, false]),
+            (ChangeScope::TrackedOrUntracked, [true, true, true, true]),
         ] {
             let actual =
                 [&staged, &unstaged, &both, &untracked].map(|change| scope.includes(change));
@@ -1115,6 +1377,38 @@ mod tests {
     }
 
     #[test]
+    fn the_tracked_scope_lists_staged_and_unstaged_changes_without_untracked_files() {
+        let (_dir, repository) = repository_with_changes("read-status-tracked");
+
+        let changes = changes(&repository, ChangeScope::Tracked).expect("status should be read");
+
+        assert_eq!(
+            paths(&changes),
+            ["both.txt", "renamed.txt", "staged.txt", "unstaged.txt"],
+            "`git stash push` also stashes changes that are only staged"
+        );
+    }
+
+    #[test]
+    fn the_tracked_or_untracked_scope_adds_the_untracked_files() {
+        let (_dir, repository) = repository_with_changes("read-status-tracked-untracked");
+
+        let changes =
+            changes(&repository, ChangeScope::TrackedOrUntracked).expect("status should be read");
+
+        assert_eq!(
+            paths(&changes),
+            [
+                "both.txt",
+                "renamed.txt",
+                "staged.txt",
+                "unstaged.txt",
+                "dir/new file.txt"
+            ]
+        );
+    }
+
+    #[test]
     fn a_staged_rename_reports_both_of_its_paths() {
         let (_dir, repository) = repository_with_changes("read-status-rename");
 
@@ -1136,6 +1430,8 @@ mod tests {
             ChangeScope::Staged,
             ChangeScope::Worktree,
             ChangeScope::Stageable,
+            ChangeScope::Tracked,
+            ChangeScope::TrackedOrUntracked,
         ] {
             let changes = changes(&repository, scope).expect("status should be read");
             assert!(changes.is_empty(), "unexpected changes for {scope:?}");
@@ -1204,6 +1500,305 @@ mod tests {
             ),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_repository_without_tags_yields_no_candidates() {
+        let (_dir, repository, _head) = repository_with_one_commit("read-tags-empty");
+
+        let tags = tags(&repository).expect("tags should be read");
+
+        assert!(tags.is_empty(), "unexpected tags: {tags:?}");
+    }
+
+    #[test]
+    fn lightweight_and_annotated_tags_are_listed_by_name() {
+        let (dir, repository, head) = repository_with_one_commit("read-tags-kinds");
+        create_lightweight_tag(dir.path(), "v2.0-light");
+        create_annotated_tag(dir.path(), "v1.0", "リリース v1.0\n\n詳細な説明");
+
+        let tags = tags(&repository).expect("tags should be read");
+
+        assert_eq!(
+            tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>(),
+            ["v1.0", "v2.0-light"]
+        );
+
+        let annotated = tags.first().expect("the annotated tag should be listed");
+        assert_eq!(
+            annotated.message.as_deref(),
+            Some("リリース v1.0"),
+            "only the first line of the message is kept"
+        );
+        assert_ne!(
+            annotated.id, head,
+            "an annotated tag reference points at the tag object itself"
+        );
+
+        let lightweight = tags.last().expect("the lightweight tag should be listed");
+        assert_eq!(
+            lightweight.message, None,
+            "a lightweight tag carries no message"
+        );
+        assert_eq!(
+            lightweight.id, head,
+            "a lightweight tag reference points at the commit"
+        );
+    }
+
+    #[test]
+    fn an_annotated_tag_id_resolves_to_its_commit_for_git() {
+        let (dir, repository, head) = repository_with_one_commit("read-tags-peel");
+        create_annotated_tag(dir.path(), "v1.0", "リリース");
+        let tags = tags(&repository).expect("tags should be read");
+        let tag = tags.first().expect("the tag should be listed");
+
+        let peeled = git_in(
+            dir.path(),
+            &["rev-parse", &format!("{id}^{{commit}}", id = tag.id)],
+        );
+
+        assert_eq!(peeled, head);
+    }
+
+    #[test]
+    fn the_head_reflog_is_returned_newest_first() {
+        let dir = TempDir::new("read-reflog-order");
+        init_repository(dir.path());
+        commit(dir.path(), "first");
+        commit(dir.path(), "second");
+        git_in(dir.path(), &["switch", "--quiet", "-c", "feature"]);
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let entries = head_reflog(&repository).expect("the reflog should be read");
+
+        let messages: Vec<&str> = entries.iter().map(|entry| entry.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "checkout: moving from main to feature",
+                "commit: second",
+                "commit (initial): first"
+            ]
+        );
+        assert_eq!(
+            entries.iter().map(|entry| entry.index).collect::<Vec<_>>(),
+            [0, 1, 2],
+            "the newest entry is HEAD@{{0}}"
+        );
+    }
+
+    #[test]
+    fn a_reflog_entry_carries_the_commit_it_moved_to() {
+        let dir = TempDir::new("read-reflog-id");
+        init_repository(dir.path());
+        let first = commit(dir.path(), "first");
+        let second = commit(dir.path(), "second");
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let entries = head_reflog(&repository).expect("the reflog should be read");
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            [second, first]
+        );
+    }
+
+    #[test]
+    fn a_repository_without_a_reflog_yields_no_entries() {
+        let dir = TempDir::new("read-reflog-empty");
+        init_repository(dir.path());
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let entries = head_reflog(&repository).expect("a missing reflog is not an error");
+
+        assert!(entries.is_empty(), "unexpected entries: {entries:?}");
+    }
+
+    /// `git stash list -z --format=%gd%x00%gs` の出力を組み立てる。
+    ///
+    /// 実際の git は各レコードの後ろに NUL を置く（末尾のエントリも同様）。
+    fn stash_output(records: &[&str]) -> Vec<u8> {
+        let mut output = Vec::new();
+        for record in records {
+            output.extend_from_slice(record.as_bytes());
+            output.push(0);
+        }
+        output
+    }
+
+    #[test]
+    fn an_empty_stash_list_yields_no_entries() {
+        let entries = parse_stash_list(&[]).expect("empty output should parse");
+
+        assert!(entries.is_empty(), "unexpected entries: {entries:?}");
+    }
+
+    #[test]
+    fn a_stash_entry_keeps_its_index_and_message() {
+        let output = stash_output(&[
+            "stash@{0}",
+            "On main: 作業中",
+            "stash@{1}",
+            "WIP on main: 5d21a8c first",
+        ]);
+
+        let entries = parse_stash_list(&output).expect("stash list should parse");
+
+        assert_eq!(
+            entries,
+            [
+                StashEntry {
+                    index: 0,
+                    message: "On main: 作業中".to_owned()
+                },
+                StashEntry {
+                    index: 1,
+                    message: "WIP on main: 5d21a8c first".to_owned()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_message_containing_colons_and_spaces_is_kept_verbatim() {
+        let output = stash_output(&["stash@{0}", "On main: fix: 認証 の バグ: 2 件"]);
+
+        let entries = parse_stash_list(&output).expect("stash list should parse");
+
+        assert_eq!(
+            entries[0].message, "On main: fix: 認証 の バグ: 2 件",
+            "a colon inside the message must not split the record"
+        );
+    }
+
+    #[test]
+    fn an_output_without_a_trailing_separator_parses_as_well() {
+        let mut output = stash_output(&["stash@{0}"]);
+        output.extend_from_slice("On main: 作業中".as_bytes());
+
+        let entries = parse_stash_list(&output).expect("stash list should parse");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].message, "On main: 作業中");
+    }
+
+    #[test]
+    fn an_empty_message_does_not_shift_the_following_entries() {
+        let output = stash_output(&["stash@{0}", "", "stash@{1}", "On main: 次"]);
+
+        let entries = parse_stash_list(&output).expect("stash list should parse");
+
+        assert_eq!(
+            entries,
+            [
+                StashEntry {
+                    index: 0,
+                    message: String::new()
+                },
+                StashEntry {
+                    index: 1,
+                    message: "On main: 次".to_owned()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_double_digit_index_is_parsed() {
+        let output = stash_output(&["stash@{12}", "On main: 作業中"]);
+
+        let entries = parse_stash_list(&output).expect("stash list should parse");
+
+        assert_eq!(entries[0].index, 12);
+        assert_eq!(entries[0].selector(), "stash@{12}");
+    }
+
+    #[test]
+    fn a_dangling_record_is_rejected_instead_of_being_dropped() {
+        let mut output = stash_output(&["stash@{0}", "On main: 作業中"]);
+        output.extend_from_slice(b"stash@{1}\0");
+
+        let err = parse_stash_list(&output).expect_err("an odd record count must be rejected");
+
+        assert!(
+            matches!(err, Error::RepositoryReadFailed { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_selector_of_an_unexpected_shape_is_rejected() {
+        for selector in ["stash@{x}", "stash@{}", "refs/stash", "stash@{0", "0"] {
+            let output = stash_output(&[selector, "On main: 作業中"]);
+
+            let err = parse_stash_list(&output)
+                .expect_err("a selector that is not stash@{n} must be rejected");
+
+            match err {
+                Error::RepositoryReadFailed { source, .. } => assert!(
+                    source.to_string().contains(selector),
+                    "the offending selector should be named: {source}"
+                ),
+                other => panic!("unexpected error for {selector:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_non_utf8_message_is_rejected_instead_of_being_converted_lossily() {
+        let mut output = b"stash@{0}\0On main: ".to_vec();
+        output.push(0xff);
+        output.push(0);
+
+        let err = parse_stash_list(&output).expect_err("a non utf-8 message must not be accepted");
+
+        assert!(
+            matches!(err, Error::RepositoryReadFailed { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_stash_list_of_a_repository_is_read_newest_first() {
+        let dir = TempDir::new("read-stash-list");
+        init_repository(dir.path());
+        commit(dir.path(), "first commit");
+        write_file(dir.path(), "history.txt", "旧: 変更 1\n");
+        stash_changes(dir.path(), Some("最初の: 退避"));
+        write_file(dir.path(), "history.txt", "旧: 変更 2\n");
+        stash_changes(dir.path(), None);
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let entries = stashes(&repository).expect("the stash list should be read");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].index, 0);
+        assert!(
+            entries[0].message.starts_with("WIP on main:"),
+            "the newest stash comes first: {entries:?}"
+        );
+        assert_eq!(entries[1].index, 1);
+        assert_eq!(entries[1].message, "On main: 最初の: 退避");
+    }
+
+    #[test]
+    fn a_repository_without_stashes_yields_no_entries() {
+        let (_dir, repository, _head) = repository_with_one_commit("read-stash-empty");
+
+        let entries = stashes(&repository).expect("the stash list should be read");
+
+        assert!(entries.is_empty(), "unexpected entries: {entries:?}");
+    }
+
+    #[test]
+    fn the_first_line_of_a_message_stops_at_the_newline() {
+        assert_eq!(first_line("summary\n\nbody".into()), "summary");
+        assert_eq!(first_line("summary".into()), "summary");
+        assert_eq!(first_line("".into()), "");
     }
 
     #[test]

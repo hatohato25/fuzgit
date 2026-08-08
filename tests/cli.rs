@@ -22,6 +22,9 @@ const SUBCOMMANDS: [&str; 8] = [
     "reflog",
 ];
 
+/// `gz stash` のサブコマンド名（`fuzgit::cli::StashCommand` と対応）。
+const STASH_SUBCOMMANDS: [&str; 4] = ["push", "apply", "pop", "drop"];
+
 /// `gz log --limit` の既定値（`fuzgit::cli::DEFAULT_COMMIT_LIMIT` と対応）。
 const DEFAULT_COMMIT_LIMIT: &str = "1000";
 
@@ -283,6 +286,162 @@ fn restore_and_add_report_when_there_is_nothing_to_select() {
         assert!(
             stderr.contains("選択できる候補がありません"),
             "unexpected stderr for gz {arguments:?}:\n{stderr}"
+        );
+    }
+}
+
+/// stash / タグ / reflog が 1 件も無い場合、TUI を起動せずに終了することを確認する。
+#[test]
+fn stash_tag_and_reflog_report_when_there_is_nothing_to_select() {
+    let dir = empty_repository("nothing-to-select-p3");
+
+    for arguments in [
+        vec!["stash", "push"],
+        vec!["stash", "push", "--include-untracked"],
+        vec!["stash", "apply"],
+        vec!["stash", "pop"],
+        vec!["stash", "drop"],
+        vec!["tag"],
+        vec!["tag", "--switch"],
+        vec!["tag", "--diff"],
+        vec!["reflog"],
+        vec!["reflog", "--restore", "recovered"],
+    ] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should exit non-zero when there is nothing to select"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("選択できる候補がありません"),
+            "unexpected stderr for gz {arguments:?}:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "nothing should be written to stdout for gz {arguments:?}"
+        );
+    }
+}
+
+/// 排他オプションを同時に指定した場合、選択を始める前に拒否されることを確認する。
+#[test]
+fn mutually_exclusive_options_are_rejected_before_anything_runs() {
+    let dir = empty_repository("exclusive-options");
+
+    let output = gz()
+        .args(["tag", "--switch", "--diff"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz tag --switch --diff");
+
+    assert!(
+        !output.status.success(),
+        "gz tag --switch --diff should be rejected"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("cannot be used with"),
+        "the conflict should be explained:\n{stderr}"
+    );
+}
+
+/// 引数なしの `gz stash` は、どちらかの操作へ倒さずサブコマンド一覧のヘルプを表示することを確認する。
+#[test]
+fn bare_stash_shows_its_subcommands_instead_of_choosing_one() {
+    let dir = empty_repository("stash-bare");
+
+    let output = gz()
+        .arg("stash")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz stash");
+
+    assert!(
+        !output.status.success(),
+        "bare `gz stash` should not exit successfully"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "nothing should be written to stdout for bare `gz stash`"
+    );
+
+    // clap の `arg_required_else_help` はヘルプを stderr へ出す
+    let stderr = String::from_utf8(output.stderr).expect("help output should be utf-8");
+    for subcommand in STASH_SUBCOMMANDS {
+        assert!(
+            stderr.contains(subcommand),
+            "`{subcommand}` should appear in bare `gz stash` output:\n{stderr}"
+        );
+    }
+}
+
+/// `gz stash --help` にサブコマンド一覧が並ぶことを確認する。
+#[test]
+fn stash_help_lists_all_of_its_subcommands() {
+    let output = gz()
+        .args(["stash", "--help"])
+        .output()
+        .expect("failed to run gz stash --help");
+
+    assert!(output.status.success(), "gz stash --help should succeed");
+
+    let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
+    for subcommand in STASH_SUBCOMMANDS {
+        assert!(
+            stdout.contains(subcommand),
+            "`{subcommand}` should appear in gz stash --help output:\n{stdout}"
+        );
+    }
+}
+
+/// `gz stash <サブコマンド> --help` がそれぞれのヘルプを持つことを確認する。
+#[test]
+fn every_stash_subcommand_has_its_own_help() {
+    for subcommand in STASH_SUBCOMMANDS {
+        let output = gz()
+            .args(["stash", subcommand, "--help"])
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz stash {subcommand} --help: {err}"));
+
+        assert!(
+            output.status.success(),
+            "gz stash {subcommand} --help should exit successfully"
+        );
+
+        let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
+        assert!(
+            stdout.contains(&format!("gz stash {subcommand}")),
+            "usage line missing for stash {subcommand}:\n{stdout}"
+        );
+    }
+}
+
+/// `gz stash push` のオプションがヘルプに載っていることを確認する。
+#[test]
+fn stash_push_documents_its_message_and_untracked_options() {
+    let output = gz()
+        .args(["stash", "push", "--help"])
+        .output()
+        .expect("failed to run gz stash push --help");
+
+    assert!(
+        output.status.success(),
+        "gz stash push --help should succeed"
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
+    for option in ["-m", "--message", "-u", "--include-untracked"] {
+        assert!(
+            stdout.contains(option),
+            "`{option}` should be documented:\n{stdout}"
         );
     }
 }

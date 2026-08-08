@@ -3,19 +3,25 @@
 //! 各コマンドは「`git::read` で候補取得 → `finder` で選択 → `git::exec` で実行」の
 //! 直列オーケストレーションのみを担う。
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
-use crate::cli::Command;
+use crate::cli::{Command, StashCommand};
 use crate::commands::restore::RestoreTarget;
+use crate::commands::stash::{StashAction, UntrackedFiles};
+use crate::commands::tag::TagAction;
 use crate::git::read::{BranchScope, CommitScope};
 use crate::git::repo;
 
 pub mod add;
 pub mod branch;
 pub mod cherry_pick;
+pub mod confirmation;
 pub mod file_selection;
 pub mod log;
+pub mod reflog;
 pub mod restore;
+pub mod stash;
+pub mod tag;
 
 /// サブコマンドを対応する実装へ振り分ける。
 ///
@@ -53,8 +59,25 @@ pub fn dispatch(command: &Command) -> Result<()> {
             restore::run(&repository, target, source.as_deref())
         }
         Command::Add => add::run(&repository),
-        Command::Stash { .. } => bail!("`gz stash` は未実装です"),
-        Command::Tag { .. } => bail!("`gz tag` は未実装です"),
-        Command::Reflog { .. } => bail!("`gz reflog` は未実装です"),
+        Command::Stash { command } => match command {
+            StashCommand::Push {
+                message,
+                include_untracked,
+            } => {
+                let untracked = if *include_untracked {
+                    UntrackedFiles::Include
+                } else {
+                    UntrackedFiles::Exclude
+                };
+                stash::push(&repository, message.as_deref(), untracked)
+            }
+            StashCommand::Apply => stash::run(&repository, StashAction::Apply),
+            StashCommand::Pop => stash::run(&repository, StashAction::Pop),
+            StashCommand::Drop => stash::run(&repository, StashAction::Drop),
+        },
+        Command::Tag { switch, diff } => {
+            tag::run(&repository, TagAction::from_flags(*switch, *diff)?)
+        }
+        Command::Reflog { restore } => reflog::run(&repository, restore.as_deref()),
     }
 }
