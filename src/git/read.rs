@@ -274,6 +274,25 @@ pub struct Upstream {
     pub merge_ref: String,
 }
 
+impl Upstream {
+    /// ローカルのリモート追跡参照（`refs/remotes/<remote>/<branch>`）を組み立てる。
+    ///
+    /// upstream との比較（ahead/behind の算出、`gz diff --upstream`）はネットワークを
+    /// 使わずローカルの追跡参照に対して行うため、リモート側の参照名
+    /// （`refs/heads/<branch>`）ではなく追跡参照へ読み替える。
+    /// `branch.<name>.remote` に URL を直接設定している場合など、追跡参照を
+    /// 組み立てられない設定では推測せずに `None` を返す。
+    #[must_use]
+    pub fn tracking_ref(&self) -> Option<String> {
+        let branch = self.merge_ref.strip_prefix("refs/heads/")?;
+
+        Some(format!(
+            "refs/remotes/{remote}/{branch}",
+            remote = self.remote
+        ))
+    }
+}
+
 /// ブランチに設定された upstream を取得する。設定が無い場合は `None`。
 ///
 /// # Errors
@@ -937,6 +956,42 @@ pub fn changes(repository: &gix::Repository, scope: ChangeScope) -> Result<Vec<F
         .into_iter()
         .filter(|change| scope.includes(change))
         .collect())
+}
+
+/// `git diff --name-only -z` の出力をパースする。
+///
+/// 1 レコードが 1 ファイルのパスで、各レコードは NUL で終端される
+/// （`parse_status` / `parse_worktree_list` と同じ規則）。差分が無い場合は出力自体が空になる。
+///
+/// # Errors
+///
+/// パスが UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+fn parse_changed_files(output: &[u8]) -> Result<Vec<String>> {
+    nul_records(output)
+        .map(|record| to_utf8(record.as_bstr(), "パスの解釈"))
+        .collect()
+}
+
+/// 比較範囲に変更のあるファイルのパス一覧を、git が返す順で取得する。
+///
+/// `range` には `git diff` のサブコマンド名の後ろ・`--` の前に置く引数
+/// （`--staged` や比較するリビジョン 2 つ）をそのまま渡す。組み立ては
+/// 比較モードを持つ呼び出し側（`gz diff`）の責務であり、ここでは
+/// 一覧取得のオプションと `--` の付与だけを担う（[`commit_count`] と同方針）。
+///
+/// # Errors
+///
+/// - `git diff` の実行に失敗した場合は [`Error::GitCommandFailed`] 等
+/// - 出力のパースに失敗した場合は [`Error::RepositoryReadFailed`]
+pub fn changed_files(workdir: &Path, range: &[String]) -> Result<Vec<String>> {
+    let mut arguments = vec!["diff", "--name-only", "-z"];
+    arguments.extend(range.iter().map(String::as_str));
+    // 末尾の `--` はリビジョンとパスの境界。同名のファイルがあってもパスとして解釈させない
+    arguments.push("--");
+
+    let output = capture_git_in(workdir, &arguments)?;
+
+    parse_changed_files(&output)
 }
 
 /// `revision` が指すツリーに含まれるファイルの一覧を取得する。
@@ -2153,6 +2208,119 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_diff_listing_yields_no_files() {
+        let files = parse_changed_files(&[]).expect("empty output should parse");
+
+        assert!(files.is_empty(), "unexpected files: {files:?}");
+    }
+
+    #[test]
+    fn a_single_changed_file_is_read_from_its_nul_terminated_record() {
+        // `-z` は区切りではなく終端であるため、1 件でも末尾に NUL が付く
+        let files = parse_changed_files(b"src/main.rs\0").expect("one record should parse");
+
+        assert_eq!(files, ["src/main.rs"]);
+    }
+
+    #[test]
+    fn changed_files_are_read_in_the_order_git_reported_them() {
+        let files = parse_changed_files(b"b.txt\0a.txt\0dir/c.txt\0")
+            .expect("several records should parse");
+
+        assert_eq!(files, ["b.txt", "a.txt", "dir/c.txt"]);
+    }
+
+    #[test]
+    fn a_changed_path_containing_spaces_is_kept_verbatim() {
+        // `-z` はエスケープを行わないため、空白を含むパスもそのまま 1 レコードになる
+        let files = parse_changed_files(b"dir/new file.txt\0with  two.txt\0")
+            .expect("paths with spaces should parse");
+
+        assert_eq!(files, ["dir/new file.txt", "with  two.txt"]);
+    }
+
+    #[test]
+    fn a_missing_trailing_nul_still_yields_the_last_path() {
+        let files = parse_changed_files(b"a.txt\0b.txt").expect("the last record should parse");
+
+        assert_eq!(files, ["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn a_non_utf8_changed_path_is_rejected_instead_of_being_converted_lossily() {
+        let err =
+            parse_changed_files(b"\xff\xfe.txt\0").expect_err("a non utf-8 path must be rejected");
+
+        assert!(
+            matches!(err, Error::RepositoryReadFailed { .. }),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_unstaged_range_lists_the_work_tree_side_of_the_changes() {
+        let (dir, _repository) = repository_with_changes("read-changed-files-unstaged");
+
+        let files = changed_files(dir.path(), &[]).expect("the diff should be listed");
+
+        assert_eq!(
+            files,
+            ["both.txt", "unstaged.txt"],
+            "an empty range compares the index with the work tree"
+        );
+    }
+
+    #[test]
+    fn the_staged_range_lists_the_index_side_of_the_changes() {
+        let (dir, _repository, _head) = repository_with_one_commit("read-changed-files-staged");
+        write_file(dir.path(), "staged.txt", "staged\n");
+        write_file(dir.path(), "unstaged.txt", "unstaged\n");
+        git_in(dir.path(), &["add", "--", "staged.txt"]);
+
+        let files =
+            changed_files(dir.path(), &["--staged".to_owned()]).expect("the diff should be listed");
+
+        assert_eq!(
+            files,
+            ["staged.txt"],
+            "`--staged` compares HEAD with the index only"
+        );
+    }
+
+    #[test]
+    fn a_revision_range_lists_the_files_that_differ_between_the_two_sides() {
+        let (dir, _repository, _head) = repository_with_one_commit("read-changed-files-revisions");
+        create_branch(dir.path(), "feature");
+        git_in(dir.path(), &["switch", "--quiet", "feature"]);
+        write_file(dir.path(), "added.txt", "feature\n");
+        git_in(dir.path(), &["add", "--all"]);
+        commit(dir.path(), "add a file on the feature branch");
+        git_in(dir.path(), &["switch", "--quiet", "main"]);
+
+        let range = ["main".to_owned(), "feature".to_owned()];
+        let files = changed_files(dir.path(), &range).expect("the diff should be listed");
+
+        // `commit` はコミットのたびに history.txt へ 1 行追記するため、両方が差分に現れる
+        assert_eq!(files, ["added.txt", "history.txt"]);
+
+        // 引数の順が比較の向きを決める。逆向きでも差分のあるファイルの集合は変わらない
+        let reversed = ["feature".to_owned(), "main".to_owned()];
+        let files = changed_files(dir.path(), &reversed).expect("the diff should be listed");
+
+        assert_eq!(files, ["added.txt", "history.txt"]);
+    }
+
+    #[test]
+    fn a_range_without_differences_lists_nothing() {
+        let (dir, _repository, _head) = repository_with_one_commit("read-changed-files-empty");
+
+        let range = ["HEAD".to_owned(), "HEAD".to_owned()];
+        let files = changed_files(dir.path(), &range).expect("the diff should be listed");
+
+        assert!(files.is_empty(), "unexpected files: {files:?}");
+    }
+
+    #[test]
     fn revision_files_lists_the_files_of_that_revision_with_its_resolved_id() {
         let (dir, repository) = repository_with_changes("read-revision-files");
         let head = git_in(dir.path(), &["rev-parse", "HEAD"]);
@@ -2724,6 +2892,47 @@ mod tests {
         assert_eq!(
             upstream(&repository, "feature").expect("the upstream should be readable"),
             None
+        );
+    }
+
+    #[test]
+    fn an_upstream_is_compared_against_its_remote_tracking_ref() {
+        // 比較はネットワークを使わずローカルの追跡参照で行う
+        let upstream = Upstream {
+            remote: "origin".to_owned(),
+            merge_ref: "refs/heads/main".to_owned(),
+        };
+
+        assert_eq!(
+            upstream.tracking_ref().as_deref(),
+            Some("refs/remotes/origin/main")
+        );
+    }
+
+    #[test]
+    fn a_hierarchical_upstream_keeps_its_whole_branch_name() {
+        let upstream = Upstream {
+            remote: "origin".to_owned(),
+            merge_ref: "refs/heads/feature/login".to_owned(),
+        };
+
+        assert_eq!(
+            upstream.tracking_ref().as_deref(),
+            Some("refs/remotes/origin/feature/login")
+        );
+    }
+
+    #[test]
+    fn an_upstream_outside_of_the_branch_namespace_has_no_tracking_ref() {
+        let upstream = Upstream {
+            remote: "origin".to_owned(),
+            merge_ref: "refs/tags/v1.0".to_owned(),
+        };
+
+        assert_eq!(
+            upstream.tracking_ref(),
+            None,
+            "a tracking ref must not be guessed"
         );
     }
 
@@ -3434,7 +3643,7 @@ mod tests {
     }
 
     #[test]
-    fn a_prunable_worktree_is_detected() {
+    fn a_prunable_worktree_is_detected_with_and_without_a_reason() {
         let output = worktree_output(&[
             &[
                 "worktree /repo",
@@ -3447,6 +3656,13 @@ mod tests {
                 "detached",
                 "prunable gitdir file points to non-existent location",
             ],
+            &[
+                // 理由が付かない形（ラベルのみの行）でも整理対象として扱う
+                "worktree /repo/also gone",
+                "HEAD 3333333333333333333333333333333333333333",
+                "detached",
+                "prunable",
+            ],
         ]);
 
         let worktrees = parse_worktree_list(&output).expect("worktree list should parse");
@@ -3456,8 +3672,126 @@ mod tests {
                 .iter()
                 .map(|worktree| worktree.prunable)
                 .collect::<Vec<bool>>(),
-            [false, true]
+            [false, true, true]
         );
+    }
+
+    #[test]
+    fn a_worktree_can_be_locked_and_prunable_at_the_same_time() {
+        let output = worktree_output(&[&[
+            "worktree /repo/gone",
+            "HEAD 1111111111111111111111111111111111111111",
+            "branch refs/heads/feature",
+            "locked 移動予定",
+            "prunable gitdir file points to non-existent location",
+        ]]);
+
+        let worktrees = parse_worktree_list(&output).expect("worktree list should parse");
+
+        assert!(worktrees[0].is_locked);
+        assert!(worktrees[0].prunable);
+    }
+
+    #[test]
+    fn several_linked_worktrees_keep_their_own_state() {
+        // main / 通常の linked / detached / locked かつ prunable が混在する実運用に近い形
+        let output = worktree_output(&[
+            &[
+                "worktree /repo",
+                "HEAD 1111111111111111111111111111111111111111",
+                "branch refs/heads/main",
+            ],
+            &[
+                "worktree /repo/../feature",
+                "HEAD 2222222222222222222222222222222222222222",
+                "branch refs/heads/feature/login",
+            ],
+            &[
+                "worktree /repo/../review",
+                "HEAD 3333333333333333333333333333333333333333",
+                "detached",
+            ],
+            &[
+                "worktree /repo/../gone",
+                "HEAD 4444444444444444444444444444444444444444",
+                "branch refs/heads/wip",
+                "locked",
+                "prunable gitdir file points to non-existent location",
+            ],
+        ]);
+
+        let worktrees = parse_worktree_list(&output).expect("worktree list should parse");
+
+        assert_eq!(
+            worktrees
+                .iter()
+                .map(|worktree| (
+                    worktree.path.as_str(),
+                    worktree.branch.as_deref(),
+                    worktree.is_main,
+                    worktree.is_locked,
+                    worktree.prunable
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("/repo", Some("main"), true, false, false),
+                (
+                    "/repo/../feature",
+                    Some("feature/login"),
+                    false,
+                    false,
+                    false
+                ),
+                ("/repo/../review", None, false, false, false),
+                ("/repo/../gone", Some("wip"), false, true, true),
+            ],
+            "only the first record is the main worktree"
+        );
+    }
+
+    #[test]
+    fn a_bare_repository_can_still_have_linked_worktrees() {
+        let output = worktree_output(&[
+            &["worktree /repo.git", "bare"],
+            &[
+                "worktree /repo.git/../feature",
+                "HEAD 2222222222222222222222222222222222222222",
+                "branch refs/heads/feature",
+            ],
+        ]);
+
+        let worktrees = parse_worktree_list(&output).expect("worktree list should parse");
+
+        assert_eq!(worktrees.len(), 2);
+        // bare な本体には HEAD 属性が無く、先頭であることだけが main の根拠になる
+        assert!(worktrees[0].is_main);
+        assert_eq!(worktrees[0].head, None);
+        assert_eq!(worktrees[0].branch, None);
+        assert!(!worktrees[1].is_main);
+        assert_eq!(worktrees[1].branch.as_deref(), Some("feature"));
+    }
+
+    #[test]
+    fn an_attribute_that_should_carry_a_value_is_rejected_without_one() {
+        // 値を持つはずの属性が値を欠くのは、出力を読み違えている証拠であるため推測しない
+        for lines in [
+            vec!["worktree /repo", "HEAD"],
+            vec![
+                "worktree /repo",
+                "HEAD 1111111111111111111111111111111111111111",
+                "branch",
+            ],
+        ] {
+            let output = worktree_record(&lines);
+
+            let err = parse_worktree_list(&output)
+                .expect_err("an attribute without its value must be rejected");
+
+            assert!(
+                matches!(err, Error::RepositoryReadFailed { .. }),
+                "unexpected error for {lines:?}: {err:?}"
+            );
+        }
     }
 
     #[test]

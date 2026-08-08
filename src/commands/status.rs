@@ -17,7 +17,7 @@ use crate::finder::{
 };
 use crate::git::exec::pathspec;
 use crate::git::read::{
-    ChangeScope, FileChange, Upstream, ahead_behind, changes, current_branch, stashes, upstream,
+    ChangeScope, FileChange, ahead_behind, changes, current_branch, stashes, upstream,
 };
 use crate::git::repo::workdir;
 
@@ -173,27 +173,12 @@ fn tracking_position(repository: &gix::Repository, branch: &str) -> Result<Optio
     else {
         return Ok(None);
     };
-    let Some(reference) = tracking_ref(&upstream) else {
+    let Some(reference) = upstream.tracking_ref() else {
         return Ok(None);
     };
 
     ahead_behind(workdir(repository)?, branch, &reference)
         .with_context(|| format!("`{reference}` との差の算出に失敗しました"))
-}
-
-/// upstream の設定からローカルのリモート追跡参照（`refs/remotes/<remote>/<branch>`）を組み立てる。
-///
-/// ahead/behind はネットワークを使わずローカルの追跡参照との比較で求めるため、
-/// リモート側の参照名（`refs/heads/<branch>`）ではなく追跡参照へ読み替える。
-/// `branch.<name>.remote` に URL を直接設定している場合など、追跡参照を組み立てられない
-/// 設定では推測せずに `None` を返す（ahead/behind の表示を省略する）。
-fn tracking_ref(upstream: &Upstream) -> Option<String> {
-    let branch = upstream.merge_ref.strip_prefix("refs/heads/")?;
-
-    Some(format!(
-        "refs/remotes/{remote}/{branch}",
-        remote = upstream.remote
-    ))
 }
 
 /// ヘッダーの 1 行を組み立てる。
@@ -542,34 +527,6 @@ mod tests {
         assert_eq!(count(&changes, FileChange::has_staged_change), 2);
         assert_eq!(count(&changes, FileChange::has_worktree_change), 2);
         assert_eq!(count(&changes, FileChange::is_untracked), 1);
-    }
-
-    #[test]
-    fn an_upstream_is_compared_against_its_remote_tracking_ref() {
-        // 比較はネットワークを使わずローカルの追跡参照で行う
-        let upstream = Upstream {
-            remote: "origin".to_owned(),
-            merge_ref: "refs/heads/main".to_owned(),
-        };
-
-        assert_eq!(
-            tracking_ref(&upstream).as_deref(),
-            Some("refs/remotes/origin/main")
-        );
-    }
-
-    #[test]
-    fn an_upstream_outside_of_the_branch_namespace_has_no_tracking_ref() {
-        let upstream = Upstream {
-            remote: "origin".to_owned(),
-            merge_ref: "refs/tags/v1.0".to_owned(),
-        };
-
-        assert_eq!(
-            tracking_ref(&upstream),
-            None,
-            "a tracking ref must not be guessed"
-        );
     }
 
     #[test]

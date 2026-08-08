@@ -3,9 +3,10 @@
 //! 各コマンドは「`git::read` で候補取得 → `finder` で選択 → `git::exec` で実行」の
 //! 直列オーケストレーションのみを担う。
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
-use crate::cli::{Command, StashCommand, WorktreeCommand};
+use crate::cli::{Command, StashCommand};
+use crate::commands::diff::DiffMode;
 use crate::commands::fetch::PruneMode;
 use crate::commands::fixup::FixupKind;
 use crate::commands::merge::MergeMode;
@@ -13,6 +14,7 @@ use crate::commands::push::UpstreamUpdate;
 use crate::commands::restore::RestoreTarget;
 use crate::commands::revert::MessageEditing;
 use crate::commands::stash::{StashAction, UntrackedFiles};
+use crate::commands::sync::SyncMode;
 use crate::commands::tag::TagAction;
 use crate::git::read::{BranchScope, CommitScope};
 use crate::git::repo;
@@ -23,6 +25,7 @@ pub mod branch_manage;
 pub mod cherry_pick;
 pub mod commit;
 pub mod confirmation;
+pub mod diff;
 pub mod fetch;
 pub mod file_selection;
 pub mod fixup;
@@ -36,7 +39,9 @@ pub mod restore;
 pub mod revert;
 pub mod stash;
 pub mod status;
+pub mod sync;
 pub mod tag;
+pub mod worktree;
 
 /// これから実行する git コマンドを表示用の 1 行に整形する。
 ///
@@ -58,15 +63,6 @@ pub(crate) fn status_preview_args() -> Vec<String> {
         .into_iter()
         .map(str::to_owned)
         .collect()
-}
-
-/// まだ実装されていないサブコマンドであることを伝えて失敗する。
-///
-/// `cli` の定義（ヘルプ・オプションの検証）を先に固めるための一時的な実装であり、
-/// 各機能のフェーズで本実装へ差し替える。何もせずに正常終了すると「実行された」と
-/// 誤解されるため、必ずエラーとして終了する。
-pub(crate) fn unimplemented_command(name: &str) -> Result<()> {
-    bail!("`{name}` はまだ実装されていません");
 }
 
 /// サブコマンドを対応する実装へ振り分ける。
@@ -164,7 +160,16 @@ pub fn dispatch(command: &Command) -> Result<()> {
             revert::run(&repository, editing)
         }
         Command::Status => status::run(&repository),
-        Command::Diff { .. } => unimplemented_command("gz diff"),
+        Command::Diff {
+            staged,
+            head,
+            upstream,
+            branch,
+            commit,
+        } => diff::run(
+            &repository,
+            DiffMode::from_flags(*staged, *head, *upstream, *branch, *commit)?,
+        ),
         Command::Fetch { prune } => {
             let prune = if *prune {
                 PruneMode::Prune
@@ -173,12 +178,9 @@ pub fn dispatch(command: &Command) -> Result<()> {
             };
             fetch::run(&repository, prune)
         }
-        Command::Sync { .. } => unimplemented_command("gz sync"),
-        Command::Worktree { command } => match command {
-            None => unimplemented_command("gz worktree"),
-            Some(WorktreeCommand::Add { .. }) => unimplemented_command("gz worktree add"),
-            Some(WorktreeCommand::Remove) => unimplemented_command("gz worktree remove"),
-            Some(WorktreeCommand::Prune) => unimplemented_command("gz worktree prune"),
-        },
+        Command::Sync { rebase, merge } => {
+            sync::run(&repository, SyncMode::from_flags(*rebase, *merge)?)
+        }
+        Command::Worktree { command } => worktree::run(&repository, command.as_ref()),
     }
 }

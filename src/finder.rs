@@ -365,7 +365,21 @@ pub fn run_finder_with(items: Vec<FinderItem>, options: &FinderOptions) -> Resul
 /// - 中断された場合、および 1 件も選ばれずに決定された場合は [`Error::Cancelled`]
 /// - skim の初期化・実行に失敗した場合は [`Error::FinderFailed`]
 pub fn select_one(items: Vec<FinderItem>) -> Result<String> {
-    let mut selected = run_finder(items, SelectionMode::Single)?;
+    select_one_with(items, &FinderOptions::new(SelectionMode::Single))
+}
+
+/// [`select_one`] と同じだが、ヘッダーを含む [`FinderOptions`] を受け取る。
+///
+/// 単一選択を複数回続けて行う場合（`gz diff --branch` / `--commit` の base と対象）に、
+/// 今どちらを選んでいるのかをヘッダーで示すために用いる。
+/// [`select_many_with`] と同様、[`FinderOptions::mode`] は呼び出し側が指定する
+/// （[`SelectionMode::Multi`] を渡した場合、返るのは選択のうち 1 件だけになる）。
+///
+/// # Errors
+///
+/// [`select_one`] と同じ。
+pub fn select_one_with(items: Vec<FinderItem>, options: &FinderOptions) -> Result<String> {
+    let mut selected = run_finder_with(items, options)?;
 
     // クエリに一致する候補が無い状態で Enter を押した場合、skim は中断扱いにせず
     // 空の選択結果を返す。何も選ばれていない以上、後続の git 操作は行わない

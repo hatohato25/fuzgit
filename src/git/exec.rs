@@ -156,6 +156,19 @@ pub fn capture_git_in(directory: &Path, args: &[&str]) -> Result<Vec<u8>> {
     capture(Some(directory), args)
 }
 
+/// `git` を `directory` で実行し、**標準エラー**をバイト列としてキャプチャする。
+///
+/// `git worktree prune --dry-run --verbose` は整理対象の報告を標準出力ではなく標準エラーへ
+/// 出す（git 2.55 で実測）。標準出力だけを見ると常に空になり「対象なし」と取り違えるため、
+/// 報告を標準エラーへ出す少数のコマンド専用のヘルパを設ける。
+///
+/// # Errors
+///
+/// [`capture_git`] と同じ。
+pub fn capture_git_stderr_in(directory: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    Ok(capture_output(Some(directory), args)?.stderr)
+}
+
 /// `git` を `directory` で実行し、終了コードと標準出力を返す。
 ///
 /// [`capture_git_in`] と違い、非ゼロ終了をエラーにしない。`git merge-tree --write-tree` の
@@ -226,6 +239,13 @@ impl MergeTreeOutcome {
 
 /// `git` を実行して標準出力をキャプチャする。`directory` 指定時はそこを作業ディレクトリとする。
 fn capture(directory: Option<&Path>, args: &[&str]) -> Result<Vec<u8>> {
+    Ok(capture_output(directory, args)?.stdout)
+}
+
+/// `git` を実行し、成功した場合の出力（標準出力・標準エラーの両方）を返す。
+///
+/// 標準入力は閉じ、対話プロンプトで固まらないようにする。
+fn capture_output(directory: Option<&Path>, args: &[&str]) -> Result<std::process::Output> {
     log_command(directory, args);
 
     let mut command = Command::new("git");
@@ -239,7 +259,7 @@ fn capture(directory: Option<&Path>, args: &[&str]) -> Result<Vec<u8>> {
         .map_err(|source| map_spawn_error(source, args))?;
 
     if output.status.success() {
-        Ok(output.stdout)
+        Ok(output)
     } else {
         Err(Error::GitCommandFailed {
             args: display_args(args),
@@ -287,6 +307,24 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn capture_git_stderr_in_returns_the_report_written_to_stderr() {
+        use crate::test_support::{TempDir, init_repository};
+
+        let dir = TempDir::new("exec-capture-stderr");
+        init_repository(dir.path());
+
+        // `git worktree list` は標準出力へ、`--dry-run --verbose` の prune は標準エラーへ出す。
+        // 前者を stderr として読むと空になることで、読み取る側を取り違えていないことが分かる
+        let stderr = capture_git_stderr_in(dir.path(), &["worktree", "list", "--porcelain"])
+            .expect("git worktree list should succeed");
+
+        assert!(
+            stderr.is_empty(),
+            "stdout must not leak into the stderr capture: {stderr:?}"
+        );
     }
 
     #[test]

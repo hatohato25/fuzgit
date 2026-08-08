@@ -918,6 +918,133 @@ fn status_reports_a_clean_work_tree_and_exits_successfully() {
     }
 }
 
+/// 比較範囲に差分が無い場合、`gz diff` は TUI を起動せず正常終了することを確認する。
+///
+/// 「差分が無い」ことは正常な結果であり、エラーにしない（requirements.md FR-17）。
+/// 引数なし（unstaged）と `--staged` / `--head` のいずれでも同じ扱いになることを確かめる。
+#[test]
+fn diff_reports_an_empty_comparison_and_exits_successfully() {
+    let dir = empty_repository("diff-no-difference");
+    commit_in(dir.path(), "a.txt", "first\n", "first commit");
+
+    for arguments in [
+        vec!["diff"],
+        vec!["diff", "--staged"],
+        vec!["diff", "--head"],
+    ] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            // 事前チェックが失われた場合に TUI で待ち続けないよう、上限を設けて打ち切る
+            .timeout(FINDER_GUARD_TIMEOUT)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            output.status.success(),
+            "gz {arguments:?} should succeed when there is no difference"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("差分はありません"),
+            "the empty comparison should be reported for gz {arguments:?}:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "stdout is reserved for the diff itself for gz {arguments:?}"
+        );
+    }
+}
+
+/// `gz diff --upstream` は upstream が無い場合に、その原因を伝えて停止することを確認する。
+///
+/// 比較対象を決められない以上、暗黙に別の範囲（HEAD など）へ倒さない。
+#[test]
+fn diff_against_the_upstream_requires_one_to_be_configured() {
+    let tracking = empty_repository("diff-upstream-missing");
+    commit_in(tracking.path(), "a.txt", "first\n", "first commit");
+
+    let output = gz()
+        .args(["diff", "--upstream"])
+        .current_dir(tracking.path())
+        // 事前チェックが失われた場合に TUI で待ち続けないよう、上限を設けて打ち切る
+        .timeout(FINDER_GUARD_TIMEOUT)
+        .output()
+        .expect("failed to run gz diff --upstream");
+
+    assert!(
+        !output.status.success(),
+        "gz diff --upstream should exit non-zero without an upstream"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("upstream が設定されていません"),
+        "the missing upstream should be reported:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--set-upstream-to"),
+        "the next step should be suggested:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "nothing should be written to stdout"
+    );
+
+    // detached HEAD にはそもそも upstream の設定が無く、原因が異なるため別のメッセージにする
+    git_in(tracking.path(), &["switch", "--quiet", "--detach", "HEAD"]);
+    let output = gz()
+        .args(["diff", "--upstream"])
+        .current_dir(tracking.path())
+        .timeout(FINDER_GUARD_TIMEOUT)
+        .output()
+        .expect("failed to run gz diff --upstream on a detached HEAD");
+
+    assert!(
+        !output.status.success(),
+        "gz diff --upstream should exit non-zero on a detached HEAD"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("detached HEAD"),
+        "the detached HEAD should be named as the cause:\n{stderr}"
+    );
+}
+
+/// `gz diff --help` に比較モードが並び、比較対象を直接指定する引数が無いことを確認する。
+///
+/// 比較するリビジョン・ファイルは fuzzy finder で選ぶ設計であり、コマンドラインでは指定しない。
+#[test]
+fn diff_documents_its_comparison_modes_and_takes_no_revision_argument() {
+    let output = gz()
+        .args(["diff", "--help"])
+        .output()
+        .expect("failed to run gz diff --help");
+
+    assert!(output.status.success(), "gz diff --help should succeed");
+
+    let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
+    for option in ["--staged", "--head", "--upstream", "--branch", "--commit"] {
+        assert!(
+            stdout.contains(option),
+            "`{option}` should be documented:\n{stdout}"
+        );
+    }
+
+    let dir = empty_repository("diff-positional");
+    let output = gz()
+        .args(["diff", "main"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz diff main");
+    assert!(
+        !output.status.success(),
+        "the revisions are chosen in the finder, not on the command line"
+    );
+}
+
 /// `gz restore --source` に解決できないリビジョンを渡した場合、その名前を含むエラーになることを確認する。
 #[test]
 fn restore_reports_an_unknown_source_revision_by_name() {
@@ -1002,6 +1129,170 @@ fn fetch_documents_the_prune_option_and_takes_no_remote_argument() {
     assert!(
         !output.status.success(),
         "the remote is chosen in the finder, not on the command line"
+    );
+}
+
+/// `gz sync` は upstream が定まらない場合、fetch する前に原因を伝えて停止することを確認する。
+///
+/// ネットワークを伴う経路（実際の取得・取り込み）は自動テストの対象外とし、実機
+/// （ローカルの bare リポジトリを remote に設定した使い捨てリポジトリ）で確認する。
+/// ここで検証するのは、対象を推測して別のリモート・ブランチへ倒さないこと。
+#[test]
+fn sync_requires_an_upstream_before_reaching_the_network() {
+    let dir = empty_repository("sync-upstream-missing");
+    commit_in(dir.path(), "a.txt", "first\n", "first commit");
+
+    for arguments in [
+        vec!["sync"],
+        vec!["sync", "--rebase"],
+        vec!["sync", "--merge"],
+    ] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            // 事前チェックが失われた場合に TUI・ネットワークで待ち続けないよう上限を設ける
+            .timeout(FINDER_GUARD_TIMEOUT)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should exit non-zero without an upstream"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("upstream が設定されていません"),
+            "the missing upstream should be reported for gz {arguments:?}:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("--set-upstream-to"),
+            "the next step should be suggested for gz {arguments:?}:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "nothing should be written to stdout for gz {arguments:?}"
+        );
+    }
+
+    // detached HEAD にはそもそも upstream の設定が無く、原因が異なるため別のメッセージにする
+    git_in(dir.path(), &["switch", "--quiet", "--detach", "HEAD"]);
+    let output = gz()
+        .arg("sync")
+        .current_dir(dir.path())
+        .timeout(FINDER_GUARD_TIMEOUT)
+        .output()
+        .expect("failed to run gz sync on a detached HEAD");
+
+    assert!(
+        !output.status.success(),
+        "gz sync should exit non-zero on a detached HEAD"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("detached HEAD"),
+        "the detached HEAD should be named as the cause:\n{stderr}"
+    );
+}
+
+/// `gz sync` の取り込み方式がフラグで、取得先を引数で指定できないことを確認する。
+///
+/// 対象は現在ブランチの upstream に固定する設計であり、コマンドラインから選ばせない。
+#[test]
+fn sync_documents_its_integration_modes_and_takes_no_target_argument() {
+    let output = gz()
+        .args(["sync", "--help"])
+        .output()
+        .expect("failed to run gz sync --help");
+
+    assert!(output.status.success(), "gz sync --help should succeed");
+
+    let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
+    for option in ["--rebase", "--merge"] {
+        assert!(
+            stdout.contains(option),
+            "`{option}` should be documented:\n{stdout}"
+        );
+    }
+
+    let dir = empty_repository("sync-positional");
+    let output = gz()
+        .args(["sync", "origin"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz sync origin");
+    assert!(
+        !output.status.success(),
+        "the target is the upstream, not a command line argument"
+    );
+}
+
+/// 整理対象が無い場合、`gz worktree prune` はその旨を伝えて正常終了することを確認する。
+///
+/// 対象が無いのは正常な状態であり、エラーにしない（requirements.md FR-21）。
+#[test]
+fn worktree_prune_reports_when_there_is_nothing_to_prune() {
+    let dir = empty_repository("worktree-prune-nothing");
+    commit_in(dir.path(), "a.txt", "first\n", "first commit");
+
+    let output = gz()
+        .args(["worktree", "prune"])
+        .current_dir(dir.path())
+        // 確認プロンプトへ進んでしまった場合に待ち続けないよう上限を設ける
+        .timeout(FINDER_GUARD_TIMEOUT)
+        .output()
+        .expect("failed to run gz worktree prune");
+
+    assert!(
+        output.status.success(),
+        "gz worktree prune should succeed when there is nothing to prune"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("整理する worktree はありません"),
+        "the empty result should be reported:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stdout is reserved for the path of a selection"
+    );
+}
+
+/// linked worktree が無い場合、`gz worktree remove` は候補を出さずに理由を伝えることを確認する。
+///
+/// main worktree は `git worktree remove` の対象外であり、候補に含めない。
+#[test]
+fn worktree_remove_never_offers_the_main_worktree() {
+    let dir = empty_repository("worktree-remove-nothing");
+    commit_in(dir.path(), "a.txt", "first\n", "first commit");
+
+    let output = gz()
+        .args(["worktree", "remove"])
+        .current_dir(dir.path())
+        // 事前チェックが失われた場合に TUI で待ち続けないよう上限を設ける
+        .timeout(FINDER_GUARD_TIMEOUT)
+        .output()
+        .expect("failed to run gz worktree remove");
+
+    assert!(
+        !output.status.success(),
+        "gz worktree remove should exit non-zero without a linked worktree"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("削除できる worktree がありません"),
+        "the reason should be explained:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("main"),
+        "the excluded main worktree should be named:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "nothing should be written to stdout"
     );
 }
 
