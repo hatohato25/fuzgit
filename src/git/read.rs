@@ -226,6 +226,42 @@ pub fn remotes(repository: &gix::Repository) -> Result<Vec<String>> {
         .collect()
 }
 
+/// 参照名だけを短縮名で列挙させる `git for-each-ref` の書式。
+///
+/// 既定の出力はオブジェクト ID と種別も並べるため、必要な参照名だけを出させる。
+/// 参照名は制御文字を含めない規則（`git check-ref-format`）であり、改行で区切っても曖昧にならない。
+const SHORT_REF_FORMAT: &str = "--format=%(refname:short)";
+
+/// リモートの URL を表示する `git remote get-url <remote>` の実行引数を組み立てる。
+///
+/// `.git/config` に記録された URL を読むだけで、ネットワークへは接続しない。
+/// `gz fetch` のプレビューは選択項目ごとに都度実行されるため、往復遅延・認証プロンプトで
+/// 描画がブロックされないよう、プレビューへ出すのはこのようなローカル情報に限る
+/// （design.md「候補生成・プレビューでネットワークアクセスを行わない」）。
+///
+/// `remote` には [`remotes`] が列挙した名前だけを渡すこと（`git remote get-url` は
+/// リモート名を `--` で保護できないため、値の由来で担保する）。
+#[must_use]
+pub fn remote_url_args(remote: &str) -> Vec<String> {
+    ["remote", "get-url", remote]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// 既知のリモート追跡ブランチを列挙する `git for-each-ref` の実行引数を組み立てる。
+///
+/// [`remote_url_args`] と同じく、ローカルに保存済みの参照を読むだけでネットワークへは接続しない
+/// （前回の fetch までに取得できている参照が並ぶ）。
+#[must_use]
+pub fn remote_tracking_refs_args(remote: &str) -> Vec<String> {
+    vec![
+        "for-each-ref".to_owned(),
+        format!("refs/remotes/{remote}"),
+        SHORT_REF_FORMAT.to_owned(),
+    ]
+}
+
 /// ブランチに設定された upstream（`branch.<name>.remote` / `.merge`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Upstream {
@@ -1274,6 +1310,22 @@ pub fn worktrees(workdir: &Path) -> Result<Vec<WorktreeInfo>> {
     parse_worktree_list(&output)
 }
 
+/// worktree でチェックアウト中のブランチの短縮名を集める。
+///
+/// [`worktrees`] の結果を受け取るだけのプロセス内処理であり、追加の git 実行は行わない
+/// （`gz branch delete` の候補生成で git の実行回数を増やさないため）。
+/// detached HEAD の worktree はブランチを占有しないため含まれない。
+///
+/// git は同じブランチを複数の worktree で同時にチェックアウトできず、使用中のブランチの
+/// 削除も拒否する。そのため呼び出し側は、この集合に含まれるブランチを候補から除外する。
+#[must_use]
+pub fn checked_out_branches(worktrees: &[WorktreeInfo]) -> HashSet<String> {
+    worktrees
+        .iter()
+        .filter_map(|worktree| worktree.branch.clone())
+        .collect()
+}
+
 /// 値を伴うはずの属性から値を取り出す。
 ///
 /// ラベルのみの行になるのは真偽値の属性（`detached` / `bare` / 理由の無い `locked`）だけで、
@@ -1430,6 +1482,11 @@ mod tests {
 
     fn names(branches: &[BranchInfo]) -> Vec<&str> {
         branches.iter().map(|branch| branch.name.as_str()).collect()
+    }
+
+    /// 組み立てた引数を [`capture_git_in`] へ渡せる形へ変換する。
+    fn to_str(arguments: &[String]) -> Vec<&str> {
+        arguments.iter().map(String::as_str).collect()
     }
 
     fn summaries(commits: &[CommitInfo]) -> Vec<&str> {
@@ -2531,6 +2588,103 @@ mod tests {
         assert!(remotes.is_empty(), "unexpected remotes: {remotes:?}");
     }
 
+    /// 2 つのリモートと、その一方だけに追跡参照を持つテストリポジトリを用意する。
+    fn repository_with_two_remotes(label: &str) -> (TempDir, String) {
+        let (dir, _repository, head) = repository_with_one_commit(label);
+        git_in(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/origin.git",
+            ],
+        );
+        git_in(
+            dir.path(),
+            &["remote", "add", "backup", "/srv/git/backup.git"],
+        );
+        create_remote_branch(dir.path(), "origin/main", &head);
+        create_remote_branch(dir.path(), "origin/feature/login", &head);
+
+        (dir, head)
+    }
+
+    #[test]
+    fn a_remote_url_is_read_from_the_local_configuration() {
+        let (dir, _head) = repository_with_two_remotes("read-remote-url");
+
+        let output = capture_git_in(dir.path(), &to_str(&remote_url_args("origin")))
+            .expect("the remote url should be readable");
+
+        assert_eq!(
+            String::from_utf8_lossy(&output).trim(),
+            "https://example.invalid/origin.git"
+        );
+    }
+
+    #[test]
+    fn each_remote_reports_its_own_url() {
+        let (dir, _head) = repository_with_two_remotes("read-remote-url-each");
+
+        let output = capture_git_in(dir.path(), &to_str(&remote_url_args("backup")))
+            .expect("the remote url should be readable");
+
+        assert_eq!(
+            String::from_utf8_lossy(&output).trim(),
+            "/srv/git/backup.git"
+        );
+    }
+
+    #[test]
+    fn the_tracking_refs_of_a_remote_are_listed_by_their_short_name() {
+        let (dir, _head) = repository_with_two_remotes("read-remote-tracking-refs");
+
+        let output = capture_git_in(dir.path(), &to_str(&remote_tracking_refs_args("origin")))
+            .expect("the tracking refs should be readable");
+
+        let text = String::from_utf8_lossy(&output).into_owned();
+        let refs: Vec<&str> = text.lines().collect();
+        assert_eq!(refs, ["origin/feature/login", "origin/main"]);
+    }
+
+    #[test]
+    fn a_remote_without_tracking_refs_lists_none() {
+        // まだ一度も fetch していないリモートには追跡参照が無い（ネットワークは使わない）
+        let (dir, _head) = repository_with_two_remotes("read-remote-tracking-refs-empty");
+
+        let output = capture_git_in(dir.path(), &to_str(&remote_tracking_refs_args("backup")))
+            .expect("the tracking refs should be readable");
+
+        assert!(output.is_empty(), "unexpected output: {output:?}");
+    }
+
+    #[test]
+    fn the_remote_preview_arguments_never_reach_the_network() {
+        // ネットワークを伴う git のサブコマンド（fetch / ls-remote 等）を含まないことを構造的に確かめる
+        for arguments in [
+            remote_url_args("origin"),
+            remote_tracking_refs_args("origin"),
+        ] {
+            assert!(
+                matches!(arguments[0].as_str(), "remote" | "for-each-ref"),
+                "unexpected subcommand: {arguments:?}"
+            );
+            assert!(
+                !arguments.iter().any(|argument| argument.contains("fetch")),
+                "a preview must not fetch: {arguments:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tracking_refs_are_addressed_by_the_full_reference_prefix() {
+        assert_eq!(
+            remote_tracking_refs_args("origin"),
+            ["for-each-ref", "refs/remotes/origin", SHORT_REF_FORMAT]
+        );
+    }
+
     #[test]
     fn an_upstream_is_read_from_the_branch_configuration() {
         let (dir, _repository, head) = repository_with_one_commit("read-upstream");
@@ -3467,6 +3621,75 @@ mod tests {
             worktrees[1].path.ends_with("linked worktree"),
             "unexpected path: {path}",
             path = worktrees[1].path
+        );
+    }
+
+    /// テスト用の worktree エントリを組み立てる。
+    fn worktree(path: &str, branch: Option<&str>) -> WorktreeInfo {
+        WorktreeInfo {
+            path: path.to_owned(),
+            head: Some("1111111111111111111111111111111111111111".to_owned()),
+            branch: branch.map(str::to_owned),
+            is_main: false,
+            is_locked: false,
+            prunable: false,
+        }
+    }
+
+    #[test]
+    fn every_branch_checked_out_by_a_worktree_is_collected() {
+        let worktrees = [
+            worktree("/repo", Some("main")),
+            worktree("/repo/../feature", Some("feature/login")),
+        ];
+
+        let in_use = checked_out_branches(&worktrees);
+
+        assert_eq!(
+            in_use,
+            HashSet::from(["main".to_owned(), "feature/login".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_detached_worktree_holds_no_branch() {
+        let worktrees = [worktree("/repo", Some("main")), worktree("/detached", None)];
+
+        let in_use = checked_out_branches(&worktrees);
+
+        assert_eq!(in_use, HashSet::from(["main".to_owned()]));
+    }
+
+    #[test]
+    fn an_empty_worktree_list_holds_no_branch() {
+        assert!(checked_out_branches(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_branches_in_use_are_read_from_a_real_repository() {
+        let dir = TempDir::new("read-checked-out-branches");
+        init_repository(dir.path());
+        commit(dir.path(), "first commit");
+        create_branch(dir.path(), "feature");
+        let linked = dir.path().join("linked");
+        git_in(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                &linked.to_string_lossy(),
+                "feature",
+            ],
+        );
+
+        let worktrees = worktrees(dir.path()).expect("worktrees should be read");
+        let in_use = checked_out_branches(&worktrees);
+
+        assert_eq!(
+            in_use,
+            HashSet::from(["main".to_owned(), "feature".to_owned()]),
+            "both the current branch and the linked worktree are in use"
         );
     }
 }

@@ -120,13 +120,12 @@ fn git_in(directory: &Path, arguments: &[&str]) {
     );
 }
 
-/// コミットを 1 件持ち、ステージしていない変更が 1 件ある git リポジトリを用意する。
-fn repository_with_an_unstaged_change(label: &str) -> TempDir {
-    let dir = empty_repository(label);
-    std::fs::write(dir.path().join("a.txt"), "first\n").expect("failed to write a file");
-    git_in(dir.path(), &["add", "--", "a.txt"]);
+/// 指定ディレクトリでファイルを 1 件変更してコミットする。
+fn commit_in(directory: &Path, file: &str, contents: &str, message: &str) {
+    std::fs::write(directory.join(file), contents).expect("failed to write a file");
+    git_in(directory, &["add", "--", file]);
     git_in(
-        dir.path(),
+        directory,
         &[
             "-c",
             "user.name=fuzgit test",
@@ -135,10 +134,28 @@ fn repository_with_an_unstaged_change(label: &str) -> TempDir {
             "commit",
             "--quiet",
             "--message",
-            "first commit",
+            message,
         ],
     );
+}
+
+/// コミットを 1 件持ち、ステージしていない変更が 1 件ある git リポジトリを用意する。
+fn repository_with_an_unstaged_change(label: &str) -> TempDir {
+    let dir = empty_repository(label);
+    commit_in(dir.path(), "a.txt", "first\n", "first commit");
     std::fs::write(dir.path().join("a.txt"), "modified\n").expect("failed to write a file");
+    dir
+}
+
+/// `main` と、`main` へ取り込まれていない `wip` ブランチを持つ git リポジトリを用意する。
+///
+/// merged なブランチが 1 件も無い状態であり、`gz branch cleanup` の候補が空になる。
+fn repository_with_an_unmerged_branch(label: &str) -> TempDir {
+    let dir = empty_repository(label);
+    commit_in(dir.path(), "a.txt", "first\n", "first commit");
+    git_in(dir.path(), &["switch", "--quiet", "--create", "wip"]);
+    commit_in(dir.path(), "b.txt", "wip\n", "work in progress");
+    git_in(dir.path(), &["switch", "--quiet", "main"]);
     dir
 }
 
@@ -921,6 +938,200 @@ fn restore_reports_an_unknown_source_revision_by_name() {
     assert!(
         stderr.contains("no-such-revision"),
         "the unknown revision should be named:\n{stderr}"
+    );
+}
+
+/// リモートが 1 つも無い場合、`gz fetch` は原因と次の操作を伝えて終了することを確認する。
+///
+/// ネットワークを伴う経路（実際の取得）は自動テストの対象外とし、実機（ローカルの bare
+/// リポジトリを remote に設定した使い捨てリポジトリ）で確認する。
+#[test]
+fn fetch_reports_when_no_remote_is_configured() {
+    let dir = empty_repository("fetch-no-remote");
+
+    for arguments in [vec!["fetch"], vec!["fetch", "--prune"]] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            // 事前チェックが失われた場合に TUI で待ち続けないよう、上限を設けて打ち切る
+            .timeout(FINDER_GUARD_TIMEOUT)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should exit non-zero without a remote"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("git remote add"),
+            "the next step should be suggested for gz {arguments:?}:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "nothing should be written to stdout for gz {arguments:?}"
+        );
+    }
+}
+
+/// `gz fetch --help` に `--prune` が載っており、取得先の指定オプションが無いことを確認する。
+///
+/// 取得先は fuzzy finder で選ぶ設計であり、コマンドラインからは指定しない。
+#[test]
+fn fetch_documents_the_prune_option_and_takes_no_remote_argument() {
+    let output = gz()
+        .args(["fetch", "--help"])
+        .output()
+        .expect("failed to run gz fetch --help");
+
+    assert!(output.status.success(), "gz fetch --help should succeed");
+
+    let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
+    assert!(
+        stdout.contains("--prune"),
+        "`--prune` should be documented:\n{stdout}"
+    );
+
+    let dir = empty_repository("fetch-positional");
+    let output = gz()
+        .args(["fetch", "origin"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz fetch origin");
+    assert!(
+        !output.status.success(),
+        "the remote is chosen in the finder, not on the command line"
+    );
+}
+
+/// `--into` に存在しないブランチを渡した場合、選択を始める前に停止することを確認する。
+///
+/// `git branch --merged=<base>` の値は `--` で保護できないため、候補一覧との照合を
+/// 通らない名前が git へ渡らないことを非対話パスで確かめる（design.md セキュリティ設計）。
+#[test]
+fn branch_management_rejects_an_unknown_merge_base_before_selecting() {
+    let dir = repository_with_an_unmerged_branch("branch-into-unknown");
+
+    for arguments in [
+        vec!["branch", "delete", "--into", "no-such-branch"],
+        vec!["branch", "cleanup", "--into", "no-such-branch"],
+    ] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            // 検証が失われた場合に TUI で待ち続けないよう、上限を設けて打ち切る
+            .timeout(FINDER_GUARD_TIMEOUT)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should exit non-zero for an unknown base"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("no-such-branch") && stderr.contains("--into"),
+            "the option and the name should be named for gz {arguments:?}:\n{stderr}"
+        );
+    }
+}
+
+/// 削除・整理の候補が 1 件も無い場合、TUI を起動せずに理由を伝えることを確認する。
+#[test]
+fn branch_management_reports_when_there_is_nothing_to_delete() {
+    let only_main = empty_repository("branch-delete-nothing");
+    commit_in(only_main.path(), "a.txt", "first\n", "first commit");
+    let unmerged_only = repository_with_an_unmerged_branch("branch-cleanup-nothing");
+
+    for (dir, arguments, expected) in [
+        // 現在のブランチしか無いリポジトリでは削除できるブランチが無い
+        (&only_main, vec!["branch", "delete"], "削除できるブランチ"),
+        // merged なブランチが無いリポジトリでは整理する対象が無い
+        (&unmerged_only, vec!["branch", "cleanup"], "merged"),
+    ] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            // 事前チェックが失われた場合に TUI で待ち続けないよう、上限を設けて打ち切る
+            .timeout(FINDER_GUARD_TIMEOUT)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should exit non-zero when there is nothing to select"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains(expected),
+            "the reason should be explained for gz {arguments:?}:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "nothing should be written to stdout for gz {arguments:?}"
+        );
+    }
+}
+
+/// 管理サブコマンドを実装しても、切替（FR-1）の経路が変わっていないことを確認する。
+///
+/// 実装済みの管理サブコマンドがあると、引数なしの `gz branch` がそちらへ吸われる余地が
+/// 生まれる。ブランチが複数ある実リポジトリで、切替だけが TUI（＝候補選択）へ進むことを
+/// 「候補ゼロで止まらないこと」ではなく、削除側が別経路で止まることと対比して確かめる。
+#[test]
+fn branch_without_a_subcommand_is_unaffected_by_the_management_subcommands() {
+    let dir = empty_repository("branch-switch-regression");
+    commit_in(dir.path(), "a.txt", "first\n", "first commit");
+
+    // 切替のヘルプは従来どおり `--all` を持ち、管理サブコマンドも並ぶ
+    let output = gz()
+        .args(["branch", "--help"])
+        .output()
+        .expect("failed to run gz branch --help");
+    assert!(output.status.success(), "gz branch --help should succeed");
+    let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
+    assert!(
+        stdout.contains("--all"),
+        "`--all` should stay documented:\n{stdout}"
+    );
+    for subcommand in BRANCH_SUBCOMMANDS {
+        assert!(
+            stdout.contains(subcommand),
+            "`{subcommand}` should be listed:\n{stdout}"
+        );
+    }
+
+    // 切替用のフラグとサブコマンドの併用は clap の段階で拒否されたまま
+    for arguments in [
+        vec!["branch", "--all", "delete"],
+        vec!["branch", "-a", "cleanup"],
+    ] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            .timeout(FINDER_GUARD_TIMEOUT)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} must not be accepted"
+        );
+    }
+
+    // 管理サブコマンドは切替とは別の経路（削除候補ゼロ）で止まる
+    let output = gz()
+        .args(["branch", "delete"])
+        .current_dir(dir.path())
+        .timeout(FINDER_GUARD_TIMEOUT)
+        .output()
+        .expect("failed to run gz branch delete");
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("削除できるブランチ"),
+        "the delete path should be taken:\n{stderr}"
     );
 }
 

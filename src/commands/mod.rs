@@ -6,6 +6,7 @@
 use anyhow::{Result, bail};
 
 use crate::cli::{Command, StashCommand, WorktreeCommand};
+use crate::commands::fetch::PruneMode;
 use crate::commands::fixup::FixupKind;
 use crate::commands::merge::MergeMode;
 use crate::commands::push::UpstreamUpdate;
@@ -22,6 +23,7 @@ pub mod branch_manage;
 pub mod cherry_pick;
 pub mod commit;
 pub mod confirmation;
+pub mod fetch;
 pub mod file_selection;
 pub mod fixup;
 pub mod in_progress;
@@ -88,7 +90,7 @@ pub fn dispatch(command: &Command) -> Result<()> {
                 };
                 branch::run(&repository, scope)
             }
-            Some(command) => branch_manage::run(command),
+            Some(command) => branch_manage::run(&repository, command),
         },
         Command::Log { limit } => log::run(&repository, *limit),
         Command::CherryPick { branch } => {
@@ -163,7 +165,14 @@ pub fn dispatch(command: &Command) -> Result<()> {
         }
         Command::Status => status::run(&repository),
         Command::Diff { .. } => unimplemented_command("gz diff"),
-        Command::Fetch { .. } => unimplemented_command("gz fetch"),
+        Command::Fetch { prune } => {
+            let prune = if *prune {
+                PruneMode::Prune
+            } else {
+                PruneMode::Keep
+            };
+            fetch::run(&repository, prune)
+        }
         Command::Sync { .. } => unimplemented_command("gz sync"),
         Command::Worktree { command } => match command {
             None => unimplemented_command("gz worktree"),
