@@ -3,13 +3,14 @@
 //! 各コマンドは「`git::read` で候補取得 → `finder` で選択 → `git::exec` で実行」の
 //! 直列オーケストレーションのみを担う。
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
-use crate::cli::{Command, StashCommand};
+use crate::cli::{Command, StashCommand, WorktreeCommand};
 use crate::commands::fixup::FixupKind;
 use crate::commands::merge::MergeMode;
 use crate::commands::push::UpstreamUpdate;
 use crate::commands::restore::RestoreTarget;
+use crate::commands::revert::MessageEditing;
 use crate::commands::stash::{StashAction, UntrackedFiles};
 use crate::commands::tag::TagAction;
 use crate::git::read::{BranchScope, CommitScope};
@@ -17,6 +18,7 @@ use crate::git::repo;
 
 pub mod add;
 pub mod branch;
+pub mod branch_manage;
 pub mod cherry_pick;
 pub mod commit;
 pub mod confirmation;
@@ -29,7 +31,9 @@ pub mod push;
 pub mod rebase;
 pub mod reflog;
 pub mod restore;
+pub mod revert;
 pub mod stash;
+pub mod status;
 pub mod tag;
 
 /// これから実行する git コマンドを表示用の 1 行に整形する。
@@ -39,6 +43,28 @@ pub mod tag;
 /// 実行する引数配列そのものから組み立てるため、説明と実際の操作が食い違わない。
 pub(crate) fn command_display(args: &[&str]) -> String {
     format!("git {args}", args = args.join(" "))
+}
+
+/// 現在の状態を色付きで示す `git status` の引数を組み立てる。
+///
+/// 固定項目のメニュー（FR-14 の復帰メニュー、FR-16 のアクションメニュー）で、
+/// どの項目を選んでいても現在の状態（未解決 / 解決済み・staged / unstaged の区別を含む
+/// 短縮表記）が見えるようにするために用いる。
+/// 出力をキャプチャして実行する場合 git は色付けを止めるため、明示的に有効化する。
+pub(crate) fn status_preview_args() -> Vec<String> {
+    ["-c", "color.status=always", "status", "--short", "--branch"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// まだ実装されていないサブコマンドであることを伝えて失敗する。
+///
+/// `cli` の定義（ヘルプ・オプションの検証）を先に固めるための一時的な実装であり、
+/// 各機能のフェーズで本実装へ差し替える。何もせずに正常終了すると「実行された」と
+/// 誤解されるため、必ずエラーとして終了する。
+pub(crate) fn unimplemented_command(name: &str) -> Result<()> {
+    bail!("`{name}` はまだ実装されていません");
 }
 
 /// サブコマンドを対応する実装へ振り分ける。
@@ -52,14 +78,18 @@ pub fn dispatch(command: &Command) -> Result<()> {
     let repository = repo::discover_from_current_dir()?;
 
     match command {
-        Command::Branch { all } => {
-            let scope = if *all {
-                BranchScope::All
-            } else {
-                BranchScope::Local
-            };
-            branch::run(&repository, scope)
-        }
+        // サブコマンドなしは従来どおりの切替（FR-1）。管理操作は branch_manage が担う
+        Command::Branch { all, command } => match command {
+            None => {
+                let scope = if *all {
+                    BranchScope::All
+                } else {
+                    BranchScope::Local
+                };
+                branch::run(&repository, scope)
+            }
+            Some(command) => branch_manage::run(command),
+        },
         Command::Log { limit } => log::run(&repository, *limit),
         Command::CherryPick { branch } => {
             let scope = match branch {
@@ -123,5 +153,23 @@ pub fn dispatch(command: &Command) -> Result<()> {
             MergeMode::from_flags(*no_ff, *squash, *ff_only)?,
         ),
         Command::Rebase => rebase::run(&repository),
+        Command::Revert { no_edit } => {
+            let editing = if *no_edit {
+                MessageEditing::Skip
+            } else {
+                MessageEditing::Interactive
+            };
+            revert::run(&repository, editing)
+        }
+        Command::Status => status::run(&repository),
+        Command::Diff { .. } => unimplemented_command("gz diff"),
+        Command::Fetch { .. } => unimplemented_command("gz fetch"),
+        Command::Sync { .. } => unimplemented_command("gz sync"),
+        Command::Worktree { command } => match command {
+            None => unimplemented_command("gz worktree"),
+            Some(WorktreeCommand::Add { .. }) => unimplemented_command("gz worktree add"),
+            Some(WorktreeCommand::Remove) => unimplemented_command("gz worktree remove"),
+            Some(WorktreeCommand::Prune) => unimplemented_command("gz worktree prune"),
+        },
     }
 }

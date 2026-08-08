@@ -2,7 +2,7 @@
 
 use anyhow::{Context as _, Result};
 
-use crate::commands::file_selection::{FileCandidate, RenameOrigin, resolve, target_paths};
+use crate::commands::file_selection::{FileCandidate, RenameOrigin, resolve_changes, target_paths};
 use crate::error::Error;
 use crate::finder::{FinderItem, PreviewSource, select_many};
 use crate::git::exec::{pathspec, run_git};
@@ -17,25 +17,44 @@ pub fn run(repository: &gix::Repository) -> Result<()> {
     let changes = changes(repository, ChangeScope::Stageable)
         .context("変更ファイル一覧の取得に失敗しました")?;
 
-    let mut candidates = Vec::with_capacity(changes.len());
     let mut items = Vec::with_capacity(changes.len());
     for change in &changes {
-        // ステージ対象はリネーム後のパスのみ。変更元はインデックス側の情報であり、
-        // 作業ツリーの内容をステージするうえでは対象にならない
-        let candidate = FileCandidate::from_change(change, RenameOrigin::Exclude);
+        let candidate = to_candidate(change);
         items.push(to_item(repository, change, &candidate)?);
-        candidates.push(candidate);
     }
 
     let selected = select_many(items)?;
-    let selected = resolve(&candidates, &selected)?;
+    let selected = resolve_changes(&changes, &selected)?;
 
-    let paths = target_paths(&selected);
+    run_on_changes(&selected)
+}
+
+/// 選択済みの変更ファイルを `git add` でステージする。
+///
+/// `gz status` のアクションメニュー（FR-16）からも呼ばれる。ステージ対象の決め方は
+/// この関数の中に閉じており、呼び出し側は選択された変更を渡すだけでよい。
+///
+/// # Errors
+///
+/// `git add` の実行に失敗した場合にエラーを返す。
+pub fn run_on_changes(selected: &[&FileChange]) -> Result<()> {
+    let candidates: Vec<FileCandidate> =
+        selected.iter().map(|change| to_candidate(change)).collect();
+    let paths = target_paths(&candidates.iter().collect::<Vec<&FileCandidate>>());
+
     let arguments = add_args(&paths);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     run_git(&arguments).context("git add の実行に失敗しました")?;
 
     Ok(())
+}
+
+/// 変更ファイルを候補へ変換する。
+///
+/// ステージ対象はリネーム後のパスのみ。変更元はインデックス側の情報であり、
+/// 作業ツリーの内容をステージするうえでは対象にならない。
+fn to_candidate(change: &FileChange) -> FileCandidate {
+    FileCandidate::from_change(change, RenameOrigin::Exclude)
 }
 
 /// 候補を finder のアイテムへ変換する。
@@ -112,6 +131,13 @@ mod tests {
         }
     }
 
+    fn rename(path: &str, original: &str, code: &str) -> FileChange {
+        FileChange {
+            original_path: Some(original.to_owned()),
+            ..change(path, code)
+        }
+    }
+
     /// 未追跡ファイルを 1 件持つテストリポジトリを用意する。
     fn repository_with_untracked_file(label: &str, path: &str) -> (TempDir, gix::Repository) {
         let dir = TempDir::new(label);
@@ -143,6 +169,15 @@ mod tests {
             add_args(&["dir/with space.txt".to_owned()]),
             ["add", "--", ":(top,literal)dir/with space.txt"]
         );
+    }
+
+    #[test]
+    fn a_rename_is_staged_by_its_new_path_only() {
+        // 変更元のパスはインデックス側にしか存在せず、pathspec として渡しても一致しない
+        let candidate = to_candidate(&rename("new.txt", "old.txt", "RM"));
+
+        assert_eq!(candidate.key, "new.txt");
+        assert_eq!(candidate.paths, ["new.txt"]);
     }
 
     #[test]
@@ -194,7 +229,7 @@ mod tests {
     fn an_item_keeps_the_path_as_its_key_and_shows_the_status_code() {
         let (_dir, repository) = repository_with_untracked_file("add-item", "new.txt");
         let change = change("new.txt", "??");
-        let candidate = FileCandidate::from_change(&change, RenameOrigin::Exclude);
+        let candidate = to_candidate(&change);
 
         let item = to_item(&repository, &change, &candidate).expect("the item should build");
 

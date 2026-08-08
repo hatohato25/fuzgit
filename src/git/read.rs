@@ -8,6 +8,7 @@
 //! 設定（`status.renames` 等）の解釈まで含めると挙動互換の担保が難しく、
 //! ここでは git 本体の判定をそのまま利用するほうが確実なため。
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use gix::bstr::{BStr, ByteSlice as _};
@@ -1117,6 +1118,295 @@ fn parse_stash_list(output: &[u8]) -> Result<Vec<StashEntry>> {
 pub fn stashes(repository: &gix::Repository) -> Result<Vec<StashEntry>> {
     let output = capture_git_in(workdir(repository)?, &STASH_LIST_ARGS)?;
     parse_stash_list(&output)
+}
+
+/// `git branch --merged` の出力形式。
+///
+/// 既定の出力は現在のブランチに `* ` を付け、worktree で使用中のブランチに `+ ` を付けるため、
+/// 参照名だけを出させて印の解釈を不要にする。参照名は制御文字を含めない規則
+/// （`git check-ref-format`）であり、改行で区切っても曖昧にならない。
+const MERGED_BRANCH_FORMAT: &str = "--format=%(refname:short)";
+
+/// `base` から到達可能な（＝ merged な）ローカルブランチの名前を集めて返す。
+///
+/// `base` には既定の基準として `HEAD` を、`gz branch delete --into` の指定時は
+/// 検証済みのブランチ名を渡す。ブランチごとに merge-base を計算する代わりに
+/// git へ一括で判定させる（候補生成での git 実行を 1 回に抑えるため）。
+///
+/// # Errors
+///
+/// `git branch --merged` の実行に失敗した場合は [`Error::GitCommandFailed`] 等、
+/// 出力が UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+pub fn merged_branches(workdir: &Path, base: &str) -> Result<HashSet<String>> {
+    // 値は `--merged=<base>` の形で渡す。`-` で始まる値が別のオプションとして
+    // 解釈される余地を残さないため
+    let merged = format!("--merged={base}");
+    let output = capture_git_in(workdir, &["branch", &merged, MERGED_BRANCH_FORMAT])?;
+
+    parse_merged_branches(&output)
+}
+
+/// [`MERGED_BRANCH_FORMAT`] を伴う `git branch --merged` の出力をパースする。
+///
+/// 出力は 1 行 1 ブランチ名。空行は生じないが、末尾の改行だけが残ることはある。
+///
+/// # Errors
+///
+/// 出力が UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+fn parse_merged_branches(output: &[u8]) -> Result<HashSet<String>> {
+    let text = to_utf8(output.as_bstr(), "git branch --merged 出力の解釈")?;
+
+    Ok(text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// ブランチごとの最終更新日時を取得する `git for-each-ref` の実行引数。
+///
+/// - `refs/heads`: ローカルブランチのみを対象にする
+/// - `%00`: 参照名と日時をフィールドとして NUL で区切る。相対日時（`3 days ago`）は
+///   空白を含むため、空白区切りでは切り分けられない（`git status` を `-z` で読むのと同じ方針）
+const BRANCH_ACTIVITY_ARGS: [&str; 3] = [
+    "for-each-ref",
+    "refs/heads",
+    "--format=%(refname:short)%00%(committerdate:relative)",
+];
+
+/// ローカルブランチごとの最終更新日時（`3 days ago` 形式の相対表記）を取得する。
+///
+/// `gz branch delete` の候補一覧に添える情報であり、全ブランチ分を 1 回のキャプチャで得る。
+/// 相対表記の文言は git に委ね、fuzgit 側では整形しない。
+///
+/// # Errors
+///
+/// `git for-each-ref` の実行に失敗した場合は [`Error::GitCommandFailed`] 等、
+/// 出力の形式が想定と異なる場合は [`Error::RepositoryReadFailed`] を返す。
+pub fn branch_activity(workdir: &Path) -> Result<HashMap<String, String>> {
+    let output = capture_git_in(workdir, &BRANCH_ACTIVITY_ARGS)?;
+
+    parse_branch_activity(&output)
+}
+
+/// [`BRANCH_ACTIVITY_ARGS`] の出力をパースする。
+///
+/// 1 行が 1 ブランチで、`<参照名>\0<相対日時>` の 2 フィールドからなる。
+///
+/// # Errors
+///
+/// フィールドが 2 つでない場合、UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+fn parse_branch_activity(output: &[u8]) -> Result<HashMap<String, String>> {
+    let text = to_utf8(output.as_bstr(), "git for-each-ref 出力の解釈")?;
+
+    let mut activity = HashMap::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let Some((name, relative_date)) = line.split_once('\0') else {
+            return Err(read_error(
+                "git for-each-ref 出力の解釈",
+                format!("参照名と日時の組になっていません: {line:?}"),
+            ));
+        };
+
+        activity.insert(name.to_owned(), relative_date.to_owned());
+    }
+
+    Ok(activity)
+}
+
+/// worktree 一覧の実行引数。
+///
+/// gix の `Repository::worktrees()` は linked worktree しか返さず、チェックアウト中の
+/// ブランチも持たないため、main を含む全件を 1 回で得られる git のキャプチャを使う。
+/// `-z` を付けると各属性行が改行ではなく NUL で終端され、空白を含むパスも曖昧にならない。
+const WORKTREE_LIST_ARGS: [&str; 4] = ["worktree", "list", "--porcelain", "-z"];
+
+/// 各レコードの先頭に必ず現れる属性（パス）。
+const WORKTREE_LABEL: &str = "worktree";
+
+/// チェックアウト中のコミットを示す属性。
+const WORKTREE_HEAD_LABEL: &str = "HEAD";
+
+/// チェックアウト中のブランチを示す属性。
+const WORKTREE_BRANCH_LABEL: &str = "branch";
+
+/// ロックされていることを示す属性（理由が無い場合はラベルのみ）。
+const WORKTREE_LOCKED_LABEL: &str = "locked";
+
+/// `git worktree prune` の対象になり得ることを示す属性。
+const WORKTREE_PRUNABLE_LABEL: &str = "prunable";
+
+/// worktree の `branch` 属性が持つ参照名の前置き。
+const BRANCH_REF_PREFIX: &str = "refs/heads/";
+
+/// worktree 1 件分の情報。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeInfo {
+    /// worktree のパス（git が返す絶対パス）。
+    pub path: String,
+    /// チェックアウト中のコミットのフルハッシュ。
+    ///
+    /// bare な worktree には `HEAD` 属性が無いため `None` になる。まだコミットが無い
+    /// ブランチ（unborn HEAD）では全 0 のハッシュが返る。
+    pub head: Option<String>,
+    /// チェックアウト中のブランチの短縮名。detached HEAD の場合は `None`。
+    pub branch: Option<String>,
+    /// main worktree（リポジトリ本体の作業ツリー）かどうか。
+    ///
+    /// `git worktree list` は main worktree を必ず先頭に出力する（man git-worktree
+    /// 「list」の記載と git 2.55 の実機出力で確認）ため、先頭のレコードを main とする。
+    pub is_main: bool,
+    /// `git worktree lock` でロックされているかどうか。
+    pub is_locked: bool,
+    /// `git worktree prune` の対象になり得るか（実体を失っている等）どうか。
+    pub prunable: bool,
+}
+
+/// worktree 一覧を取得する（main worktree が先頭）。
+///
+/// # Errors
+///
+/// - `git worktree list` の実行に失敗した場合は [`Error::GitCommandFailed`] 等
+/// - 出力のパースに失敗した場合は [`Error::RepositoryReadFailed`]
+pub fn worktrees(workdir: &Path) -> Result<Vec<WorktreeInfo>> {
+    let output = capture_git_in(workdir, &WORKTREE_LIST_ARGS)?;
+
+    parse_worktree_list(&output)
+}
+
+/// 値を伴うはずの属性から値を取り出す。
+///
+/// ラベルのみの行になるのは真偽値の属性（`detached` / `bare` / 理由の無い `locked`）だけで、
+/// パス・ハッシュ・参照名を持つ属性が値を欠くことは無い。欠けている場合は出力を
+/// 読み違えているため、推測せずエラーにする。
+fn required_value<'a>(label: &str, value: Option<&'a str>) -> Result<&'a str> {
+    value.filter(|value| !value.is_empty()).ok_or_else(|| {
+        read_error(
+            "git worktree list 出力の解釈",
+            format!("`{label}` 属性の値がありません"),
+        )
+    })
+}
+
+/// `branch` 属性の参照名を短縮名へ変換する。
+///
+/// worktree がチェックアウトできるのはブランチ（`refs/heads/` 配下）だけであり、
+/// それ以外の参照名は解釈できないため、短縮名を推測せずエラーにする。
+fn short_branch_name(reference: &str) -> Result<String> {
+    reference
+        .strip_prefix(BRANCH_REF_PREFIX)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            read_error(
+                "git worktree list 出力の解釈",
+                format!("`{reference}` は `{BRANCH_REF_PREFIX}` で始まる参照名ではありません"),
+            )
+        })
+}
+
+/// [`WORKTREE_LIST_ARGS`] の出力をパースする。
+///
+/// 1 レコードは `worktree <path>` で始まり、`HEAD <hash>` / `branch <ref>` /
+/// `detached` / `bare` / `locked [<reason>]` / `prunable [<reason>]` が続く。
+/// 属性はラベルと値を 1 つの空白で区切った形式で、真偽値の属性（`detached` / `bare` /
+/// 理由の無い `locked`）はラベルのみの行になる。レコードの終端は空行（`-z` では
+/// 空のレコード）で、最後のレコードの後ろにも必ず置かれる。
+///
+/// 未知の属性は無視する。将来の git が属性を増やしても一覧が読めなくならないようにするため
+/// （fuzgit が解釈する属性の意味を変えるわけではない）。
+///
+/// # Errors
+///
+/// レコードが `worktree` 属性で始まっていない場合、終端されていない場合、
+/// ブランチの参照名が `refs/heads/` 配下でない場合、UTF-8 でない場合は
+/// [`Error::RepositoryReadFailed`] を返す。
+fn parse_worktree_list(output: &[u8]) -> Result<Vec<WorktreeInfo>> {
+    let mut worktrees: Vec<WorktreeInfo> = Vec::new();
+    let mut current: Option<WorktreeInfo> = None;
+
+    // `-z` の NUL は区切りではなく行の終端であるため、出力全体の末尾にも必ず 1 つ置かれる。
+    // 分割で生じるその分の空要素だけを取り除き、残りをそのまま行として扱う
+    // （レコード終端の空行と、終端の名残を取り違えないようにするため）
+    let mut lines: Vec<&[u8]> = output.split(|byte| *byte == 0).collect();
+    if lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+
+    for record in lines {
+        if record.is_empty() {
+            // 空行はレコードの終端
+            if let Some(worktree) = current.take() {
+                worktrees.push(worktree);
+            }
+            continue;
+        }
+
+        let line = to_utf8(record.as_bstr(), "git worktree list 出力の解釈")?;
+        let (label, value) = match line.split_once(' ') {
+            Some((label, value)) => (label, Some(value)),
+            None => (line.as_str(), None),
+        };
+
+        if label == WORKTREE_LABEL {
+            let path = required_value(WORKTREE_LABEL, value)?;
+
+            if let Some(previous) = &current {
+                return Err(unterminated_record(&previous.path));
+            }
+
+            current = Some(WorktreeInfo {
+                path: path.to_owned(),
+                head: None,
+                branch: None,
+                // main worktree は必ず先頭に出力される
+                is_main: worktrees.is_empty(),
+                is_locked: false,
+                prunable: false,
+            });
+            continue;
+        }
+
+        let Some(worktree) = current.as_mut() else {
+            return Err(read_error(
+                "git worktree list 出力の解釈",
+                format!("レコードが `{WORKTREE_LABEL}` 属性で始まっていません: {line:?}"),
+            ));
+        };
+
+        match label {
+            WORKTREE_HEAD_LABEL => {
+                worktree.head = Some(required_value(WORKTREE_HEAD_LABEL, value)?.to_owned());
+            }
+            WORKTREE_BRANCH_LABEL => {
+                worktree.branch = Some(short_branch_name(required_value(
+                    WORKTREE_BRANCH_LABEL,
+                    value,
+                )?)?);
+            }
+            WORKTREE_LOCKED_LABEL => worktree.is_locked = true,
+            WORKTREE_PRUNABLE_LABEL => worktree.prunable = true,
+            // detached / bare は head・branch の有無で表せるため、真偽値としては保持しない。
+            // それ以外の未知の属性とあわせて読み飛ばす
+            _ => {}
+        }
+    }
+
+    if let Some(worktree) = &current {
+        return Err(unterminated_record(&worktree.path));
+    }
+
+    Ok(worktrees)
+}
+
+/// 空行で終端されていないレコードを検出した際のエラーを作る。
+///
+/// `git worktree list --porcelain` は最後のレコードの後ろにも空行を置く（man git-worktree
+/// 「Porcelain Format」）。終端が無い出力は途中で切れているため、読めた分だけを返さない。
+fn unterminated_record(path: &str) -> Error {
+    read_error(
+        "git worktree list 出力の解釈",
+        format!("`{path}` のレコードが終端されていません"),
+    )
 }
 
 #[cfg(test)]
@@ -2729,6 +3019,454 @@ mod tests {
                 .map(|change| (change.path.as_str(), change.status_code()))
                 .collect::<Vec<_>>(),
             [("shared.txt", "UU".to_string())]
+        );
+    }
+
+    /// `main`（1 コミット）に、merged なブランチと unmerged なブランチを 1 つずつ持つ
+    /// テストリポジトリを用意する。HEAD は `main` に戻した状態で返す。
+    fn repository_with_merged_and_unmerged_branches(label: &str) -> TempDir {
+        let dir = TempDir::new(label);
+        init_repository(dir.path());
+        commit(dir.path(), "first commit");
+
+        // HEAD と同じコミットを指すブランチは merged
+        create_branch(dir.path(), "merged");
+
+        git_in(dir.path(), &["switch", "--quiet", "--create", "unmerged"]);
+        commit(dir.path(), "second commit");
+        git_in(dir.path(), &["switch", "--quiet", "main"]);
+
+        dir
+    }
+
+    #[test]
+    fn merged_branches_are_listed_relative_to_head() {
+        let dir = repository_with_merged_and_unmerged_branches("read-merged-branches");
+
+        let merged = merged_branches(dir.path(), "HEAD").expect("merged branches should be read");
+
+        let mut names: Vec<&str> = merged.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["main", "merged"]);
+    }
+
+    #[test]
+    fn merged_branches_follow_the_given_base() {
+        let dir = repository_with_merged_and_unmerged_branches("read-merged-branches-base");
+
+        let merged =
+            merged_branches(dir.path(), "unmerged").expect("merged branches should be read");
+
+        let mut names: Vec<&str> = merged.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["main", "merged", "unmerged"],
+            "基準を変えると merged 判定も変わる"
+        );
+    }
+
+    #[test]
+    fn an_empty_merged_branch_list_yields_no_names() {
+        let merged = parse_merged_branches(b"").expect("empty output should parse");
+
+        assert!(merged.is_empty(), "unexpected names: {merged:?}");
+    }
+
+    #[test]
+    fn merged_branch_names_are_read_line_by_line() {
+        let merged =
+            parse_merged_branches(b"main\nfeature/login\n").expect("branch names should parse");
+
+        let mut names: Vec<&str> = merged.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["feature/login", "main"]);
+    }
+
+    #[test]
+    fn a_non_utf8_merged_branch_list_is_rejected() {
+        let err = parse_merged_branches(&[0xff, b'\n'])
+            .expect_err("a non utf-8 branch name must not be accepted");
+
+        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+    }
+
+    #[test]
+    fn branch_activity_reports_a_relative_date_for_every_local_branch() {
+        let dir = repository_with_merged_and_unmerged_branches("read-branch-activity");
+
+        let activity = branch_activity(dir.path()).expect("branch activity should be read");
+
+        let mut names: Vec<&str> = activity.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["main", "merged", "unmerged"]);
+        for (name, relative_date) in &activity {
+            // 文言は git に委ねるため、相対表記であることだけを確かめる
+            assert!(
+                relative_date.ends_with("ago"),
+                "unexpected relative date for {name}: {relative_date}"
+            );
+        }
+    }
+
+    /// `git for-each-ref --format=%(refname:short)%00%(committerdate:relative)` の出力を組み立てる。
+    fn activity_output(entries: &[(&str, &str)]) -> Vec<u8> {
+        let mut output = Vec::new();
+        for (name, relative_date) in entries {
+            output.extend_from_slice(name.as_bytes());
+            output.push(0);
+            output.extend_from_slice(relative_date.as_bytes());
+            output.push(b'\n');
+        }
+        output
+    }
+
+    #[test]
+    fn an_empty_branch_activity_output_yields_no_entries() {
+        let activity = parse_branch_activity(b"").expect("empty output should parse");
+
+        assert!(activity.is_empty(), "unexpected entries: {activity:?}");
+    }
+
+    #[test]
+    fn branch_activity_keeps_the_relative_date_verbatim() {
+        let output = activity_output(&[
+            ("main", "3 days ago"),
+            ("feature/login", "12 minutes ago"),
+            ("old", "2 years, 4 months ago"),
+        ]);
+
+        let activity = parse_branch_activity(&output).expect("branch activity should parse");
+
+        assert_eq!(activity.len(), 3);
+        assert_eq!(activity.get("main").map(String::as_str), Some("3 days ago"));
+        assert_eq!(
+            activity.get("feature/login").map(String::as_str),
+            Some("12 minutes ago")
+        );
+        assert_eq!(
+            activity.get("old").map(String::as_str),
+            Some("2 years, 4 months ago"),
+            "空白やカンマを含む表記もそのまま保持する"
+        );
+    }
+
+    #[test]
+    fn a_branch_activity_line_without_a_separator_is_rejected() {
+        let err = parse_branch_activity(b"main 3 days ago\n")
+            .expect_err("a missing NUL separator must be rejected");
+
+        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+    }
+
+    /// `git worktree list --porcelain -z` の 1 レコード分の出力を組み立てる。
+    ///
+    /// 実際の git は各属性行を NUL で終端し、レコードの末尾に空行（＝もう 1 つの NUL）を置く。
+    fn worktree_record(lines: &[&str]) -> Vec<u8> {
+        let mut record = Vec::new();
+        for line in lines {
+            record.extend_from_slice(line.as_bytes());
+            record.push(0);
+        }
+        record.push(0);
+        record
+    }
+
+    /// 複数レコード分の `git worktree list --porcelain -z` の出力を組み立てる。
+    fn worktree_output(records: &[&[&str]]) -> Vec<u8> {
+        records
+            .iter()
+            .flat_map(|lines| worktree_record(lines))
+            .collect()
+    }
+
+    #[test]
+    fn an_empty_worktree_list_yields_no_entries() {
+        let worktrees = parse_worktree_list(b"").expect("empty output should parse");
+
+        assert!(worktrees.is_empty(), "unexpected entries: {worktrees:?}");
+    }
+
+    #[test]
+    fn the_main_worktree_comes_first_and_linked_ones_follow() {
+        let output = worktree_output(&[
+            &[
+                "worktree /repo",
+                "HEAD 1111111111111111111111111111111111111111",
+                "branch refs/heads/main",
+            ],
+            &[
+                "worktree /repo/../feature",
+                "HEAD 2222222222222222222222222222222222222222",
+                "branch refs/heads/feature/login",
+            ],
+        ]);
+
+        let worktrees = parse_worktree_list(&output).expect("worktree list should parse");
+
+        assert_eq!(
+            worktrees,
+            [
+                WorktreeInfo {
+                    path: "/repo".to_owned(),
+                    head: Some("1111111111111111111111111111111111111111".to_owned()),
+                    branch: Some("main".to_owned()),
+                    is_main: true,
+                    is_locked: false,
+                    prunable: false,
+                },
+                WorktreeInfo {
+                    path: "/repo/../feature".to_owned(),
+                    head: Some("2222222222222222222222222222222222222222".to_owned()),
+                    branch: Some("feature/login".to_owned()),
+                    is_main: false,
+                    is_locked: false,
+                    prunable: false,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn a_detached_worktree_has_a_head_but_no_branch() {
+        let output = worktree_output(&[&[
+            "worktree /repo/detached",
+            "HEAD 3333333333333333333333333333333333333333",
+            "detached",
+        ]]);
+
+        let worktrees = parse_worktree_list(&output).expect("worktree list should parse");
+
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0].branch, None);
+        assert_eq!(
+            worktrees[0].head.as_deref(),
+            Some("3333333333333333333333333333333333333333")
+        );
+    }
+
+    #[test]
+    fn a_locked_worktree_is_detected_with_and_without_a_reason() {
+        let output = worktree_output(&[
+            &[
+                "worktree /repo",
+                "HEAD 1111111111111111111111111111111111111111",
+                "branch refs/heads/main",
+            ],
+            &[
+                "worktree /repo/with reason",
+                "HEAD 2222222222222222222222222222222222222222",
+                "branch refs/heads/feature",
+                // 理由は空白を含み得る（ラベルの後ろがすべて理由）
+                "locked 作業中 のため 触らないこと",
+            ],
+            &[
+                "worktree /repo/without reason",
+                "HEAD 3333333333333333333333333333333333333333",
+                "detached",
+                "locked",
+            ],
+        ]);
+
+        let worktrees = parse_worktree_list(&output).expect("worktree list should parse");
+
+        assert_eq!(
+            worktrees
+                .iter()
+                .map(|worktree| worktree.is_locked)
+                .collect::<Vec<bool>>(),
+            [false, true, true]
+        );
+    }
+
+    #[test]
+    fn a_prunable_worktree_is_detected() {
+        let output = worktree_output(&[
+            &[
+                "worktree /repo",
+                "HEAD 1111111111111111111111111111111111111111",
+                "branch refs/heads/main",
+            ],
+            &[
+                "worktree /repo/gone",
+                "HEAD 2222222222222222222222222222222222222222",
+                "detached",
+                "prunable gitdir file points to non-existent location",
+            ],
+        ]);
+
+        let worktrees = parse_worktree_list(&output).expect("worktree list should parse");
+
+        assert_eq!(
+            worktrees
+                .iter()
+                .map(|worktree| worktree.prunable)
+                .collect::<Vec<bool>>(),
+            [false, true]
+        );
+    }
+
+    #[test]
+    fn a_bare_worktree_has_neither_head_nor_branch() {
+        // bare なリポジトリの main worktree には HEAD 属性そのものが無い
+        let output = worktree_output(&[&["worktree /repo.git", "bare"]]);
+
+        let worktrees = parse_worktree_list(&output).expect("worktree list should parse");
+
+        assert_eq!(
+            worktrees,
+            [WorktreeInfo {
+                path: "/repo.git".to_owned(),
+                head: None,
+                branch: None,
+                is_main: true,
+                is_locked: false,
+                prunable: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_path_containing_spaces_is_kept_intact() {
+        let output = worktree_output(&[&[
+            "worktree /repo/linked one two",
+            "HEAD 1111111111111111111111111111111111111111",
+            "branch refs/heads/feature",
+        ]]);
+
+        let worktrees = parse_worktree_list(&output).expect("worktree list should parse");
+
+        assert_eq!(worktrees[0].path, "/repo/linked one two");
+    }
+
+    #[test]
+    fn an_unborn_worktree_keeps_the_null_head_reported_by_git() {
+        // まだコミットの無いブランチでは git が全 0 のハッシュを返す
+        let output = worktree_output(&[&[
+            "worktree /repo",
+            "HEAD 0000000000000000000000000000000000000000",
+            "branch refs/heads/main",
+        ]]);
+
+        let worktrees = parse_worktree_list(&output).expect("worktree list should parse");
+
+        assert_eq!(
+            worktrees[0].head.as_deref(),
+            Some("0000000000000000000000000000000000000000")
+        );
+    }
+
+    #[test]
+    fn an_unknown_attribute_is_ignored() {
+        // 将来の git が属性を増やしても一覧が読めなくならないようにする
+        let output = worktree_output(&[&[
+            "worktree /repo",
+            "HEAD 1111111111111111111111111111111111111111",
+            "branch refs/heads/main",
+            "brand-new-attribute value",
+            "brand-new-flag",
+        ]]);
+
+        let worktrees = parse_worktree_list(&output).expect("worktree list should parse");
+
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn a_record_that_does_not_start_with_the_worktree_attribute_is_rejected() {
+        let output = worktree_record(&["HEAD 1111111111111111111111111111111111111111"]);
+
+        let err = parse_worktree_list(&output)
+            .expect_err("a record must start with the worktree attribute");
+
+        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+    }
+
+    #[test]
+    fn an_unterminated_record_is_rejected() {
+        // 終端の空行が無い出力は途中で切れている。読めた分だけを返さない
+        let output = b"worktree /repo\0HEAD 1111111111111111111111111111111111111111\0";
+
+        let err = parse_worktree_list(output).expect_err("an unterminated record must be rejected");
+
+        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+    }
+
+    #[test]
+    fn an_output_cut_in_the_middle_of_a_line_is_rejected() {
+        let output = b"worktree /repo\0HEAD 1111111111111111111111111111111111111111";
+
+        let err = parse_worktree_list(output).expect_err("a truncated output must be rejected");
+
+        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+    }
+
+    #[test]
+    fn a_record_without_a_path_is_rejected() {
+        let output = worktree_record(&["worktree"]);
+
+        let err = parse_worktree_list(&output).expect_err("the worktree path is required");
+
+        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+    }
+
+    #[test]
+    fn a_branch_outside_of_refs_heads_is_rejected() {
+        let output = worktree_record(&[
+            "worktree /repo",
+            "HEAD 1111111111111111111111111111111111111111",
+            "branch refs/remotes/origin/main",
+        ]);
+
+        let err = parse_worktree_list(&output).expect_err("only branches can be checked out");
+
+        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+    }
+
+    #[test]
+    fn a_non_utf8_worktree_path_is_rejected() {
+        let mut output = b"worktree /repo/".to_vec();
+        output.push(0xff);
+        output.extend_from_slice(b"\0\0");
+
+        let err = parse_worktree_list(&output).expect_err("a non utf-8 path must not be accepted");
+
+        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+    }
+
+    #[test]
+    fn the_worktrees_of_a_repository_are_read_with_the_main_one_first() {
+        let dir = TempDir::new("read-worktrees");
+        init_repository(dir.path());
+        let head = commit(dir.path(), "first commit");
+        create_branch(dir.path(), "feature");
+        let linked = dir.path().join("linked worktree");
+        git_in(
+            dir.path(),
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                &linked.to_string_lossy(),
+                "feature",
+            ],
+        );
+
+        let worktrees = worktrees(dir.path()).expect("worktrees should be read");
+
+        assert_eq!(worktrees.len(), 2, "unexpected worktrees: {worktrees:?}");
+        assert!(worktrees[0].is_main, "main worktree comes first");
+        assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+        assert_eq!(worktrees[0].head.as_deref(), Some(head.as_str()));
+        assert!(!worktrees[1].is_main);
+        assert_eq!(worktrees[1].branch.as_deref(), Some("feature"));
+        assert!(!worktrees[1].is_locked);
+        assert!(!worktrees[1].prunable);
+        assert!(
+            worktrees[1].path.ends_with("linked worktree"),
+            "unexpected path: {path}",
+            path = worktrees[1].path
         );
     }
 }

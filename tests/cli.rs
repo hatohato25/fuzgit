@@ -11,7 +11,7 @@ use assert_cmd::Command;
 const BIN_NAME: &str = "gz";
 
 /// `gz` のすべてのサブコマンド名。ヘルプ出力の検証に用いる。
-const SUBCOMMANDS: [&str; 13] = [
+const SUBCOMMANDS: [&str; 19] = [
     "branch",
     "log",
     "cherry-pick",
@@ -25,10 +25,22 @@ const SUBCOMMANDS: [&str; 13] = [
     "fixup",
     "merge",
     "rebase",
+    "revert",
+    "status",
+    "diff",
+    "fetch",
+    "sync",
+    "worktree",
 ];
 
 /// `gz stash` のサブコマンド名（`fuzgit::cli::StashCommand` と対応）。
 const STASH_SUBCOMMANDS: [&str; 4] = ["push", "apply", "pop", "drop"];
+
+/// `gz branch` のサブコマンド名（`fuzgit::cli::BranchCommand` と対応）。
+const BRANCH_SUBCOMMANDS: [&str; 3] = ["create", "delete", "cleanup"];
+
+/// `gz worktree` のサブコマンド名（`fuzgit::cli::WorktreeCommand` と対応）。
+const WORKTREE_SUBCOMMANDS: [&str; 3] = ["add", "remove", "prune"];
 
 /// `gz log --limit` の既定値（`fuzgit::cli::DEFAULT_COMMIT_LIMIT` と対応）。
 const DEFAULT_COMMIT_LIMIT: &str = "1000";
@@ -314,6 +326,108 @@ fn an_unborn_head_is_reported_with_its_cause_and_next_step() {
     }
 }
 
+/// サブコマンドを追加しても、引数なし・`--all` の `gz branch` が切替のままであることを確認する。
+///
+/// 切替は FR-1 の最優先機能であり、管理サブコマンド（create/delete/cleanup）の追加で
+/// 経路が変わっていないことを、切替と同じエラー（unborn HEAD）に到達するかどうかで確かめる。
+#[test]
+fn branch_without_a_subcommand_still_switches_branches() {
+    let dir = empty_repository("branch-backward-compatibility");
+
+    for arguments in [
+        vec!["branch"],
+        vec!["branch", "--all"],
+        vec!["branch", "-a"],
+    ] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should exit non-zero when there are no commits"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains(UNBORN_HEAD_CAUSE),
+            "gz {arguments:?} should still take the switch path:\n{stderr}"
+        );
+    }
+}
+
+/// 切替用のフラグと管理サブコマンドの併用が clap の段階で拒否されることを確認する。
+#[test]
+fn branch_rejects_switch_flags_combined_with_a_subcommand() {
+    let dir = empty_repository("branch-flag-with-subcommand");
+
+    let output = gz()
+        .args(["branch", "--all", "create", "feature"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz branch --all create");
+
+    assert!(
+        !output.status.success(),
+        "`--all` and a subcommand must not be combined"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("cannot be used with") || stderr.contains("subcommand"),
+        "the conflict should be explained:\n{stderr}"
+    );
+}
+
+/// `gz branch` / `gz worktree` の各サブコマンドが独自のヘルプを持つことを確認する。
+#[test]
+fn nested_subcommands_have_their_own_help() {
+    for (command, subcommands) in [
+        ("branch", BRANCH_SUBCOMMANDS),
+        ("worktree", WORKTREE_SUBCOMMANDS),
+    ] {
+        let output = gz()
+            .args([command, "--help"])
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {command} --help: {err}"));
+
+        assert!(
+            output.status.success(),
+            "gz {command} --help should exit successfully"
+        );
+
+        let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
+        for subcommand in subcommands {
+            assert!(
+                stdout.contains(subcommand),
+                "`{subcommand}` should appear in gz {command} --help:\n{stdout}"
+            );
+        }
+
+        for subcommand in subcommands {
+            let output = gz()
+                .args([command, subcommand, "--help"])
+                .output()
+                .unwrap_or_else(|err| {
+                    panic!("failed to run gz {command} {subcommand} --help: {err}")
+                });
+
+            assert!(
+                output.status.success(),
+                "gz {command} {subcommand} --help should exit successfully"
+            );
+
+            let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
+            assert!(
+                stdout.contains(&format!("gz {command} {subcommand}")),
+                "usage line missing for gz {command} {subcommand}:\n{stdout}"
+            );
+        }
+    }
+}
+
 /// 変更が 1 件も無い場合、`gz restore` / `gz add` は TUI を起動せずに終了することを確認する。
 #[test]
 fn restore_and_add_report_when_there_is_nothing_to_select() {
@@ -429,6 +543,38 @@ fn the_merge_strategy_options_are_mutually_exclusive() {
         assert!(
             stderr.contains("cannot be used with"),
             "the conflict should be explained:\n{stderr}"
+        );
+    }
+}
+
+/// `gz diff` の比較モードと `gz sync` の取り込み方式が相互排他であることを確認する。
+#[test]
+fn the_new_comparison_and_integration_options_are_mutually_exclusive() {
+    let dir = empty_repository("new-exclusive-options");
+
+    let combinations = [
+        vec!["diff", "--staged", "--head"],
+        vec!["diff", "--branch", "--commit"],
+        vec!["diff", "--upstream", "--staged"],
+        vec!["sync", "--rebase", "--merge"],
+    ];
+
+    for arguments in combinations {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should be rejected"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("cannot be used with"),
+            "the conflict should be explained for gz {arguments:?}:\n{stderr}"
         );
     }
 }
@@ -696,6 +842,61 @@ fn fixup_requires_staged_changes_before_offering_the_commits() {
         assert!(
             output.stdout.is_empty(),
             "nothing should be written to stdout for gz {arguments:?}"
+        );
+    }
+}
+
+/// 変更が 1 件も無い場合、`gz status` は TUI を起動せず正常終了することを確認する。
+///
+/// クリーンな状態の確認も `gz status` の用途であるため、候補ゼロを「候補がない」エラーに
+/// しない（requirements.md FR-16）。コミットの有無で経路が変わらないことも合わせて確認する。
+#[test]
+fn status_reports_a_clean_work_tree_and_exits_successfully() {
+    let unborn = empty_repository("status-clean-unborn");
+    let committed = empty_repository("status-clean-committed");
+    std::fs::write(committed.path().join("a.txt"), "first\n").expect("failed to write a file");
+    git_in(committed.path(), &["add", "--", "a.txt"]);
+    git_in(
+        committed.path(),
+        &[
+            "-c",
+            "user.name=fuzgit test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "--message",
+            "first commit",
+        ],
+    );
+
+    for dir in [&unborn, &committed] {
+        let output = gz()
+            .arg("status")
+            .current_dir(dir.path())
+            // 事前チェックが失われた場合に TUI で待ち続けないよう、上限を設けて打ち切る
+            .timeout(FINDER_GUARD_TIMEOUT)
+            .output()
+            .expect("failed to run gz status");
+
+        assert!(
+            output.status.success(),
+            "gz status should succeed on a clean work tree in {:?}",
+            dir.path()
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("変更はありません"),
+            "the clean state should be reported:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("main") && stderr.contains("stash 0"),
+            "the header information should be repeated on stderr:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "stdout is reserved for the paths of a selection"
         );
     }
 }

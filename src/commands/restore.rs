@@ -6,7 +6,19 @@ use crate::commands::confirmation::confirm;
 use crate::commands::file_selection::{FileCandidate, RenameOrigin, resolve, target_paths};
 use crate::finder::{FinderItem, PreviewSource, select_many};
 use crate::git::exec::{pathspec, run_git};
-use crate::git::read::{ChangeScope, RevisionFiles, changes, revision_files};
+use crate::git::read::{ChangeScope, FileChange, RevisionFiles, changes, revision_files};
+
+/// `--source <rev>` で指定された復元元。
+///
+/// 確認プロンプトにはユーザーの指定した文字列を、git へは解決済みのハッシュを渡す。
+/// 2 つの文字列を別々の引数として持ち回ると取り違えるため、対にして扱う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Source<'a> {
+    /// ユーザーが指定した文字列（`HEAD~1` 等）。表示専用。
+    specification: &'a str,
+    /// 解決済みのフルハッシュ。git へ渡すのは常にこちら。
+    id: &'a str,
+}
 
 /// `git restore` の適用先。
 ///
@@ -71,17 +83,60 @@ pub fn run(
     let selected = select_many(items)?;
     let selected = resolve(&candidates, &selected)?;
 
+    let source = source
+        .zip(files.as_ref())
+        .map(|(specification, files)| Source {
+            specification,
+            id: files.id.as_str(),
+        });
+
+    execute(target, source, &selected)
+}
+
+/// 選択済みの変更ファイルを `git restore` で復元・アンステージする。
+///
+/// `gz status` のアクションメニュー（FR-16）からも呼ばれる。作業ツリーを書き換える場合の
+/// 確認プロンプトは [`execute`] に含まれるため、呼び出し経路によらず同じ安全策が働く。
+///
+/// # Errors
+///
+/// 確認の否認、`git restore` の実行に失敗した場合にエラーを返す。
+pub fn run_on_changes(target: RestoreTarget, selected: &[&FileChange]) -> Result<()> {
+    let candidates: Vec<FileCandidate> = selected
+        .iter()
+        .map(|change| FileCandidate::from_change(change, target.rename_origin()))
+        .collect();
+
+    execute(
+        target,
+        None,
+        &candidates.iter().collect::<Vec<&FileCandidate>>(),
+    )
+}
+
+/// 確認を取ったうえで `git restore` を実行する。
+///
+/// # Errors
+///
+/// 確認の否認（[`crate::error::Error::Cancelled`]）、`git restore` の実行に失敗した場合に
+/// エラーを返す。
+fn execute(
+    target: RestoreTarget,
+    source: Option<Source<'_>>,
+    selected: &[&FileCandidate],
+) -> Result<()> {
     if target == RestoreTarget::Worktree {
         // 確認プロンプトにはユーザーが指定した文字列をそのまま示す（解決済みハッシュより読み取りやすい）
         let targets: Vec<&str> = selected
             .iter()
             .map(|candidate| candidate.key.as_str())
             .collect();
-        confirm(&confirmation_header(targets.len(), source), &targets)?;
+        let specification = source.map(|source| source.specification);
+        confirm(&confirmation_header(targets.len(), specification), &targets)?;
     }
 
-    let paths = target_paths(&selected);
-    let arguments = restore_args(target, revision, &paths);
+    let paths = target_paths(selected);
+    let arguments = restore_args(target, source.map(|source| source.id), &paths);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     run_git(&arguments).context("git restore の実行に失敗しました")?;
 

@@ -80,19 +80,20 @@ fn display_line(change: &FileChange) -> String {
     }
 }
 
-/// 選択されたキーに対応する候補を、候補一覧の並び順で返す。
+/// 選択されたキーに対応する要素を、一覧の並び順で返す。
 ///
 /// # Errors
 ///
-/// 選択されたキーが候補一覧に含まれない場合にエラーを返す（対象を取り違えたまま
+/// 選択されたキーが一覧に含まれない場合にエラーを返す（対象を取り違えたまま
 /// git 操作を実行しないよう、暗黙に読み飛ばさない）。
-pub fn resolve<'a>(
-    candidates: &'a [FileCandidate],
+fn resolve_by_key<'a, T>(
+    items: &'a [T],
     selected: &[String],
-) -> Result<Vec<&'a FileCandidate>> {
+    key: impl Fn(&T) -> &str,
+) -> Result<Vec<&'a T>> {
     let missing: Vec<&str> = selected
         .iter()
-        .filter(|key| !candidates.iter().any(|candidate| &candidate.key == *key))
+        .filter(|selected| !items.iter().any(|item| key(item) == selected.as_str()))
         .map(String::as_str)
         .collect();
     if !missing.is_empty() {
@@ -102,10 +103,39 @@ pub fn resolve<'a>(
         );
     }
 
-    Ok(candidates
+    Ok(items
         .iter()
-        .filter(|candidate| selected.contains(&candidate.key))
+        .filter(|item| selected.iter().any(|selected| selected == key(item)))
         .collect())
+}
+
+/// 選択されたキーに対応する候補を、候補一覧の並び順で返す。
+///
+/// # Errors
+///
+/// [`resolve_by_key`] と同じ。
+pub fn resolve<'a>(
+    candidates: &'a [FileCandidate],
+    selected: &[String],
+) -> Result<Vec<&'a FileCandidate>> {
+    resolve_by_key(candidates, selected, |candidate| candidate.key.as_str())
+}
+
+/// 選択されたパスに対応する変更ファイルを、一覧の並び順で返す。
+///
+/// 候補が [`FileCandidate::from_change`] 由来（キー＝パス）のコマンドは、選択結果を
+/// [`FileChange`] のまま受け取れる。git へ渡すパスの決め方（リネーム元を含めるか）は
+/// 実行するコマンドごとに異なるため、その判断を各コマンド側に残したまま
+/// 選択結果を受け渡すために用いる（`gz status` のアクションメニュー）。
+///
+/// # Errors
+///
+/// [`resolve_by_key`] と同じ。
+pub fn resolve_changes<'a>(
+    changes: &'a [FileChange],
+    selected: &[String],
+) -> Result<Vec<&'a FileChange>> {
+    resolve_by_key(changes, selected, |change| change.path.as_str())
 }
 
 /// 選択された候補が git の対象とするパスを、重複を除いて集める。
@@ -240,6 +270,50 @@ mod tests {
             err.to_string().contains("z.txt"),
             "the unknown file should be named: {err:#}"
         );
+    }
+
+    #[test]
+    fn changes_are_resolved_in_the_order_of_the_list() {
+        let changes = [
+            change("a.txt", "M "),
+            change("b.txt", " M"),
+            change("c.txt", "??"),
+        ];
+        let selected = vec!["c.txt".to_owned(), "a.txt".to_owned()];
+
+        let resolved = resolve_changes(&changes, &selected).expect("all paths are listed");
+
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|change| change.path.as_str())
+                .collect::<Vec<_>>(),
+            ["a.txt", "c.txt"]
+        );
+    }
+
+    #[test]
+    fn a_change_outside_of_the_list_is_rejected() {
+        let changes = [change("a.txt", "M ")];
+        let selected = vec!["z.txt".to_owned()];
+
+        let err = resolve_changes(&changes, &selected).expect_err("unknown path must be rejected");
+
+        assert!(
+            err.to_string().contains("z.txt"),
+            "the unknown file should be named: {err:#}"
+        );
+    }
+
+    #[test]
+    fn a_renamed_change_is_resolved_by_its_new_path() {
+        // 候補のキーは変更後のパスであるため、選択結果もそのパスで戻ってくる
+        let changes = [rename("new.txt", "old.txt", "R ")];
+        let selected = vec!["new.txt".to_owned()];
+
+        let resolved = resolve_changes(&changes, &selected).expect("the new path is the key");
+
+        assert_eq!(resolved[0].original_path.as_deref(), Some("old.txt"));
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! `clap` derive によるコマンドライン定義。
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 /// コミット候補の既定取得件数。
@@ -25,11 +27,20 @@ pub struct Cli {
 /// `gz` のサブコマンド。
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// ブランチを選択して切り替える
+    /// ブランチを選択して切り替える（サブコマンドで作成・削除・整理も行う）
+    ///
+    /// 引数なしの `gz branch` と `gz branch --all` は従来どおりの切替（FR-1）。
+    /// `args_conflicts_with_subcommands` により、切替用のフラグと管理サブコマンドの
+    /// 併用は clap の段階で拒否される（どちらの操作なのかが曖昧にならないようにするため）。
+    #[command(args_conflicts_with_subcommands = true)]
     Branch {
         /// リモート追跡ブランチも候補に含める
         #[arg(short, long)]
         all: bool,
+
+        /// 実行するブランチ管理の操作（省略時はブランチの切替）
+        #[command(subcommand)]
+        command: Option<BranchCommand>,
     },
 
     /// コミット履歴を辿り、選択したコミットのフルハッシュを標準出力へ出す
@@ -126,6 +137,121 @@ pub enum Command {
 
     /// ブランチを選択して rebase する
     Rebase,
+
+    /// コミットを選択して打ち消す（revert コミットを作成する）
+    Revert {
+        /// エディタを起動せず、git の既定メッセージのままコミットする
+        #[arg(long)]
+        no_edit: bool,
+    },
+
+    /// 変更ファイルの状態を一覧し、選択したファイルに操作を行う
+    Status,
+
+    /// 比較対象を選択して差分を表示する
+    ///
+    /// 引数なしは未ステージの変更（`git diff` と同じ）。比較モードは相互排他。
+    Diff {
+        /// ステージ済みの変更を対象にする（`git diff --staged` と同じ）
+        #[arg(long, conflicts_with_all = ["head", "upstream", "branch", "commit"])]
+        staged: bool,
+
+        /// HEAD と作業ツリーを比較する（ステージ済みの変更を含む）
+        #[arg(long, conflicts_with_all = ["staged", "upstream", "branch", "commit"])]
+        head: bool,
+
+        /// HEAD と upstream を比較する
+        #[arg(long, conflicts_with_all = ["staged", "head", "branch", "commit"])]
+        upstream: bool,
+
+        /// ブランチを 2 回選択して比較する
+        #[arg(long, conflicts_with_all = ["staged", "head", "upstream", "commit"])]
+        branch: bool,
+
+        /// コミットを 2 回選択して比較する
+        #[arg(long, conflicts_with_all = ["staged", "head", "upstream", "branch"])]
+        commit: bool,
+    },
+
+    /// リモートを選択して fetch する
+    Fetch {
+        /// リモートで削除されたブランチの追跡参照も掃除する
+        #[arg(long)]
+        prune: bool,
+    },
+
+    /// 現在のブランチを upstream と同期する
+    ///
+    /// 既定は fast-forward のみ（`--ff-only` 相当）。fast-forward できない場合は
+    /// git のエラーをそのまま表示して停止し、暗黙に merge / rebase へ倒さない。
+    Sync {
+        /// upstream の上へ rebase して取り込む（履歴改変）
+        #[arg(long, conflicts_with_all = ["merge"])]
+        rebase: bool,
+
+        /// upstream を merge して取り込む
+        #[arg(long, conflicts_with_all = ["rebase"])]
+        merge: bool,
+    },
+
+    /// worktree を一覧・管理する（引数なしは一覧からパスを標準出力へ出す）
+    Worktree {
+        /// 実行する worktree の操作（省略時は一覧からの選択）
+        #[command(subcommand)]
+        command: Option<WorktreeCommand>,
+    },
+}
+
+/// `gz branch` のサブコマンド（FR-20）。
+///
+/// サブコマンドを省略した `gz branch` は従来どおりブランチの切替（FR-1）であり、
+/// ここに並ぶのは切替以外のブランチ管理操作。既定の動作が確立している点が
+/// [`StashCommand`]（既定を決められないためサブコマンド必須）との違い。
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum BranchCommand {
+    /// 作成元を選択して新しいブランチを作成する
+    Create {
+        /// 作成するブランチ名
+        name: String,
+
+        /// 作成後にそのブランチへ切り替える
+        #[arg(long)]
+        switch: bool,
+    },
+
+    /// ブランチを選択して削除する
+    Delete {
+        /// merged でないブランチも削除する（`git branch -D`）
+        #[arg(long)]
+        force: bool,
+
+        /// merged 判定の基準ブランチ（既定は HEAD）
+        #[arg(long, value_name = "BRANCH")]
+        into: Option<String>,
+    },
+
+    /// merged なブランチを一括で削除する
+    Cleanup {
+        /// merged 判定の基準ブランチ（既定は HEAD）
+        #[arg(long, value_name = "BRANCH")]
+        into: Option<String>,
+    },
+}
+
+/// `gz worktree` のサブコマンド（FR-21）。
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum WorktreeCommand {
+    /// ブランチを選択して新しい worktree を作成する
+    Add {
+        /// 作成する worktree のパス（ディレクトリ名の自動提案は行わない）
+        path: PathBuf,
+    },
+
+    /// worktree を選択して削除する（main worktree は候補に含めない）
+    Remove,
+
+    /// 実体を失った worktree の管理情報を整理する
+    Prune,
 }
 
 /// `gz stash` のサブコマンド。
@@ -385,6 +511,256 @@ mod tests {
         let cli = Cli::try_parse_from(["gz", "rebase"]).expect("rebase should parse");
 
         assert!(matches!(cli.command, Command::Rebase));
+    }
+
+    #[test]
+    fn bare_branch_still_switches_branches() {
+        // FR-1 の後方互換: サブコマンドを増やしても引数なしの `gz branch` は切替のまま
+        let cli = Cli::try_parse_from(["gz", "branch"]).expect("bare `gz branch` should parse");
+
+        match cli.command {
+            Command::Branch { all, command } => {
+                assert!(!all);
+                assert_eq!(command, None, "サブコマンドなし＝切替");
+            }
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_all_still_includes_remote_branches() {
+        for arguments in [["gz", "branch", "-a"], ["gz", "branch", "--all"]] {
+            let cli = Cli::try_parse_from(arguments).expect("`gz branch --all` should parse");
+
+            match cli.command {
+                Command::Branch { all, command } => {
+                    assert!(all);
+                    assert_eq!(command, None);
+                }
+                other => panic!("unexpected subcommand: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn branch_exposes_the_management_subcommands() {
+        let cli = Cli::try_parse_from(["gz", "branch", "create", "feature", "--switch"])
+            .expect("`gz branch create` should parse");
+        match cli.command {
+            Command::Branch { all, command } => {
+                assert!(!all);
+                assert_eq!(
+                    command,
+                    Some(BranchCommand::Create {
+                        name: "feature".to_string(),
+                        switch: true,
+                    })
+                );
+            }
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["gz", "branch", "delete", "--force", "--into", "main"])
+            .expect("`gz branch delete` should parse");
+        match cli.command {
+            Command::Branch { command, .. } => assert_eq!(
+                command,
+                Some(BranchCommand::Delete {
+                    force: true,
+                    into: Some("main".to_string()),
+                })
+            ),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        let cli =
+            Cli::try_parse_from(["gz", "branch", "cleanup"]).expect("`gz branch cleanup` parses");
+        match cli.command {
+            Command::Branch { command, .. } => {
+                assert_eq!(command, Some(BranchCommand::Cleanup { into: None }));
+            }
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_create_requires_a_name() {
+        Cli::try_parse_from(["gz", "branch", "create"])
+            .expect_err("the new branch name is required");
+    }
+
+    #[test]
+    fn the_switch_flags_cannot_be_combined_with_a_management_subcommand() {
+        // 切替と管理操作のどちらを意図したのかが曖昧になるため、clap の段階で拒否する
+        Cli::try_parse_from(["gz", "branch", "--all", "create", "feature"])
+            .expect_err("`--all` and a subcommand must not be combined");
+    }
+
+    #[test]
+    fn revert_takes_the_no_edit_flag() {
+        let cli = Cli::try_parse_from(["gz", "revert", "--no-edit"]).expect("revert should parse");
+        match cli.command {
+            Command::Revert { no_edit } => assert!(no_edit),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["gz", "revert"]).expect("revert should parse bare");
+        match cli.command {
+            Command::Revert { no_edit } => assert!(!no_edit),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_takes_no_options() {
+        let cli = Cli::try_parse_from(["gz", "status"]).expect("status should parse");
+
+        assert!(matches!(cli.command, Command::Status));
+    }
+
+    #[test]
+    fn diff_defaults_to_the_unstaged_comparison() {
+        let cli = Cli::try_parse_from(["gz", "diff"]).expect("diff should parse bare");
+
+        match cli.command {
+            Command::Diff {
+                staged,
+                head,
+                upstream,
+                branch,
+                commit,
+            } => assert_eq!(
+                (staged, head, upstream, branch, commit),
+                (false, false, false, false, false)
+            ),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_accepts_each_comparison_mode_on_its_own() {
+        for (flag, expected) in [
+            ("--staged", (true, false, false, false, false)),
+            ("--head", (false, true, false, false, false)),
+            ("--upstream", (false, false, true, false, false)),
+            ("--branch", (false, false, false, true, false)),
+            ("--commit", (false, false, false, false, true)),
+        ] {
+            let cli = Cli::try_parse_from(["gz", "diff", flag])
+                .unwrap_or_else(|err| panic!("`gz diff {flag}` should parse: {err}"));
+
+            match cli.command {
+                Command::Diff {
+                    staged,
+                    head,
+                    upstream,
+                    branch,
+                    commit,
+                } => assert_eq!((staged, head, upstream, branch, commit), expected),
+                other => panic!("unexpected subcommand: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn diff_comparison_modes_are_mutually_exclusive() {
+        let modes = ["--staged", "--head", "--upstream", "--branch", "--commit"];
+        for (index, first) in modes.iter().enumerate() {
+            for second in &modes[index + 1..] {
+                assert!(
+                    Cli::try_parse_from(["gz", "diff", first, second]).is_err(),
+                    "`gz diff {first} {second}` must be rejected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fetch_takes_the_prune_flag() {
+        let cli = Cli::try_parse_from(["gz", "fetch", "--prune"]).expect("fetch should parse");
+        match cli.command {
+            Command::Fetch { prune } => assert!(prune),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["gz", "fetch"]).expect("fetch should parse bare");
+        match cli.command {
+            Command::Fetch { prune } => assert!(!prune),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_defaults_to_fast_forward_only() {
+        let cli = Cli::try_parse_from(["gz", "sync"]).expect("sync should parse bare");
+
+        match cli.command {
+            // どちらのフラグも立っていない状態が ff-only（既定）
+            Command::Sync { rebase, merge } => assert_eq!((rebase, merge), (false, false)),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_integration_modes_are_mutually_exclusive() {
+        let cli = Cli::try_parse_from(["gz", "sync", "--rebase"]).expect("sync --rebase parses");
+        match cli.command {
+            Command::Sync { rebase, merge } => assert_eq!((rebase, merge), (true, false)),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["gz", "sync", "--merge"]).expect("sync --merge parses");
+        match cli.command {
+            Command::Sync { rebase, merge } => assert_eq!((rebase, merge), (false, true)),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        Cli::try_parse_from(["gz", "sync", "--rebase", "--merge"])
+            .expect_err("--rebase and --merge must not be combined");
+    }
+
+    #[test]
+    fn bare_worktree_lists_instead_of_requiring_a_subcommand() {
+        let cli = Cli::try_parse_from(["gz", "worktree"]).expect("bare `gz worktree` should parse");
+
+        match cli.command {
+            Command::Worktree { command } => assert_eq!(command, None),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worktree_exposes_add_remove_and_prune() {
+        let cli = Cli::try_parse_from(["gz", "worktree", "add", "../feature"])
+            .expect("`gz worktree add` should parse");
+        match cli.command {
+            Command::Worktree { command } => assert_eq!(
+                command,
+                Some(WorktreeCommand::Add {
+                    path: PathBuf::from("../feature"),
+                })
+            ),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        for (argument, expected) in [
+            ("remove", WorktreeCommand::Remove),
+            ("prune", WorktreeCommand::Prune),
+        ] {
+            let cli = Cli::try_parse_from(["gz", "worktree", argument])
+                .unwrap_or_else(|err| panic!("`gz worktree {argument}` should parse: {err}"));
+
+            match cli.command {
+                Command::Worktree { command } => assert_eq!(command, Some(expected)),
+                other => panic!("unexpected subcommand: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn worktree_add_requires_a_path() {
+        Cli::try_parse_from(["gz", "worktree", "add"])
+            .expect_err("the worktree path is required (no automatic suggestion)");
     }
 
     #[test]

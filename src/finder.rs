@@ -28,6 +28,15 @@ const FILE_PREVIEW_LIMIT: usize = 64 * 1024;
 /// 内容が上限で打ち切られたことを示す注記。
 const TRUNCATION_NOTICE: &str = "\n… （以降は省略しました）";
 
+/// [`PreviewSource::Composite`] のセクション見出しの前置き。
+const SECTION_HEADING_PREFIX: &str = "── ";
+
+/// [`PreviewSource::Composite`] のセクション見出しの後置き。
+const SECTION_HEADING_SUFFIX: &str = " ──";
+
+/// [`PreviewSource::Composite`] のセクション同士の区切り（見出しの前に空行を 1 行入れる）。
+const SECTION_SEPARATOR: &str = "\n\n";
+
 /// 候補ごとのプレビュー内容の生成方法。
 ///
 /// skim のプレビューには「シェルコマンド文字列を渡す」方式（`ItemPreview::Command`）も
@@ -45,6 +54,74 @@ pub enum PreviewSource {
     /// 未追跡ファイルは git の管理下に無く差分を取れないため、内容を直接読んで表示する。
     /// カレントディレクトリに依存しないよう絶対パスを渡すこと。
     File(PathBuf),
+    /// ラベル付きの複数ソースを 1 つのプレビューへ連結する。
+    ///
+    /// `gz status` の「staged / unstaged」のように、1 つの候補について複数の観点を
+    /// 並べて見せるために用いる。各ソースの実行は従来どおり選択項目ごとの遅延生成であり、
+    /// 呼び出し側が必要なセクションだけを持たせることで余計な git 実行を避ける。
+    /// 出力が空になったセクションは見出しごと省略する（[`render_composite`] を参照）。
+    Composite(Vec<(String, PreviewSource)>),
+}
+
+/// `git <args>` を実行してプレビュー本文を得る。
+///
+/// 失敗した場合も選択操作を止めず、表示用のメッセージを `Err` として返す
+/// （呼び出し側がプレビュー領域へ出す）。
+fn render_git(args: &[String]) -> std::result::Result<String, String> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    capture_git(&args)
+        .map(|stdout| String::from_utf8_lossy(&stdout).into_owned())
+        .map_err(|err| err.to_string())
+}
+
+/// ファイルの内容を読んでプレビュー本文を得る。
+///
+/// 読み取れない場合も選択操作を止めず、表示用のメッセージを `Err` として返す。
+fn render_file(path: &Path) -> std::result::Result<String, String> {
+    read_preview(path)
+        .map_err(|err| format!("{path} を読み込めません: {err}", path = path.display()))
+}
+
+/// セクションの見出し行を組み立てる。
+fn section_heading(label: &str) -> String {
+    format!("{SECTION_HEADING_PREFIX}{label}{SECTION_HEADING_SUFFIX}")
+}
+
+/// 1 つのソースからプレビュー本文（ANSI エスケープを含み得る）を組み立てる。
+///
+/// 失敗したソースはエラーメッセージを本文として返す。連結表示の一部が取れなかった
+/// ことを利用者に見せるためであり、失敗を無かったことにはしない。
+fn render(source: &PreviewSource) -> String {
+    match source {
+        PreviewSource::None => String::new(),
+        PreviewSource::Git(args) => render_git(args).unwrap_or_else(|message| message),
+        PreviewSource::File(path) => render_file(path).unwrap_or_else(|message| message),
+        PreviewSource::Composite(sections) => render_composite(sections),
+    }
+}
+
+/// ラベル付きの複数ソースを 1 つのプレビュー本文へ連結する。
+///
+/// 本文が空（空白のみを含む）になったセクションは見出しごと省略する。
+/// 該当しない観点（staged の変更が無いファイルの「staged」など）の見出しだけが並ぶと、
+/// プレビューの限られた表示領域が意味の無い行で埋まるため。
+fn render_composite(sections: &[(String, PreviewSource)]) -> String {
+    sections
+        .iter()
+        .filter_map(|(label, source)| {
+            let body = render(source);
+            if body.trim().is_empty() {
+                return None;
+            }
+
+            Some(format!(
+                "{heading}\n{body}",
+                heading = section_heading(label),
+                body = body.trim_end_matches('\n')
+            ))
+        })
+        .collect::<Vec<String>>()
+        .join(SECTION_SEPARATOR)
 }
 
 /// ファイルの先頭を [`FILE_PREVIEW_LIMIT`] バイトまで読み、表示用の文字列を返す。
@@ -109,24 +186,18 @@ impl SkimItem for FinderItem {
     fn preview(&self, _context: PreviewContext) -> ItemPreview {
         match &self.preview {
             PreviewSource::None => ItemPreview::Text(String::new()),
-            PreviewSource::Git(args) => {
-                let args: Vec<&str> = args.iter().map(String::as_str).collect();
-                match capture_git(&args) {
-                    Ok(stdout) => {
-                        ItemPreview::AnsiText(String::from_utf8_lossy(&stdout).into_owned())
-                    }
-                    // プレビュー失敗で選択操作全体を中断させたくないため、
-                    // エラー内容をプレビュー領域に表示するに留める
-                    Err(err) => ItemPreview::Text(err.to_string()),
-                }
-            }
-            PreviewSource::File(path) => match read_preview(path) {
-                Ok(text) => ItemPreview::Text(text),
-                Err(err) => ItemPreview::Text(format!(
-                    "{path} を読み込めません: {err}",
-                    path = path.display()
-                )),
+            PreviewSource::Git(args) => match render_git(args) {
+                Ok(text) => ItemPreview::AnsiText(text),
+                // プレビュー失敗で選択操作全体を中断させたくないため、
+                // エラー内容をプレビュー領域に表示するに留める
+                Err(message) => ItemPreview::Text(message),
             },
+            // ファイル内容は git の出力と違い色付けされていないため、そのまま表示する
+            PreviewSource::File(path) => {
+                ItemPreview::Text(render_file(path).unwrap_or_else(|message| message))
+            }
+            // 連結結果には git の出力（色付き）が混ざり得るため ANSI として扱う
+            PreviewSource::Composite(sections) => ItemPreview::AnsiText(render_composite(sections)),
         }
     }
 }
@@ -417,6 +488,140 @@ mod tests {
             ),
             _ => panic!("a file preview must produce plain text"),
         }
+    }
+
+    /// 内容が固定のセクションを作る（git を実行せずに連結結果だけを検証するため）。
+    fn text_section(
+        dir: &crate::test_support::TempDir,
+        name: &str,
+        contents: &str,
+    ) -> PreviewSource {
+        crate::test_support::write_file(dir.path(), name, contents);
+        PreviewSource::File(dir.path().join(name))
+    }
+
+    #[test]
+    fn a_composite_preview_joins_each_section_under_its_heading() {
+        let dir = crate::test_support::TempDir::new("finder-composite");
+        let sections = vec![
+            (
+                "staged".to_string(),
+                text_section(&dir, "staged.txt", "+staged line\n"),
+            ),
+            (
+                "unstaged".to_string(),
+                text_section(&dir, "unstaged.txt", "+unstaged line\n"),
+            ),
+        ];
+
+        let text = render_composite(&sections);
+
+        assert_eq!(
+            text,
+            "── staged ──\n+staged line\n\n── unstaged ──\n+unstaged line"
+        );
+    }
+
+    #[test]
+    fn a_single_section_has_no_separator() {
+        let dir = crate::test_support::TempDir::new("finder-composite-single");
+        let sections = vec![(
+            "untracked".to_string(),
+            text_section(&dir, "new.txt", "hello\n"),
+        )];
+
+        assert_eq!(render_composite(&sections), "── untracked ──\nhello");
+    }
+
+    #[test]
+    fn an_empty_section_is_omitted_together_with_its_heading() {
+        let dir = crate::test_support::TempDir::new("finder-composite-empty");
+        let sections = vec![
+            (
+                "staged".to_string(),
+                text_section(&dir, "staged.txt", "   \n\n"),
+            ),
+            (
+                "unstaged".to_string(),
+                text_section(&dir, "unstaged.txt", "+unstaged line\n"),
+            ),
+        ];
+
+        let text = render_composite(&sections);
+
+        assert!(
+            !text.contains("staged ──\n\n"),
+            "空セクションの見出しは出さない: {text}"
+        );
+        assert_eq!(text, "── unstaged ──\n+unstaged line");
+    }
+
+    #[test]
+    fn a_composite_of_only_empty_sections_is_empty() {
+        let sections = vec![
+            ("staged".to_string(), PreviewSource::None),
+            ("unstaged".to_string(), PreviewSource::None),
+        ];
+
+        assert_eq!(render_composite(&sections), "");
+    }
+
+    #[test]
+    fn a_composite_without_sections_is_empty() {
+        assert_eq!(render_composite(&[]), "");
+    }
+
+    #[test]
+    fn a_failing_section_keeps_its_heading_and_shows_the_reason() {
+        // 一部が取れなかったことを隠さない（表示できない理由をその場に出す）
+        let dir = crate::test_support::TempDir::new("finder-composite-missing");
+        let missing = dir.path().join("missing.txt");
+        let sections = vec![("staged".to_string(), PreviewSource::File(missing.clone()))];
+
+        let text = render_composite(&sections);
+
+        assert!(text.starts_with("── staged ──\n"), "unexpected: {text}");
+        assert!(
+            text.contains(&missing.display().to_string()),
+            "the path should be named: {text}"
+        );
+    }
+
+    #[test]
+    fn a_composite_preview_is_rendered_as_ansi_text() {
+        let dir = crate::test_support::TempDir::new("finder-composite-item");
+        let item = FinderItem::new(
+            "MM src/main.rs".to_string(),
+            "src/main.rs".to_string(),
+            PreviewSource::Composite(vec![(
+                "staged".to_string(),
+                text_section(&dir, "staged.txt", "+staged line\n"),
+            )]),
+        );
+
+        match item.preview(preview_context()) {
+            ItemPreview::AnsiText(text) => {
+                assert_eq!(text, "── staged ──\n+staged line");
+            }
+            _ => panic!("a composite preview must be rendered as ANSI text"),
+        }
+    }
+
+    #[test]
+    fn a_nested_composite_is_flattened_into_the_same_preview() {
+        let dir = crate::test_support::TempDir::new("finder-composite-nested");
+        let sections = vec![(
+            "outer".to_string(),
+            PreviewSource::Composite(vec![(
+                "inner".to_string(),
+                text_section(&dir, "inner.txt", "body\n"),
+            )]),
+        )];
+
+        assert_eq!(
+            render_composite(&sections),
+            "── outer ──\n── inner ──\nbody"
+        );
     }
 
     #[test]

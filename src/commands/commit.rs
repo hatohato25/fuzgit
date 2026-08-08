@@ -7,7 +7,7 @@ use std::io::Write as _;
 
 use anyhow::{Context as _, Result};
 
-use crate::commands::file_selection::{FileCandidate, RenameOrigin, resolve, target_paths};
+use crate::commands::file_selection::{FileCandidate, RenameOrigin, resolve_changes, target_paths};
 use crate::error::Error;
 use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with};
 use crate::git::exec::{pathspec, run_git};
@@ -46,30 +46,44 @@ pub fn run(repository: &gix::Repository, message: Option<&str>) -> Result<()> {
     let changes = changes(repository, ChangeScope::TrackedOrUntracked)
         .context("変更ファイル一覧の取得に失敗しました")?;
 
-    let mut candidates = Vec::with_capacity(changes.len());
     let mut items = Vec::with_capacity(changes.len());
     for change in &changes {
         let candidate = to_candidate(change);
         items.push(to_item(repository, change, &candidate)?);
-        candidates.push(candidate);
     }
 
     let options = FinderOptions::new(SelectionMode::Multi)
         .with_header(HEADER.to_owned())
         .with_preselect(preselected(&changes));
     let selected = select_many_with(items, &options)?;
-    let selected = resolve(&candidates, &selected)?;
+    let selected = resolve_changes(&changes, &selected)?;
 
+    run_on_changes(message, &selected)
+}
+
+/// 選択済みの変更ファイルの内容だけをコミットする。
+///
+/// `gz status` のアクションメニュー（FR-16）からも呼ばれる。未追跡ファイルの事前ステージと
+/// 継承 stdio での実行（エディタ起動を git に委ねる）はこの関数の中に閉じており、
+/// 呼び出し経路によらず同じ挙動になる。
+///
+/// # Errors
+///
+/// `git add` / `git commit` の実行に失敗した場合にエラーを返す。
+pub fn run_on_changes(message: Option<&str>, selected: &[&FileChange]) -> Result<()> {
     // 未追跡ファイルはパス指定コミットの対象にできず
     // 「did not match any file(s) known to git」で失敗するため、先にステージする
-    let untracked = untracked_paths(&changes, &selected);
+    let untracked = untracked_paths(selected);
     if !untracked.is_empty() {
         let arguments = add_args(&untracked);
         let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
         run_git(&arguments).context("未追跡ファイルのステージ（git add）に失敗しました")?;
     }
 
-    let paths = target_paths(&selected);
+    let candidates: Vec<FileCandidate> =
+        selected.iter().map(|change| to_candidate(change)).collect();
+    let paths = target_paths(&candidates.iter().collect::<Vec<&FileCandidate>>());
+
     let arguments = commit_args(message, &paths);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     if let Err(error) = run_git(&arguments) {
@@ -116,16 +130,11 @@ fn preselected(changes: &[FileChange]) -> Vec<String> {
         .collect()
 }
 
-/// 選択された候補のうち、未追跡ファイルのパスを候補一覧の順序で集める。
-fn untracked_paths(changes: &[FileChange], selected: &[&FileCandidate]) -> Vec<String> {
-    changes
+/// 選択された変更のうち、未追跡ファイルのパスを選択一覧の順序で集める。
+fn untracked_paths(selected: &[&FileChange]) -> Vec<String> {
+    selected
         .iter()
         .filter(|change| change.is_untracked())
-        .filter(|change| {
-            selected
-                .iter()
-                .any(|candidate| candidate.key == change.path)
-        })
         .map(|change| change.path.clone())
         .collect()
 }
@@ -377,12 +386,11 @@ mod tests {
             change("new.txt", "??"),
             change("other new.txt", "??"),
         ];
-        let candidates: Vec<FileCandidate> = changes.iter().map(to_candidate).collect();
-        let selected = resolve(&candidates, &paths(&["other new.txt", "tracked.txt"]))
-            .expect("all keys are candidates");
+        let selected = resolve_changes(&changes, &paths(&["other new.txt", "tracked.txt"]))
+            .expect("all paths are listed");
 
         assert_eq!(
-            untracked_paths(&changes, &selected),
+            untracked_paths(&selected),
             ["other new.txt"],
             "a tracked change needs no staging, an unselected untracked file is left alone"
         );
@@ -391,12 +399,11 @@ mod tests {
     #[test]
     fn a_selection_without_untracked_files_needs_no_staging() {
         let changes = [change("tracked.txt", "M "), change("new.txt", "??")];
-        let candidates: Vec<FileCandidate> = changes.iter().map(to_candidate).collect();
         let selected =
-            resolve(&candidates, &paths(&["tracked.txt"])).expect("all keys are candidates");
+            resolve_changes(&changes, &paths(&["tracked.txt"])).expect("all paths are listed");
 
         assert!(
-            untracked_paths(&changes, &selected).is_empty(),
+            untracked_paths(&selected).is_empty(),
             "git add must not run when no untracked file was selected"
         );
     }

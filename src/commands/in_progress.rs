@@ -9,11 +9,11 @@
 
 use anyhow::{Context as _, Result, anyhow, bail};
 
-use crate::commands::command_display;
 use crate::commands::confirmation::confirm;
 use crate::commands::file_selection::{
     FileCandidate, RenameOrigin, resolve as resolve_files, target_paths,
 };
+use crate::commands::{command_display, status_preview_args};
 use crate::finder::{
     FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with, select_one,
 };
@@ -199,18 +199,6 @@ fn to_item(entry: &MenuEntry) -> FinderItem {
         entry.key.to_owned(),
         PreviewSource::Git(status_preview_args()),
     )
-}
-
-/// プレビュー用の `git status` の引数を組み立てる。
-///
-/// FR-14 は「状態確認」も目的に含むため、どの項目を選んでいても現在の状態
-/// （未解決 / 解決済みの区別を含む短縮表記）が見えるようにする。
-/// 出力をキャプチャして実行する場合 git は色付けを止めるため、明示的に有効化する。
-fn status_preview_args() -> Vec<String> {
-    ["-c", "color.status=always", "status", "--short", "--branch"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
 }
 
 /// 選択されたキーに対応するメニュー項目を返す。

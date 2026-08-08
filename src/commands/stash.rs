@@ -6,7 +6,7 @@
 use anyhow::{Context as _, Result, anyhow};
 
 use crate::commands::confirmation::confirm;
-use crate::commands::file_selection::{FileCandidate, RenameOrigin, resolve, target_paths};
+use crate::commands::file_selection::{FileCandidate, RenameOrigin, resolve_changes, target_paths};
 use crate::error::Error;
 use crate::finder::{FinderItem, PreviewSource, select_many, select_one};
 use crate::git::exec::{pathspec, run_git};
@@ -98,25 +98,49 @@ pub fn push(
     let changes = changes(repository, untracked.change_scope())
         .context("変更ファイル一覧の取得に失敗しました")?;
 
-    let mut candidates = Vec::with_capacity(changes.len());
     let mut items = Vec::with_capacity(changes.len());
     for change in &changes {
-        // リネームの変更元は index に存在せず、パススペックとして渡すと
-        // 「did not match any file(s) known to git」になるため対象にしない
-        let candidate = FileCandidate::from_change(change, RenameOrigin::Exclude);
+        let candidate = to_candidate(change);
         items.push(to_file_item(repository, change, &candidate)?);
-        candidates.push(candidate);
     }
 
     let selected = select_many(items)?;
-    let selected = resolve(&candidates, &selected)?;
+    let selected = resolve_changes(&changes, &selected)?;
 
-    let paths = target_paths(&selected);
+    push_on_changes(message, untracked, &selected)
+}
+
+/// 選択済みの変更ファイルを `git stash push` で退避する。
+///
+/// `gz status` のアクションメニュー（FR-16）からも呼ばれる。`untracked` は
+/// 選択に未追跡ファイルを含む場合に [`UntrackedFiles::Include`] を渡すこと
+/// （`--include-untracked` が無いと git 側が未追跡のパスを対象にできない）。
+///
+/// # Errors
+///
+/// `git stash push` の実行に失敗した場合にエラーを返す。
+pub fn push_on_changes(
+    message: Option<&str>,
+    untracked: UntrackedFiles,
+    selected: &[&FileChange],
+) -> Result<()> {
+    let candidates: Vec<FileCandidate> =
+        selected.iter().map(|change| to_candidate(change)).collect();
+    let paths = target_paths(&candidates.iter().collect::<Vec<&FileCandidate>>());
+
     let arguments = push_args(message, untracked, &paths);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     run_git(&arguments).context("git stash push の実行に失敗しました")?;
 
     Ok(())
+}
+
+/// 変更ファイルを候補へ変換する。
+///
+/// リネームの変更元は index に存在せず、パススペックとして渡すと
+/// 「did not match any file(s) known to git」になるため対象にしない。
+fn to_candidate(change: &FileChange) -> FileCandidate {
+    FileCandidate::from_change(change, RenameOrigin::Exclude)
 }
 
 /// stash を 1 件選び、`git stash apply|pop|drop` を実行する。
@@ -466,7 +490,7 @@ mod tests {
     fn an_item_keeps_the_path_as_its_key_and_shows_the_status_code() {
         let (_dir, repository) = repository_with_untracked_file("stash-push-item", "new.txt");
         let change = change("new.txt", "??");
-        let candidate = FileCandidate::from_change(&change, RenameOrigin::Exclude);
+        let candidate = to_candidate(&change);
 
         let item = to_file_item(&repository, &change, &candidate).expect("the item should build");
 
