@@ -34,6 +34,9 @@ const UNBORN_HEAD_CAUSE: &str = "まだコミットがありません";
 /// unborn HEAD のエラーメッセージが伝えるべき次の操作。
 const UNBORN_HEAD_NEXT_STEP: &str = "git commit";
 
+/// デバッグログ（`FUZGIT_DEBUG=1`）の行頭に付く接頭辞（`fuzgit::git::exec` と対応）。
+const DEBUG_PREFIX: &str = "[fuzgit]";
+
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// テストごとに一意な一時ディレクトリ。Drop で再帰削除する。
@@ -442,6 +445,62 @@ fn stash_push_documents_its_message_and_untracked_options() {
         assert!(
             stdout.contains(option),
             "`{option}` should be documented:\n{stdout}"
+        );
+    }
+}
+
+/// `FUZGIT_DEBUG=1` のとき、実行した git コマンドが標準エラーへ出ることを確認する。
+///
+/// 候補が 0 件になるパスでも候補一覧の読み取り（`git status`）は実行されるため、
+/// TUI を起動せずに検証できる。
+#[test]
+fn the_debug_variable_logs_the_git_commands_to_stderr() {
+    let dir = empty_repository("debug-log");
+
+    let output = gz()
+        .arg("add")
+        .env("FUZGIT_DEBUG", "1")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz add with FUZGIT_DEBUG=1");
+
+    let stderr = String::from_utf8(output.stderr).expect("debug output should be utf-8");
+    assert!(
+        stderr.contains(DEBUG_PREFIX),
+        "the debug log should be written to stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("git status"),
+        "the executed git command should be logged:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "the debug log must not pollute stdout"
+    );
+}
+
+/// デバッグログは `FUZGIT_DEBUG=1` のときだけ出ることを確認する。
+#[test]
+fn other_values_of_the_debug_variable_stay_quiet() {
+    let dir = empty_repository("debug-log-off");
+
+    for value in [None, Some(""), Some("0"), Some("true")] {
+        let mut command = gz();
+        command.arg("add").current_dir(dir.path());
+        match value {
+            Some(value) => command.env("FUZGIT_DEBUG", value),
+            // 呼び出し元の環境に設定が残っていても影響を受けないよう明示的に取り除く
+            None => command.env_remove("FUZGIT_DEBUG"),
+        };
+
+        let output = command
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz add with {value:?}: {err}"));
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            !stderr.contains(DEBUG_PREFIX),
+            "FUZGIT_DEBUG={value:?} must not enable the debug log:\n{stderr}"
         );
     }
 }
