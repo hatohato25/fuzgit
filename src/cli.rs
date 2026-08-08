@@ -85,6 +85,47 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         restore: Option<String>,
     },
+
+    /// コミットするファイルを選択してコミットする
+    Commit {
+        /// コミットメッセージ（省略時は git がエディタを起動する）
+        #[arg(short, long, value_name = "MESSAGE")]
+        message: Option<String>,
+    },
+
+    /// push 先（リモート × 現在ブランチ）を選択して push する
+    ///
+    /// force push（`--force` / `--force-with-lease`）は提供しない。
+    Push {
+        /// push 先を現在ブランチの upstream として設定する
+        #[arg(short = 'u', long)]
+        set_upstream: bool,
+    },
+
+    /// 修正対象のコミットを選択して fixup コミットを作成する
+    Fixup {
+        /// fixup ではなく squash コミット（メッセージを結合する）を作成する
+        #[arg(long)]
+        squash: bool,
+    },
+
+    /// ブランチを選択して merge する
+    Merge {
+        /// fast-forward できる場合でもマージコミットを作成する
+        #[arg(long, conflicts_with_all = ["squash", "ff_only"])]
+        no_ff: bool,
+
+        /// マージ結果を作業ツリー・index へ反映するだけでコミットしない
+        #[arg(long, conflicts_with_all = ["no_ff", "ff_only"])]
+        squash: bool,
+
+        /// fast-forward できる場合のみ merge する
+        #[arg(long, conflicts_with_all = ["no_ff", "squash"])]
+        ff_only: bool,
+    },
+
+    /// ブランチを選択して rebase する
+    Rebase,
 }
 
 /// `gz stash` のサブコマンド。
@@ -245,6 +286,105 @@ mod tests {
             Command::Reflog { restore } => assert_eq!(restore.as_deref(), Some("recovered")),
             other => panic!("unexpected subcommand: {other:?}"),
         }
+    }
+
+    #[test]
+    fn commit_takes_an_optional_message() {
+        let cli = Cli::try_parse_from(["gz", "commit", "-m", "作業を保存"])
+            .expect("commit should parse with a message");
+        match cli.command {
+            Command::Commit { message } => assert_eq!(message.as_deref(), Some("作業を保存")),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["gz", "commit"]).expect("commit should parse bare");
+        match cli.command {
+            // メッセージ省略時は git がエディタを起動する
+            Command::Commit { message } => assert_eq!(message, None),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_takes_the_set_upstream_flag() {
+        for arguments in [["gz", "push", "-u"], ["gz", "push", "--set-upstream"]] {
+            let cli = Cli::try_parse_from(arguments).expect("push should parse");
+            match cli.command {
+                Command::Push { set_upstream } => assert!(set_upstream),
+                other => panic!("unexpected subcommand: {other:?}"),
+            }
+        }
+
+        let cli = Cli::try_parse_from(["gz", "push"]).expect("push should parse bare");
+        match cli.command {
+            Command::Push { set_upstream } => assert!(!set_upstream),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_does_not_offer_force_options() {
+        // force push は fuzgit のスコープ外（requirements.md「スコープ外」）
+        for flag in ["--force", "--force-with-lease", "-f"] {
+            assert!(
+                Cli::try_parse_from(["gz", "push", flag]).is_err(),
+                "`gz push {flag}` must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn fixup_takes_the_squash_flag() {
+        let cli = Cli::try_parse_from(["gz", "fixup", "--squash"]).expect("fixup should parse");
+        match cli.command {
+            Command::Fixup { squash } => assert!(squash),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["gz", "fixup"]).expect("fixup should parse bare");
+        match cli.command {
+            Command::Fixup { squash } => assert!(!squash),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_accepts_each_strategy_flag_on_its_own() {
+        for (flag, expected) in [
+            ("--no-ff", (true, false, false)),
+            ("--squash", (false, true, false)),
+            ("--ff-only", (false, false, true)),
+        ] {
+            let cli = Cli::try_parse_from(["gz", "merge", flag])
+                .unwrap_or_else(|err| panic!("`gz merge {flag}` should parse: {err}"));
+
+            match cli.command {
+                Command::Merge {
+                    no_ff,
+                    squash,
+                    ff_only,
+                } => assert_eq!((no_ff, squash, ff_only), expected),
+                other => panic!("unexpected subcommand: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn merge_strategy_flags_are_mutually_exclusive() {
+        for flags in [
+            ["--no-ff", "--squash"],
+            ["--no-ff", "--ff-only"],
+            ["--squash", "--ff-only"],
+        ] {
+            Cli::try_parse_from(["gz", "merge", flags[0], flags[1]]).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn rebase_takes_no_options() {
+        let cli = Cli::try_parse_from(["gz", "rebase"]).expect("rebase should parse");
+
+        assert!(matches!(cli.command, Command::Rebase));
     }
 
     #[test]

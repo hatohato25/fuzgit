@@ -11,7 +11,7 @@ use assert_cmd::Command;
 const BIN_NAME: &str = "gz";
 
 /// `gz` のすべてのサブコマンド名。ヘルプ出力の検証に用いる。
-const SUBCOMMANDS: [&str; 8] = [
+const SUBCOMMANDS: [&str; 13] = [
     "branch",
     "log",
     "cherry-pick",
@@ -20,6 +20,11 @@ const SUBCOMMANDS: [&str; 8] = [
     "stash",
     "tag",
     "reflog",
+    "commit",
+    "push",
+    "fixup",
+    "merge",
+    "rebase",
 ];
 
 /// `gz stash` のサブコマンド名（`fuzgit::cli::StashCommand` と対応）。
@@ -354,6 +359,116 @@ fn mutually_exclusive_options_are_rejected_before_anything_runs() {
         stderr.contains("cannot be used with"),
         "the conflict should be explained:\n{stderr}"
     );
+}
+
+/// `gz merge` のマージ方式フラグが相互排他であることを確認する。
+#[test]
+fn the_merge_strategy_options_are_mutually_exclusive() {
+    let dir = empty_repository("merge-exclusive-options");
+
+    for flags in [
+        ["--no-ff", "--squash"],
+        ["--no-ff", "--ff-only"],
+        ["--squash", "--ff-only"],
+    ] {
+        let output = gz()
+            .args(["merge", flags[0], flags[1]])
+            .current_dir(dir.path())
+            .output()
+            .expect("failed to run gz merge");
+
+        assert!(
+            !output.status.success(),
+            "gz merge {} {} should be rejected",
+            flags[0],
+            flags[1]
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("cannot be used with"),
+            "the conflict should be explained:\n{stderr}"
+        );
+    }
+}
+
+/// 変更が 1 件も無い場合、`gz commit` は TUI を起動せずに終了することを確認する。
+#[test]
+fn commit_reports_when_there_is_nothing_to_commit() {
+    let dir = empty_repository("commit-nothing");
+
+    for arguments in [vec!["commit"], vec!["commit", "--message", "空コミット"]] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should exit non-zero when there is nothing to commit"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("選択できる候補がありません"),
+            "unexpected stderr for gz {arguments:?}:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "nothing should be written to stdout for gz {arguments:?}"
+        );
+    }
+}
+
+/// リモートが 1 つも無い場合、`gz push` は原因と次の操作を伝えて終了することを確認する。
+#[test]
+fn push_reports_when_no_remote_is_configured() {
+    let dir = empty_repository("push-no-remote");
+
+    for arguments in [vec!["push"], vec!["push", "-u"]] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should exit non-zero without a remote"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("git remote add"),
+            "the next step should be suggested for gz {arguments:?}:\n{stderr}"
+        );
+    }
+}
+
+/// force push は fuzgit のスコープ外であり、オプション自体が存在しないことを確認する。
+#[test]
+fn push_rejects_force_options_because_they_are_out_of_scope() {
+    let dir = empty_repository("push-force");
+
+    for flag in ["--force", "--force-with-lease", "-f", "--force-if-includes"] {
+        let output = gz()
+            .args(["push", flag])
+            .current_dir(dir.path())
+            .output()
+            .expect("failed to run gz push");
+
+        assert!(
+            !output.status.success(),
+            "gz push {flag} should be rejected"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("unexpected argument"),
+            "the unknown flag should be reported:\n{stderr}"
+        );
+    }
 }
 
 /// 引数なしの `gz stash` は、どちらかの操作へ倒さずサブコマンド一覧のヘルプを表示することを確認する。

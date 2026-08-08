@@ -31,6 +31,18 @@ fn display_args(args: &[&str]) -> String {
     args.join(" ")
 }
 
+/// エラーメッセージ表示用のコマンド名（`git commit` 等）を組み立てる。
+///
+/// 継承 stdio 実行では git 自身のメッセージが既に端末へ出ているため、引数を全て並べると
+/// pathspec の列で本当の原因が埋もれる。そこでサブコマンド名までに切り詰める。
+/// オプションや対象（リビジョン・パス）は、呼び出し側が `anyhow` の文脈で補う。
+fn command_display(args: &[&str]) -> String {
+    match args.first() {
+        Some(subcommand) => format!("git {subcommand}"),
+        None => "git".to_owned(),
+    }
+}
+
 /// 環境変数の値からデバッグログの有効・無効を判定する。
 ///
 /// 有効とみなすのは値が厳密に `1` の場合だけで、未設定（`None`）・空文字・`0`・`true` などは
@@ -99,7 +111,7 @@ fn map_spawn_error(source: std::io::Error, args: &[&str]) -> Error {
 ///
 /// - `git` が PATH 上に無い場合は [`Error::GitNotFound`]
 /// - 起動に失敗した場合は [`Error::GitSpawnFailed`]
-/// - 非ゼロ終了した場合は [`Error::GitCommandFailed`]（stderr は端末へ直接出力済みのため空）
+/// - 非ゼロ終了した場合は [`Error::GitRunFailed`]（失敗の詳細は git が端末へ直接出力済み）
 pub fn run_git(args: &[&str]) -> Result<()> {
     log_command(None, args);
 
@@ -111,9 +123,9 @@ pub fn run_git(args: &[&str]) -> Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(Error::GitCommandFailed {
-            args: display_args(args),
-            stderr: String::new(),
+        Err(Error::GitRunFailed {
+            command: command_display(args),
+            code: status.code(),
         })
     }
 }
@@ -142,6 +154,74 @@ pub fn capture_git(args: &[&str]) -> Result<Vec<u8>> {
 /// [`capture_git`] と同じ。
 pub fn capture_git_in(directory: &Path, args: &[&str]) -> Result<Vec<u8>> {
     capture(Some(directory), args)
+}
+
+/// `git` を `directory` で実行し、終了コードと標準出力を返す。
+///
+/// [`capture_git_in`] と違い、非ゼロ終了をエラーにしない。`git merge-tree --write-tree` の
+/// ように「終了コード 1 ＝コンフリクトあり」を正常系として扱うコマンドや、
+/// `git rev-parse --verify --quiet` のように「非ゼロ終了＝解決できなかった」を
+/// 結果として受け取りたいコマンドのために用意する。
+///
+/// 標準エラーは呼び出し側へ返さない。このヘルパを使うのは終了コード自体が意味を持つ
+/// コマンドに限られ、失敗理由の提示より終了コードによる分岐が目的であるため。
+///
+/// # Errors
+///
+/// - `git` が PATH 上に無い場合は [`Error::GitNotFound`]
+/// - 起動に失敗した場合は [`Error::GitSpawnFailed`]
+/// - シグナルで終了させられ終了コードが得られない場合は [`Error::GitCommandFailed`]
+pub fn capture_git_with_status_in(directory: &Path, args: &[&str]) -> Result<(i32, Vec<u8>)> {
+    log_command(Some(directory), args);
+
+    let output = Command::new("git")
+        .args(args)
+        .stdin(Stdio::null())
+        .current_dir(directory)
+        .output()
+        .map_err(|source| map_spawn_error(source, args))?;
+
+    // シグナルによる終了では終了コードが得られない。終了コードで分岐する用途のヘルパである以上、
+    // 判断できないまま続行せず失敗として扱う
+    let Some(code) = output.status.code() else {
+        return Err(Error::GitCommandFailed {
+            args: display_args(args),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    };
+
+    Ok((code, output.stdout))
+}
+
+/// `git merge-tree --write-tree` の終了コードが表す結果。
+///
+/// merge のドライランは「コンフリクトあり」を非ゼロ終了（1）で伝えるため、
+/// 終了コードを一律にエラーとして扱えない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeTreeOutcome {
+    /// コンフリクトなくマージできる。
+    Clean,
+    /// コンフリクトが発生する。
+    Conflicted,
+    /// マージ判定そのものが失敗した（Git 2.38 未満・不正なリビジョンなど）。
+    ///
+    /// 予測は補助情報であり、この場合は予測表示を省略して主要動作を続行する。
+    Failed,
+}
+
+impl MergeTreeOutcome {
+    /// `git merge-tree --write-tree` の終了コードから結果を判定する。
+    ///
+    /// git の仕様は 0 ＝クリーン / 1 ＝コンフリクトあり / それ以外＝エラー。
+    /// 負の値（終了コードとしては現れない）も判断できない値としてエラー側へ倒す。
+    #[must_use]
+    pub fn from_exit_code(code: i32) -> Self {
+        match code {
+            0 => MergeTreeOutcome::Clean,
+            1 => MergeTreeOutcome::Conflicted,
+            _ => MergeTreeOutcome::Failed,
+        }
+    }
 }
 
 /// `git` を実行して標準出力をキャプチャする。`directory` 指定時はそこを作業ディレクトリとする。
@@ -210,6 +290,44 @@ mod tests {
     }
 
     #[test]
+    fn run_git_reports_only_the_subcommand_on_failure() {
+        // 未知のサブコマンドは何も変更せずに非ゼロ終了する（git 自身の説明は端末へ出る）
+        let err = run_git(&["fuzgit-no-such-subcommand", "--", ":(top,literal)a[1].txt"])
+            .expect_err("unknown subcommand must fail");
+
+        match err {
+            Error::GitRunFailed { command, code } => {
+                assert_eq!(command, "git fuzgit-no-such-subcommand");
+                assert_eq!(code, Some(1));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_command_display_stops_at_the_subcommand() {
+        // pathspec の列を再掲すると、端末に出ている git 本来のメッセージが埋もれる
+        assert_eq!(
+            command_display(&["commit", "--", ":(top,literal)src/cli.rs"]),
+            "git commit"
+        );
+    }
+
+    #[test]
+    fn a_command_display_omits_options_and_operands() {
+        assert_eq!(
+            command_display(&["push", "--set-upstream", "origin"]),
+            "git push"
+        );
+        assert_eq!(command_display(&["stash", "push", "--"]), "git stash");
+    }
+
+    #[test]
+    fn a_command_display_without_arguments_names_git_itself() {
+        assert_eq!(command_display(&[]), "git");
+    }
+
+    #[test]
     fn display_args_joins_with_spaces() {
         assert_eq!(
             display_args(&["log", "--oneline", "-n", "5"]),
@@ -230,6 +348,73 @@ mod tests {
 
         let text = String::from_utf8(stdout).expect("rev-parse emits utf-8");
         assert_eq!(text.trim(), head);
+    }
+
+    #[test]
+    fn capture_git_with_status_in_returns_the_output_of_a_successful_command() {
+        use crate::test_support::{TempDir, commit, init_repository};
+
+        let dir = TempDir::new("exec-status-ok");
+        init_repository(dir.path());
+        let head = commit(dir.path(), "first commit");
+
+        let (code, stdout) = capture_git_with_status_in(dir.path(), &["rev-parse", "HEAD"])
+            .expect("rev-parse should run");
+
+        assert_eq!(code, 0);
+        let text = String::from_utf8(stdout).expect("rev-parse emits utf-8");
+        assert_eq!(text.trim(), head);
+    }
+
+    #[test]
+    fn capture_git_with_status_in_reports_a_non_zero_exit_without_failing() {
+        use crate::test_support::{TempDir, init_repository};
+
+        let dir = TempDir::new("exec-status-non-zero");
+        init_repository(dir.path());
+
+        // `--verify --quiet` は解決できない参照に対しメッセージ無しで非ゼロ終了する
+        let (code, stdout) = capture_git_with_status_in(
+            dir.path(),
+            &["rev-parse", "--verify", "--quiet", "refs/heads/missing"],
+        )
+        .expect("a non-zero exit must not be an error");
+
+        assert_ne!(code, 0, "a missing reference must not exit with 0");
+        assert!(stdout.is_empty(), "unexpected output: {stdout:?}");
+    }
+
+    #[test]
+    fn a_clean_merge_tree_exit_code_means_no_conflict() {
+        assert_eq!(MergeTreeOutcome::from_exit_code(0), MergeTreeOutcome::Clean);
+    }
+
+    #[test]
+    fn a_merge_tree_exit_code_of_one_means_conflicts() {
+        assert_eq!(
+            MergeTreeOutcome::from_exit_code(1),
+            MergeTreeOutcome::Conflicted
+        );
+    }
+
+    #[test]
+    fn any_other_merge_tree_exit_code_means_the_prediction_failed() {
+        // 2 以上は git 側のエラー（Git 2.38 未満の未知オプション 129、fatal の 128 を含む）
+        for code in [2, 3, 42, 128, 129, i32::MAX] {
+            assert_eq!(
+                MergeTreeOutcome::from_exit_code(code),
+                MergeTreeOutcome::Failed,
+                "exit code {code} must be treated as a failure"
+            );
+        }
+    }
+
+    #[test]
+    fn a_negative_merge_tree_exit_code_means_the_prediction_failed() {
+        assert_eq!(
+            MergeTreeOutcome::from_exit_code(-1),
+            MergeTreeOutcome::Failed
+        );
     }
 
     #[test]

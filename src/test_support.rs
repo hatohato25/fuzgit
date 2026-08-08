@@ -94,6 +94,27 @@ fn git_in_at(directory: &Path, args: &[&str], date: &str) -> String {
         .to_string()
 }
 
+/// [`git_in`] と同じ設定で `git` を実行し、成功したかどうかだけを返す。
+///
+/// コンフリクトする merge のように、非ゼロ終了が想定内の操作に用いる。
+pub fn try_git_in(directory: &Path, args: &[&str]) -> bool {
+    Command::new("git")
+        .args(args)
+        .current_dir(directory)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", AUTHOR_NAME)
+        .env("GIT_AUTHOR_EMAIL", AUTHOR_EMAIL)
+        .env("GIT_COMMITTER_NAME", AUTHOR_NAME)
+        .env("GIT_COMMITTER_EMAIL", AUTHOR_EMAIL)
+        .env("GIT_AUTHOR_DATE", COMMIT_DATE)
+        .env("GIT_COMMITTER_DATE", COMMIT_DATE)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run git {args:?}: {err}"))
+        .status
+        .success()
+}
+
 /// 指定ディレクトリに空の git リポジトリを作成する。
 ///
 /// 既定ブランチ名は実行環境の `init.defaultBranch` に依存しないよう `main` に固定する。

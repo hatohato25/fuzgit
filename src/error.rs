@@ -32,13 +32,29 @@ pub enum Error {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    /// `git` コマンドが非ゼロ終了した。
+    /// 出力をキャプチャして実行した `git` コマンドが非ゼロ終了した。
+    ///
+    /// この経路では git のメッセージがユーザーの端末に出ていないため、
+    /// 実行した引数とキャプチャした標準エラーを添えて原因を伝える。
     #[error("git コマンドが失敗しました: git {args}{}", stderr_suffix(.stderr))]
     GitCommandFailed {
         /// 実行した引数（表示用にスペース区切りで連結したもの）。
         args: String,
-        /// キャプチャできた標準エラー出力。継承 stdio 実行時は空文字列になる。
+        /// キャプチャできた標準エラー出力。git が何も出力しなかった場合は空文字列になる。
         stderr: String,
+    },
+
+    /// 標準入出力を継承して実行した `git` コマンドが非ゼロ終了した。
+    ///
+    /// git 自身のエラーメッセージは既にユーザーの端末へ出力済みであるため、
+    /// 引数（パススペックの列を含む）を再掲すると本当の原因がその中に埋もれる。
+    /// ここではコマンド名と終了状況だけを示し、詳細は git の出力に委ねる。
+    #[error("{command} が{}", exit_status_text(.code))]
+    GitRunFailed {
+        /// 表示用のコマンド名（例: `git commit`）。
+        command: String,
+        /// プロセスの終了コード。シグナルで終了した場合は `None`。
+        code: Option<i32>,
     },
 
     /// `git` 実行ファイルが PATH 上に存在しない。
@@ -67,6 +83,16 @@ pub enum Error {
         /// HEAD が指している（まだ実体の無い）ブランチ名。
         branch: String,
     },
+
+    /// HEAD がブランチではなくコミットを直接指している（detached HEAD）。
+    ///
+    /// `gz push` は「現在のブランチ」を push 対象として固定するため、
+    /// ブランチが定まらない状態では候補を作れない。
+    #[error(
+        "HEAD がブランチを指していません（detached HEAD）。\
+         push するブランチが定まらないため、`git switch <ブランチ>` で切り替えてから実行してください"
+    )]
+    DetachedHead,
 
     /// 作業ツリーを持たない（bare）リポジトリで、作業ツリーを前提とする操作を行おうとした。
     #[error("作業ツリーがありません。bare リポジトリでは実行できない操作です")]
@@ -101,6 +127,16 @@ fn stderr_suffix(stderr: &str) -> String {
         String::new()
     } else {
         format!("\n{trimmed}")
+    }
+}
+
+/// プロセスの終了状況をエラーメッセージ末尾の述部として整形する。
+///
+/// シグナルで終了した場合は終了コードが得られないため、コードを取り繕わず理由の方を示す。
+fn exit_status_text(code: &Option<i32>) -> String {
+    match code {
+        Some(code) => format!("終了コード {code} で終了しました"),
+        None => "シグナルにより終了しました".to_owned(),
     }
 }
 
@@ -143,6 +179,37 @@ mod tests {
             err.to_string(),
             "git コマンドが失敗しました: git switch nope"
         );
+    }
+
+    #[test]
+    fn git_run_failed_names_the_command_and_the_exit_code() {
+        let err = Error::GitRunFailed {
+            command: "git commit".to_string(),
+            code: Some(1),
+        };
+        assert_eq!(err.to_string(), "git commit が終了コード 1 で終了しました");
+    }
+
+    #[test]
+    fn git_run_failed_does_not_repeat_the_arguments() {
+        // git 自身のメッセージは端末へ出力済みであり、pathspec の列を再掲すると原因が埋もれる
+        let err = Error::GitRunFailed {
+            command: "git commit".to_string(),
+            code: Some(1),
+        };
+        assert!(
+            !err.to_string().contains(":(top,literal)"),
+            "the message must not repeat the command line: {err}"
+        );
+    }
+
+    #[test]
+    fn git_run_failed_reports_a_signal_termination_without_a_code() {
+        let err = Error::GitRunFailed {
+            command: "git push".to_string(),
+            code: None,
+        };
+        assert_eq!(err.to_string(), "git push がシグナルにより終了しました");
     }
 
     #[test]

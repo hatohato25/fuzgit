@@ -8,10 +8,12 @@
 //! 設定（`status.renames` 等）の解釈まで含めると挙動互換の担保が難しく、
 //! ここでは git 本体の判定をそのまま利用するほうが確実なため。
 
+use std::path::Path;
+
 use gix::bstr::{BStr, ByteSlice as _};
 
 use crate::error::{Error, Result};
-use crate::git::exec::capture_git_in;
+use crate::git::exec::{capture_git_in, capture_git_with_status_in};
 use crate::git::repo::workdir;
 
 /// 候補に含めるブランチの範囲。
@@ -105,7 +107,14 @@ fn reject_unborn_head(repository: &gix::Repository) -> Result<()> {
 }
 
 /// HEAD が指しているローカルブランチの短縮名を返す。detached HEAD の場合は `None`。
-fn current_branch(repository: &gix::Repository) -> Result<Option<String>> {
+///
+/// まだコミットの無いブランチ（unborn HEAD）でも、HEAD が指す名前を返す。
+///
+/// # Errors
+///
+/// HEAD の読み取りに失敗した場合、またはブランチ名が UTF-8 でない場合は
+/// [`Error::RepositoryReadFailed`] を返す。
+pub fn current_branch(repository: &gix::Repository) -> Result<Option<String>> {
     let Some(name) = repository
         .head_name()
         .map_err(|source| read_error("HEAD の読み取り", source))?
@@ -182,6 +191,263 @@ pub fn branches(repository: &gix::Repository, scope: BranchScope) -> Result<Vec<
         reject_unborn_head(repository)?;
     }
     Ok(locals)
+}
+
+/// リモートの名前一覧を名前順で取得する。
+///
+/// `gz push` の候補（リモート × 現在ブランチ）を組み立てるために用いる。
+///
+/// # Errors
+///
+/// リモート名が UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+pub fn remotes(repository: &gix::Repository) -> Result<Vec<String>> {
+    // `remote_names()` は BTreeSet であり既に名前順に並んでいる
+    repository
+        .remote_names()
+        .iter()
+        .map(|name| to_utf8(name.as_bstr(), "リモート名の解釈"))
+        .collect()
+}
+
+/// ブランチに設定された upstream（`branch.<name>.remote` / `.merge`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Upstream {
+    /// `branch.<name>.remote` の値。
+    ///
+    /// 通常は `origin` のようなリモート名だが、git の設定では URL を直接書くこともできるため
+    /// その場合は URL がそのまま入る（[`remotes`] の一覧とは一致しない）。
+    pub remote: String,
+    /// `branch.<name>.merge` の値（リモート側の完全な参照名。例: `refs/heads/main`）。
+    pub merge_ref: String,
+}
+
+/// ブランチに設定された upstream を取得する。設定が無い場合は `None`。
+///
+/// # Errors
+///
+/// ブランチ名が参照名として不正な場合、upstream の参照名を解決できない場合、
+/// または値が UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+pub fn upstream(repository: &gix::Repository, branch: &str) -> Result<Option<Upstream>> {
+    let full_name = gix::refs::Category::LocalBranch
+        .to_full_name(branch)
+        .map_err(|source| read_error(&format!("ブランチ名 `{branch}` の解釈"), source))?;
+
+    // fetch 方向を見る。push 方向は pushRemote / push.default の解決を伴い、
+    // 「現在の追跡先」を知りたいここでの用途とは意味が異なる
+    let direction = gix::remote::Direction::Fetch;
+
+    let Some(remote) = repository.branch_remote_name(branch, direction) else {
+        return Ok(None);
+    };
+    let remote = match remote {
+        gix::remote::Name::Symbol(name) => name.into_owned(),
+        gix::remote::Name::Url(url) => to_utf8(url.as_ref(), "リモート URL の解釈")?,
+    };
+
+    let Some(merge_ref) = repository.branch_remote_ref_name(full_name.as_ref(), direction) else {
+        return Ok(None);
+    };
+    let merge_ref = merge_ref
+        .map_err(|source| read_error(&format!("`{branch}` の upstream の解決"), source))?;
+    let merge_ref = to_utf8(merge_ref.as_bstr(), "upstream の参照名の解釈")?;
+
+    Ok(Some(Upstream { remote, merge_ref }))
+}
+
+/// `git rev-list --left-right --count` の出力をパースする。
+///
+/// 出力は `<左だけに含まれる件数>\t<右だけに含まれる件数>\n` の 1 行
+/// （末尾の改行は無い場合もある）。`<local>...<remote>` の順で渡すため、
+/// 左が ahead、右が behind に対応する。
+///
+/// # Errors
+///
+/// フィールド数が 2 でない場合、数値として解釈できない場合、
+/// UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+fn parse_ahead_behind(output: &[u8]) -> Result<(usize, usize)> {
+    let malformed = || {
+        read_error(
+            "git rev-list 出力の解釈",
+            format!(
+                "ahead/behind の形式が想定と異なります: {:?}",
+                output.as_bstr().to_str_lossy()
+            ),
+        )
+    };
+
+    let text = output
+        .to_str()
+        .map_err(|_| malformed())?
+        .trim_end_matches(['\n', '\r']);
+
+    let mut fields = text.split('\t');
+    let (Some(ahead), Some(behind), None) = (fields.next(), fields.next(), fields.next()) else {
+        return Err(malformed());
+    };
+
+    let ahead = ahead.parse::<usize>().map_err(|_| malformed())?;
+    let behind = behind.parse::<usize>().map_err(|_| malformed())?;
+    Ok((ahead, behind))
+}
+
+/// `revision` が解決できるかどうかを判定する。
+///
+/// `git rev-parse --verify --quiet` は解決できない場合にメッセージを出さず非ゼロ終了するため、
+/// 終了コードだけで「存在するか」を判定できる。
+fn revision_exists(workdir: &Path, revision: &str) -> Result<bool> {
+    // `^{commit}` を付けて、同名のファイルやタグではなくコミットとして解決できることを確かめる
+    let specification = format!("{revision}^{{commit}}");
+    let (code, _) = capture_git_with_status_in(
+        workdir,
+        &["rev-parse", "--verify", "--quiet", &specification],
+    )?;
+
+    Ok(code == 0)
+}
+
+/// `local` が `remote_ref` に対して何コミット進んでいる / 遅れているかを返す。
+///
+/// `remote_ref` が存在しない場合（まだ push していないブランチなど）は `None` を返す。
+///
+/// # Errors
+///
+/// `git` の実行に失敗した場合、または出力をパースできない場合にエラーを返す。
+pub fn ahead_behind(
+    workdir: &Path,
+    local: &str,
+    remote_ref: &str,
+) -> Result<Option<(usize, usize)>> {
+    if !revision_exists(workdir, remote_ref)? {
+        return Ok(None);
+    }
+
+    // `<左>...<右>` の対称差を左右別に数える。左＝ローカルにしかないコミット数＝ahead
+    let range = format!("{local}...{remote_ref}");
+    // 末尾の `--` はリビジョンとパスの境界。同名のファイルがあってもパスとして解釈させない
+    let output = capture_git_in(
+        workdir,
+        &["rev-list", "--left-right", "--count", &range, "--"],
+    )?;
+
+    parse_ahead_behind(&output).map(Some)
+}
+
+/// push 先の候補 1 件分の情報（リモート × 現在のブランチ）。
+///
+/// `remote` / `branch` はいずれも gix が列挙した値であり、ユーザーの自由入力ではない。
+/// `git push` はパス以外の位置引数を取り `--` で保護できないため、この由来を保つことが
+/// そのままインジェクション対策になる（design.md セキュリティ設計）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushTarget {
+    /// リモート名（`origin` 等）。
+    pub remote: String,
+    /// push するブランチ名（現在のブランチ）。
+    pub branch: String,
+    /// 現在のブランチの upstream に対応する候補かどうか。
+    pub is_upstream: bool,
+    /// リモート追跡参照に対する (ahead, behind)。追跡参照が無い場合は `None`。
+    pub ahead_behind: Option<(usize, usize)>,
+}
+
+impl PushTarget {
+    /// リモート追跡参照の短縮名（`origin/main`）。表示と選択結果の照合に用いる。
+    #[must_use]
+    pub fn tracking_name(&self) -> String {
+        format!(
+            "{remote}/{branch}",
+            remote = self.remote,
+            branch = self.branch
+        )
+    }
+
+    /// リモート追跡参照の完全な参照名（`refs/remotes/origin/main`）。
+    ///
+    /// git へ渡す際は短縮名ではなくこちらを使う。同名のローカルブランチ・タグがあっても
+    /// リモート追跡参照として解決されることを保証するため。
+    #[must_use]
+    pub fn tracking_ref(&self) -> String {
+        format!("refs/remotes/{name}", name = self.tracking_name())
+    }
+}
+
+/// `upstream` が「リモート `remote` の `refs/heads/<branch>`」を指しているかどうか。
+///
+/// `gz push` の候補は `git push <remote> <branch>`（= リモート側の `refs/heads/<branch>` を更新）
+/// であるため、リモート名だけでなく更新先の参照名まで一致して初めて upstream と同じ宛先といえる。
+fn targets_upstream(upstream: Option<&Upstream>, remote: &str, branch: &str) -> bool {
+    upstream.is_some_and(|upstream| {
+        upstream.remote == remote && upstream.merge_ref == format!("refs/heads/{branch}")
+    })
+}
+
+/// push 先の候補（リモート × 現在のブランチ）をリモート名順で取得する。
+///
+/// # Errors
+///
+/// - HEAD がブランチを指していない場合は [`Error::DetachedHead`]
+/// - 作業ツリーを持たない bare リポジトリの場合は [`Error::NoWorktree`]
+/// - リモート・upstream の読み取り、ahead/behind の算出に失敗した場合はそれぞれのエラー
+pub fn push_targets(repository: &gix::Repository) -> Result<Vec<PushTarget>> {
+    let Some(branch) = current_branch(repository)? else {
+        return Err(Error::DetachedHead);
+    };
+
+    let upstream = upstream(repository, &branch)?;
+    let workdir = workdir(repository)?;
+    // まだコミットが 1 件も無いブランチはローカル側を解決できず、比較そのものが成立しない
+    let branch_exists = revision_exists(workdir, &branch)?;
+
+    let mut targets = Vec::new();
+    for remote in remotes(repository)? {
+        let mut target = PushTarget {
+            remote,
+            branch: branch.clone(),
+            is_upstream: false,
+            ahead_behind: None,
+        };
+        target.is_upstream = targets_upstream(upstream.as_ref(), &target.remote, &branch);
+        if branch_exists {
+            target.ahead_behind = ahead_behind(workdir, &branch, &target.tracking_ref())?;
+        }
+        targets.push(target);
+    }
+
+    Ok(targets)
+}
+
+/// 進行中の git 操作のうち、fuzgit が復帰メニューを提供するもの。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    /// merge が進行中（`.git/MERGE_HEAD` がある）。
+    Merge,
+    /// rebase が進行中（`.git/rebase-merge` または `.git/rebase-apply` がある）。
+    Rebase,
+}
+
+/// merge / rebase が進行中かどうかを返す。
+///
+/// cherry-pick / revert / bisect / `git am` も「進行中の操作」ではあるが、
+/// fuzgit が continue / abort の復帰メニューを提供するのは merge と rebase だけであるため
+/// `None`（進行中ではない扱い）を返す。
+#[must_use]
+pub fn operation_in_progress(repository: &gix::Repository) -> Option<Operation> {
+    use gix::state::InProgress;
+
+    match repository.state()? {
+        InProgress::Merge => Some(Operation::Merge),
+        // 非対話の `git rebase` でも merge バックエンドは `rebase-merge/interactive` を作るため、
+        // RebaseInteractive も通常の rebase として扱う。ApplyMailboxRebase は
+        // `rebase-apply` があり `applying` が無い状態で、git 自身も rebase 進行中と判定する
+        InProgress::Rebase | InProgress::RebaseInteractive | InProgress::ApplyMailboxRebase => {
+            Some(Operation::Rebase)
+        }
+        InProgress::ApplyMailbox
+        | InProgress::Bisect
+        | InProgress::CherryPick
+        | InProgress::CherryPickSequence
+        | InProgress::Revert
+        | InProgress::RevertSequence => None,
+    }
 }
 
 /// 走査の起点となるコミット（tip）を [`CommitScope`] に応じて集める。
@@ -324,6 +590,15 @@ const UNTRACKED_CODE: char = '?';
 /// 変更なしを表す状態コード。
 const UNMODIFIED_CODE: char = ' ';
 
+/// マージ未解決を表す状態コード（`UU` / `AU` / `UD` など）。
+const UNMERGED_CODE: char = 'U';
+
+/// 追加を表す状態コード。両側が `A` の場合（`AA`）はマージ未解決を意味する。
+const ADDED_CODE: char = 'A';
+
+/// 削除を表す状態コード。両側が `D` の場合（`DD`）はマージ未解決を意味する。
+const DELETED_CODE: char = 'D';
+
 /// 候補に含める変更ファイルの範囲。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeScope {
@@ -343,6 +618,10 @@ pub enum ChangeScope {
     /// 未追跡ファイルは `git stash push` に `--include-untracked` を付けたときだけ退避できるため、
     /// [`ChangeScope::Tracked`] と分けて指定する。
     TrackedOrUntracked,
+    /// マージ未解決（コンフリクト中）のファイル。
+    ///
+    /// merge / rebase の復帰メニューで、解決したファイルを stage する対象に用いる。
+    Unmerged,
 }
 
 impl ChangeScope {
@@ -356,6 +635,7 @@ impl ChangeScope {
             ChangeScope::TrackedOrUntracked => {
                 change.is_untracked() || change.has_staged_change() || change.has_worktree_change()
             }
+            ChangeScope::Unmerged => change.is_unmerged(),
         }
     }
 }
@@ -390,6 +670,21 @@ impl FileChange {
     #[must_use]
     pub fn has_worktree_change(&self) -> bool {
         !self.is_untracked() && self.worktree_status != UNMODIFIED_CODE
+    }
+
+    /// マージが未解決（コンフリクト中）かどうか。
+    ///
+    /// `git status --porcelain` がマージ未解決として扱う状態コードは
+    /// `DD` / `AU` / `UD` / `UA` / `DU` / `AA` / `UU` の 7 種類。
+    /// どちらかが `U` の 5 種類に加えて、両側が `A`（双方が追加）と両側が `D`（双方が削除）が含まれる。
+    #[must_use]
+    pub fn is_unmerged(&self) -> bool {
+        let (index, worktree) = (self.index_status, self.worktree_status);
+
+        index == UNMERGED_CODE
+            || worktree == UNMERGED_CODE
+            || (index == ADDED_CODE && worktree == ADDED_CODE)
+            || (index == DELETED_CODE && worktree == DELETED_CODE)
     }
 
     /// `git status --porcelain` と同じ 2 文字の状態コード（`MM` / ` M` / `??` など）。
@@ -774,7 +1069,7 @@ mod tests {
     use crate::test_support::{
         COMMIT_DATE_SHORT, TempDir, commit, commit_at, create_annotated_tag, create_branch,
         create_lightweight_tag, create_remote_branch, create_remote_symbolic_ref, git_in,
-        init_repository, stash_changes, write_file,
+        init_repository, stash_changes, try_git_in, write_file,
     };
 
     /// `main` に 1 コミットだけ持つテストリポジトリを用意する。
@@ -1821,5 +2116,482 @@ mod tests {
         assert_eq!(commit.summary, "first commit");
         assert_eq!(commit.author, "fuzgit test");
         assert_eq!(commit.time, COMMIT_DATE_SHORT);
+    }
+
+    #[test]
+    fn the_current_branch_is_the_one_head_points_at() {
+        let (dir, repository, _head) = repository_with_one_commit("read-current-branch");
+
+        assert_eq!(
+            current_branch(&repository).expect("HEAD should be readable"),
+            Some("main".to_string())
+        );
+
+        git_in(dir.path(), &["switch", "--quiet", "--create", "feature"]);
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+        assert_eq!(
+            current_branch(&repository).expect("HEAD should be readable"),
+            Some("feature".to_string())
+        );
+    }
+
+    #[test]
+    fn a_detached_head_has_no_current_branch() {
+        let (dir, _repository, head) = repository_with_one_commit("read-current-branch-detached");
+        git_in(dir.path(), &["switch", "--quiet", "--detach", &head]);
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        assert_eq!(
+            current_branch(&repository).expect("HEAD should be readable"),
+            None
+        );
+    }
+
+    #[test]
+    fn remotes_are_listed_by_name() {
+        let (dir, _repository, _head) = repository_with_one_commit("read-remotes");
+        git_in(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://example.invalid/up.git",
+            ],
+        );
+        git_in(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/origin.git",
+            ],
+        );
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let remotes = remotes(&repository).expect("remotes should be read");
+
+        assert_eq!(remotes, ["origin", "upstream"]);
+    }
+
+    #[test]
+    fn a_repository_without_remotes_lists_none() {
+        let (_dir, repository, _head) = repository_with_one_commit("read-remotes-empty");
+
+        let remotes = remotes(&repository).expect("remotes should be read");
+
+        assert!(remotes.is_empty(), "unexpected remotes: {remotes:?}");
+    }
+
+    #[test]
+    fn an_upstream_is_read_from_the_branch_configuration() {
+        let (dir, _repository, head) = repository_with_one_commit("read-upstream");
+        git_in(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/origin.git",
+            ],
+        );
+        create_remote_branch(dir.path(), "origin/main", &head);
+        git_in(
+            dir.path(),
+            &["branch", "--set-upstream-to=origin/main", "main"],
+        );
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let upstream = upstream(&repository, "main")
+            .expect("the upstream should be readable")
+            .expect("main tracks origin/main");
+
+        assert_eq!(upstream.remote, "origin");
+        assert_eq!(upstream.merge_ref, "refs/heads/main");
+    }
+
+    #[test]
+    fn a_branch_without_tracking_configuration_has_no_upstream() {
+        let (dir, repository, _head) = repository_with_one_commit("read-upstream-none");
+        create_branch(dir.path(), "feature");
+
+        assert_eq!(
+            upstream(&repository, "main").expect("the upstream should be readable"),
+            None
+        );
+        assert_eq!(
+            upstream(&repository, "feature").expect("the upstream should be readable"),
+            None
+        );
+    }
+
+    #[test]
+    fn ahead_and_behind_are_counted_against_the_tracking_reference() {
+        let (dir, _repository, _head) = repository_with_one_commit("read-ahead-behind");
+        create_branch(dir.path(), "remote-side");
+        commit(dir.path(), "local 1");
+        commit(dir.path(), "local 2");
+
+        git_in(dir.path(), &["switch", "--quiet", "remote-side"]);
+        let remote_head = commit(dir.path(), "remote 1");
+        git_in(dir.path(), &["switch", "--quiet", "main"]);
+        create_remote_branch(dir.path(), "origin/main", &remote_head);
+
+        let counts = ahead_behind(dir.path(), "main", "origin/main")
+            .expect("the counts should be computed")
+            .expect("origin/main exists");
+
+        assert_eq!(counts, (2, 1), "the left side of the range is ahead");
+    }
+
+    #[test]
+    fn a_branch_in_sync_with_its_tracking_reference_is_neither_ahead_nor_behind() {
+        let (dir, _repository, head) = repository_with_one_commit("read-ahead-behind-sync");
+        create_remote_branch(dir.path(), "origin/main", &head);
+
+        let counts = ahead_behind(dir.path(), "main", "origin/main")
+            .expect("the counts should be computed")
+            .expect("origin/main exists");
+
+        assert_eq!(counts, (0, 0));
+    }
+
+    #[test]
+    fn a_missing_tracking_reference_yields_no_counts() {
+        let (dir, _repository, _head) = repository_with_one_commit("read-ahead-behind-missing");
+
+        let counts =
+            ahead_behind(dir.path(), "main", "origin/main").expect("a missing ref is not an error");
+
+        assert_eq!(counts, None);
+    }
+
+    #[test]
+    fn ahead_behind_output_is_tab_separated() {
+        // `git rev-list --left-right --count <local>...<remote>` は `<ahead>\t<behind>\n` を出す
+        assert_eq!(
+            parse_ahead_behind(b"3\t2\n").expect("the output should parse"),
+            (3, 2)
+        );
+    }
+
+    #[test]
+    fn ahead_behind_output_parses_without_a_trailing_newline() {
+        assert_eq!(
+            parse_ahead_behind(b"0\t0").expect("the output should parse"),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn a_malformed_ahead_behind_output_is_rejected() {
+        for output in [
+            &b""[..],
+            &b"3"[..],
+            &b"3 2\n"[..],
+            &b"3\t2\t1\n"[..],
+            &b"3\t-2\n"[..],
+            &b"a\tb\n"[..],
+            &[0xff, b'\t', b'1'],
+        ] {
+            let err = parse_ahead_behind(output)
+                .expect_err("a malformed output must not be silently accepted");
+
+            assert!(
+                matches!(err, Error::RepositoryReadFailed { .. }),
+                "unexpected error for {output:?}: {err:?}"
+            );
+        }
+    }
+
+    /// テストリポジトリにリモートを登録する（fetch は行わない）。
+    fn add_remote(path: &Path, name: &str) {
+        git_in(
+            path,
+            &[
+                "remote",
+                "add",
+                name,
+                &format!("https://example.invalid/{name}.git"),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_push_target_is_generated_for_every_remote() {
+        let (dir, _repository, _head) = repository_with_one_commit("read-push-targets");
+        add_remote(dir.path(), "upstream");
+        add_remote(dir.path(), "origin");
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let targets = push_targets(&repository).expect("push targets should be generated");
+
+        assert_eq!(
+            targets
+                .iter()
+                .map(PushTarget::tracking_name)
+                .collect::<Vec<_>>(),
+            ["origin/main", "upstream/main"],
+            "every remote is combined with the current branch, in name order"
+        );
+        assert!(
+            targets.iter().all(|target| target.branch == "main"),
+            "the current branch is fixed as the push target: {targets:?}"
+        );
+    }
+
+    #[test]
+    fn a_repository_without_remotes_has_no_push_target() {
+        let (_dir, repository, _head) = repository_with_one_commit("read-push-targets-empty");
+
+        let targets = push_targets(&repository).expect("push targets should be generated");
+
+        assert!(targets.is_empty(), "unexpected targets: {targets:?}");
+    }
+
+    #[test]
+    fn only_the_configured_upstream_is_marked_among_the_targets() {
+        let (dir, _repository, head) = repository_with_one_commit("read-push-targets-upstream");
+        add_remote(dir.path(), "origin");
+        add_remote(dir.path(), "backup");
+        create_remote_branch(dir.path(), "origin/main", &head);
+        git_in(
+            dir.path(),
+            &["branch", "--set-upstream-to=origin/main", "main"],
+        );
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let targets = push_targets(&repository).expect("push targets should be generated");
+
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| (target.tracking_name(), target.is_upstream))
+                .collect::<Vec<_>>(),
+            [
+                ("backup/main".to_owned(), false),
+                ("origin/main".to_owned(), true)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_push_target_carries_the_counts_against_its_tracking_reference() {
+        let (dir, _repository, _head) = repository_with_one_commit("read-push-targets-counts");
+        add_remote(dir.path(), "origin");
+        add_remote(dir.path(), "backup");
+        create_branch(dir.path(), "remote-side");
+        commit(dir.path(), "local 1");
+        commit(dir.path(), "local 2");
+        git_in(dir.path(), &["switch", "--quiet", "remote-side"]);
+        let remote_head = commit(dir.path(), "remote 1");
+        git_in(dir.path(), &["switch", "--quiet", "main"]);
+        create_remote_branch(dir.path(), "origin/main", &remote_head);
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let targets = push_targets(&repository).expect("push targets should be generated");
+
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| (target.tracking_name(), target.ahead_behind))
+                .collect::<Vec<_>>(),
+            [
+                ("backup/main".to_owned(), None),
+                ("origin/main".to_owned(), Some((2, 1)))
+            ],
+            "a remote without a tracking reference cannot be compared"
+        );
+    }
+
+    #[test]
+    fn a_push_target_of_a_branch_without_commits_has_no_counts() {
+        let dir = TempDir::new("read-push-targets-unborn");
+        init_repository(dir.path());
+        add_remote(dir.path(), "origin");
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let targets = push_targets(&repository).expect("push targets should be generated");
+
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| (target.tracking_name(), target.ahead_behind))
+                .collect::<Vec<_>>(),
+            [("origin/main".to_owned(), None)]
+        );
+    }
+
+    #[test]
+    fn a_detached_head_has_no_push_target() {
+        let (dir, _repository, head) = repository_with_one_commit("read-push-targets-detached");
+        add_remote(dir.path(), "origin");
+        git_in(dir.path(), &["switch", "--quiet", "--detach", &head]);
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let err = push_targets(&repository)
+            .expect_err("a detached HEAD gives no branch to push and must be reported");
+
+        assert!(matches!(err, Error::DetachedHead), "unexpected: {err:?}");
+    }
+
+    #[test]
+    fn a_tracking_reference_is_addressed_by_its_full_name() {
+        let target = PushTarget {
+            remote: "origin".to_owned(),
+            branch: "feature/login".to_owned(),
+            is_upstream: false,
+            ahead_behind: None,
+        };
+
+        assert_eq!(target.tracking_name(), "origin/feature/login");
+        assert_eq!(
+            target.tracking_ref(),
+            "refs/remotes/origin/feature/login",
+            "the full name keeps a same-named local branch or tag from winning"
+        );
+    }
+
+    #[test]
+    fn a_target_matches_the_upstream_only_when_both_the_remote_and_the_reference_agree() {
+        let upstream = Upstream {
+            remote: "origin".to_owned(),
+            merge_ref: "refs/heads/main".to_owned(),
+        };
+
+        assert!(targets_upstream(Some(&upstream), "origin", "main"));
+        assert!(
+            !targets_upstream(Some(&upstream), "backup", "main"),
+            "another remote is a different destination"
+        );
+        assert!(
+            !targets_upstream(Some(&upstream), "origin", "trunk"),
+            "a branch tracking a differently named reference is a different destination"
+        );
+        assert!(!targets_upstream(None, "origin", "main"));
+    }
+
+    #[test]
+    fn no_operation_is_in_progress_in_a_clean_repository() {
+        let (_dir, repository, _head) = repository_with_one_commit("read-state-clean");
+
+        assert_eq!(operation_in_progress(&repository), None);
+    }
+
+    #[test]
+    fn a_merge_in_progress_is_detected() {
+        let (dir, repository, head) = repository_with_one_commit("read-state-merge");
+        write_file(dir.path(), ".git/MERGE_HEAD", &format!("{head}\n"));
+
+        assert_eq!(operation_in_progress(&repository), Some(Operation::Merge));
+    }
+
+    #[test]
+    fn a_rebase_in_progress_is_detected() {
+        let (dir, repository, _head) = repository_with_one_commit("read-state-rebase");
+        // 非対話の `git rebase` でも merge バックエンドは `rebase-merge/interactive` を作る
+        write_file(dir.path(), ".git/rebase-merge/interactive", "");
+
+        assert_eq!(operation_in_progress(&repository), Some(Operation::Rebase));
+    }
+
+    #[test]
+    fn a_rebase_started_by_the_apply_backend_is_detected() {
+        let (dir, repository, _head) = repository_with_one_commit("read-state-rebase-apply");
+        write_file(dir.path(), ".git/rebase-apply/rebasing", "");
+
+        assert_eq!(operation_in_progress(&repository), Some(Operation::Rebase));
+    }
+
+    #[test]
+    fn an_operation_without_a_recovery_menu_is_not_reported() {
+        // cherry-pick は fuzgit の復帰メニューの対象外（git の hint をそのまま見せる）
+        let (dir, repository, head) = repository_with_one_commit("read-state-cherry-pick");
+        write_file(dir.path(), ".git/CHERRY_PICK_HEAD", &format!("{head}\n"));
+
+        assert_eq!(operation_in_progress(&repository), None);
+    }
+
+    #[test]
+    fn unmerged_status_codes_are_recognised() {
+        // git がマージ未解決として扱う 7 種類の状態コード
+        for code in ["DD", "AU", "UD", "UA", "DU", "AA", "UU"] {
+            assert!(
+                change("conflicted.txt", code).is_unmerged(),
+                "{code} must be treated as unmerged"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_status_codes_are_not_unmerged() {
+        for code in [
+            "M ", " M", "MM", "A ", " D", "D ", "??", "R ", "C ", "AM", "AD",
+        ] {
+            assert!(
+                !change("plain.txt", code).is_unmerged(),
+                "{code} must not be treated as unmerged"
+            );
+        }
+    }
+
+    #[test]
+    fn unmerged_entries_are_extracted_from_a_conflicted_status() {
+        let output = status_output(&[
+            "UU both modified.txt",
+            "AA both added.txt",
+            "DD both deleted.txt",
+            "M  staged.txt",
+            "?? new.txt",
+        ]);
+
+        let changes = parse_status(&output).expect("status output should parse");
+        let unmerged: Vec<&str> = changes
+            .iter()
+            .filter(|change| ChangeScope::Unmerged.includes(change))
+            .map(|change| change.path.as_str())
+            .collect();
+
+        assert_eq!(
+            unmerged,
+            ["both modified.txt", "both added.txt", "both deleted.txt"]
+        );
+    }
+
+    #[test]
+    fn a_real_merge_conflict_is_reported_as_an_unmerged_change() {
+        let dir = TempDir::new("read-unmerged-real");
+        init_repository(dir.path());
+        write_file(dir.path(), "shared.txt", "base\n");
+        git_in(dir.path(), &["add", "--", "shared.txt"]);
+        git_in(dir.path(), &["commit", "--quiet", "-m", "base"]);
+
+        create_branch(dir.path(), "other");
+        write_file(dir.path(), "shared.txt", "main side\n");
+        git_in(dir.path(), &["commit", "--quiet", "-a", "-m", "main side"]);
+
+        git_in(dir.path(), &["switch", "--quiet", "other"]);
+        write_file(dir.path(), "shared.txt", "other side\n");
+        git_in(dir.path(), &["commit", "--quiet", "-a", "-m", "other side"]);
+
+        assert!(
+            !try_git_in(dir.path(), &["merge", "--no-edit", "main"]),
+            "the merge is expected to conflict"
+        );
+
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+        assert_eq!(operation_in_progress(&repository), Some(Operation::Merge));
+
+        let unmerged =
+            changes(&repository, ChangeScope::Unmerged).expect("the status should be read");
+
+        assert_eq!(
+            unmerged
+                .iter()
+                .map(|change| (change.path.as_str(), change.status_code()))
+                .collect::<Vec<_>>(),
+            [("shared.txt", "UU".to_string())]
+        );
     }
 }

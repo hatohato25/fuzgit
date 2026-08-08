@@ -10,6 +10,8 @@
 //! 端末に依存しない純ロジックに限定する。
 
 use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
@@ -138,23 +140,112 @@ pub enum SelectionMode {
     Multi,
 }
 
+/// finder の起動オプション。
+///
+/// 選択モードのみで足りる呼び出しには [`select_one`] / [`select_many`] を使い、
+/// ヘッダーや事前選択が必要な場合にこの型を [`run_finder_with`] / [`select_many_with`] へ渡す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinderOptions {
+    /// 単一選択か複数選択か。
+    pub mode: SelectionMode,
+    /// 候補リストとは別に固定表示する見出し（操作説明・凡例など）。
+    pub header: Option<String>,
+    /// 起動時に選択済みにする候補の表示文字列（[`FinderItem`] の `display`）。
+    ///
+    /// 判定は表示文字列の**完全一致**であり、キー（`FinderItem::key`）ではない。
+    /// また skim は複数選択モードでのみ事前選択を適用するため、
+    /// [`SelectionMode::Single`] では無視される。
+    /// 適用されるのは各候補につき 1 度だけで、ユーザーが外した選択は復活しない
+    /// （[`InitialSelector`] を参照）。
+    pub preselect: Vec<String>,
+}
+
+impl FinderOptions {
+    /// 選択モードだけを指定したオプションを作る。
+    #[must_use]
+    pub fn new(mode: SelectionMode) -> Self {
+        Self {
+            mode,
+            header: None,
+            preselect: Vec::new(),
+        }
+    }
+
+    /// 固定表示する見出しを設定する。
+    #[must_use]
+    pub fn with_header(mut self, header: String) -> Self {
+        self.header = Some(header);
+        self
+    }
+
+    /// 起動時に選択済みにする候補の表示文字列を設定する。
+    #[must_use]
+    pub fn with_preselect(mut self, preselect: Vec<String>) -> Self {
+        self.preselect = preselect;
+        self
+    }
+}
+
+/// 各候補を一度だけ事前選択するセレクタ。
+///
+/// skim は候補の絞り込みが走るたびにセレクタを再適用する（`tui/item_list.rs`。
+/// `SkimOptions.selector` を直接指定した場合、再適用の上限は `usize::MAX` = 実質無制限）。
+/// 表示文字列の一致だけで判定すると、ユーザーが Tab で外した事前選択がクエリ入力のたびに
+/// 復活し、外したはずのファイルがコミット対象に戻ってしまう（実機で確認済み）。
+/// そのため同じ表示文字列に対しては最初の 1 回だけ真を返し、事前選択を「起動時の初期値」に留める。
+struct InitialSelector {
+    /// まだ事前選択していない候補の表示文字列。
+    ///
+    /// skim は単一スレッドから（`Rc<dyn Selector>` として）呼び出すため `RefCell` で足りる。
+    remaining: RefCell<HashSet<String>>,
+}
+
+impl InitialSelector {
+    /// 事前選択する表示文字列からセレクタを作る。
+    fn new(preselect: &[String]) -> Self {
+        Self {
+            remaining: RefCell::new(preselect.iter().cloned().collect()),
+        }
+    }
+}
+
+impl Selector for InitialSelector {
+    fn should_select(&self, _index: usize, item: &dyn SkimItem) -> bool {
+        // 判定はキーではなく表示文字列で行う（skim が渡すのは `SkimItem::text()`）
+        self.remaining.borrow_mut().remove(item.text().as_ref())
+    }
+}
+
 /// skim のオプションを組み立てる。
 ///
 /// # Errors
 ///
 /// ビルダーが必須項目を満たさない場合に [`Error::FinderFailed`] を返す。
-fn build_options(mode: SelectionMode) -> Result<SkimOptions> {
-    SkimOptionsBuilder::default()
-        .multi(mode == SelectionMode::Multi)
+fn build_options(options: &FinderOptions) -> Result<SkimOptions> {
+    let mut builder = SkimOptionsBuilder::default();
+    builder
+        .multi(options.mode == SelectionMode::Multi)
         .reverse(true)
         // skim はプレビュー用のグローバルコマンドが未設定だとプレビュー枠自体を描画せず、
         // SkimItem::preview() も呼ばない。ここではアイテム側が常に AnsiText / Text を返すため、
         // グローバルコマンドは空文字（実行されないダミー）で足りる
-        .preview("")
-        .build()
-        .map_err(|err| Error::FinderFailed {
-            message: err.to_string(),
-        })
+        .preview("");
+
+    if let Some(header) = &options.header {
+        builder.header(header.clone());
+    }
+
+    let mut built = builder.build().map_err(|err| Error::FinderFailed {
+        message: err.to_string(),
+    })?;
+
+    // skim は複数選択モードでしか事前選択を適用しない（`tui/item_list.rs`）。
+    // 単一選択で渡された場合に別の意味へ倒すことはせず、そのまま無視する
+    if options.mode == SelectionMode::Multi && !options.preselect.is_empty() {
+        built.selector = Some(Rc::new(InitialSelector::new(&options.preselect)));
+    }
+
+    Ok(built)
 }
 
 /// fuzzy finder を起動し、選択された候補の [`FinderItem::key`] を返す。
@@ -165,11 +256,20 @@ fn build_options(mode: SelectionMode) -> Result<SkimOptions> {
 /// - Esc / Ctrl-C で中断された場合は [`Error::Cancelled`]（呼び出し側は git 操作を実行しないこと）
 /// - skim の初期化・実行に失敗した場合は [`Error::FinderFailed`]
 pub fn run_finder(items: Vec<FinderItem>, mode: SelectionMode) -> Result<Vec<String>> {
+    run_finder_with(items, &FinderOptions::new(mode))
+}
+
+/// [`run_finder`] と同じだが、ヘッダー・事前選択を含む [`FinderOptions`] を受け取る。
+///
+/// # Errors
+///
+/// [`run_finder`] と同じ。
+pub fn run_finder_with(items: Vec<FinderItem>, options: &FinderOptions) -> Result<Vec<String>> {
     if items.is_empty() {
         return Err(Error::NoCandidates);
     }
 
-    let options = build_options(mode)?;
+    let options = build_options(options)?;
 
     let output = Skim::run_items(options, items).map_err(|err| Error::FinderFailed {
         message: err.to_string(),
@@ -213,7 +313,16 @@ pub fn select_one(items: Vec<FinderItem>) -> Result<String> {
 /// - 中断された場合、および 1 件も選ばれずに決定された場合は [`Error::Cancelled`]
 /// - skim の初期化・実行に失敗した場合は [`Error::FinderFailed`]
 pub fn select_many(items: Vec<FinderItem>) -> Result<Vec<String>> {
-    let selected = run_finder(items, SelectionMode::Multi)?;
+    select_many_with(items, &FinderOptions::new(SelectionMode::Multi))
+}
+
+/// [`select_many`] と同じだが、ヘッダー・事前選択を含む [`FinderOptions`] を受け取る。
+///
+/// # Errors
+///
+/// [`select_many`] と同じ。
+pub fn select_many_with(items: Vec<FinderItem>, options: &FinderOptions) -> Result<Vec<String>> {
+    let selected = run_finder_with(items, options)?;
 
     // 単一選択と同様に、何も選ばれていない状態での決定は git 操作を行わずに終了する
     if selected.is_empty() {
@@ -312,14 +421,137 @@ mod tests {
 
     #[test]
     fn options_enable_the_preview_pane_and_reflect_the_selection_mode() {
-        let single = build_options(SelectionMode::Single).expect("options should build");
+        let single = build_options(&FinderOptions::new(SelectionMode::Single))
+            .expect("options should build");
         assert!(!single.multi);
         // preview がセットされていないと skim は SkimItem::preview() を呼ばない
         assert!(single.preview.is_some());
         assert!(single.reverse);
 
-        let multi = build_options(SelectionMode::Multi).expect("options should build");
+        let multi =
+            build_options(&FinderOptions::new(SelectionMode::Multi)).expect("options should build");
         assert!(multi.multi);
+    }
+
+    #[test]
+    fn options_have_no_header_and_no_selector_by_default() {
+        let options =
+            build_options(&FinderOptions::new(SelectionMode::Multi)).expect("options should build");
+
+        assert!(options.header.is_none());
+        assert!(options.selector.is_none());
+    }
+
+    #[test]
+    fn a_header_is_passed_to_skim() {
+        let options = build_options(
+            &FinderOptions::new(SelectionMode::Multi).with_header("Tab で選択".to_string()),
+        )
+        .expect("options should build");
+
+        assert_eq!(options.header.as_deref(), Some("Tab で選択"));
+    }
+
+    #[test]
+    fn preselected_items_install_a_selector_in_multi_mode() {
+        let options = build_options(
+            &FinderOptions::new(SelectionMode::Multi)
+                .with_preselect(vec!["M  src/main.rs".to_string()]),
+        )
+        .expect("options should build");
+
+        let selector = options
+            .selector
+            .expect("multi mode should install a selector");
+        let staged = FinderItem::new(
+            "M  src/main.rs".to_string(),
+            "src/main.rs".to_string(),
+            PreviewSource::None,
+        );
+        let unstaged = FinderItem::new(
+            " M src/main.rs".to_string(),
+            "src/main.rs".to_string(),
+            PreviewSource::None,
+        );
+
+        // 判定はキーではなく表示文字列の完全一致で行われる
+        assert!(selector.should_select(0, &staged));
+        assert!(!selector.should_select(1, &unstaged));
+    }
+
+    #[test]
+    fn an_item_is_preselected_only_once() {
+        // skim は絞り込みのたびにセレクタを再適用する。2 回目以降も真を返すと、
+        // ユーザーが外した事前選択がクエリ入力のたびに復活してしまう
+        let selector = InitialSelector::new(&["M  src/main.rs".to_string()]);
+        let staged = FinderItem::new(
+            "M  src/main.rs".to_string(),
+            "src/main.rs".to_string(),
+            PreviewSource::None,
+        );
+
+        assert!(selector.should_select(0, &staged));
+        assert!(!selector.should_select(0, &staged));
+        assert!(!selector.should_select(3, &staged), "位置が変わっても同じ");
+    }
+
+    #[test]
+    fn an_item_outside_the_preselection_is_never_selected() {
+        let selector = InitialSelector::new(&["M  src/main.rs".to_string()]);
+        let other = FinderItem::new(
+            "?? notes.txt".to_string(),
+            "notes.txt".to_string(),
+            PreviewSource::None,
+        );
+
+        assert!(!selector.should_select(0, &other));
+        assert!(!selector.should_select(1, &other));
+    }
+
+    #[test]
+    fn every_preselected_item_is_selected_regardless_of_the_order_they_arrive_in() {
+        // 候補は複数回に分けて skim へ渡される場合があるため、位置ではなく表示文字列で判定する
+        let selector = InitialSelector::new(&["a".to_string(), "b".to_string()]);
+        let items = ["b", "a"].map(|display| {
+            FinderItem::new(
+                display.to_string(),
+                display.to_string(),
+                PreviewSource::None,
+            )
+        });
+
+        assert!(selector.should_select(5, &items[0]));
+        assert!(selector.should_select(9, &items[1]));
+    }
+
+    #[test]
+    fn preselected_items_are_ignored_in_single_mode() {
+        // skim 自体が単一選択モードでは事前選択を適用しないため、セレクタも渡さない
+        let options = build_options(
+            &FinderOptions::new(SelectionMode::Single).with_preselect(vec!["main".to_string()]),
+        )
+        .expect("options should build");
+
+        assert!(options.selector.is_none());
+    }
+
+    #[test]
+    fn run_finder_with_rejects_empty_candidates_without_starting_the_tui() {
+        let err = run_finder_with(
+            Vec::new(),
+            &FinderOptions::new(SelectionMode::Multi).with_preselect(vec!["a".to_string()]),
+        )
+        .expect_err("empty candidate list must not start the finder");
+
+        assert!(matches!(err, Error::NoCandidates));
+    }
+
+    #[test]
+    fn select_many_with_rejects_empty_candidates_without_starting_the_tui() {
+        let err = select_many_with(Vec::new(), &FinderOptions::new(SelectionMode::Multi))
+            .expect_err("empty candidate list must not start the finder");
+
+        assert!(matches!(err, Error::NoCandidates));
     }
 
     #[test]
