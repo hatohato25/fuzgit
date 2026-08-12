@@ -56,6 +56,66 @@ git show "$(gz log)"   # コミットを選んでフルハッシュを受け取�
 
 引数なしの `gz` および `gz --help` でサブコマンド一覧を表示します。
 
+## 主な機能
+
+全 20 コマンドの中でも、fuzgit の性格がよく分かる 4 つです。
+
+### 探して選ぶ
+
+**[`gz branch`](https://hatohato25.github.io/fuzgit/docs.html#branch) — ブランチを選んで切り替える**
+
+ブランチ名を正確に覚えていなくても、絞り込んで選ぶだけで切り替えられます。プレビューには
+選択中ブランチの直近 50 件のコミット（`git log --oneline --decorate`）を表示します。
+`--all` を付けるとリモート追跡ブランチも候補に含まれ、`origin/feature` を選ぶと git の DWIM により
+追跡ローカルブランチが作成されます。
+
+```
+$ gz branch --all
+> * main
+    feature/login
+    origin/feature/search
+```
+
+**[`gz stash`](https://hatohato25.github.io/fuzgit/docs.html#stash) — stash を検索して復元する**
+
+`apply` / `pop` / `drop` の候補は `stash@{n}: <メッセージ>` 形式なので、番号ではなくメッセージで
+絞り込めます。プレビューは `git stash show -p --color=always`、`drop` は実行前に確認プロンプト
+（`[y/N]`）を表示します。`gz stash push` は `Tab` で複数選択でき、**選んだファイルだけ**が
+退避されます（選ばなかった変更は作業ツリーに残ります）。
+
+### 選んでまとめて実行する
+
+**[`gz fetch -s`](https://hatohato25.github.io/fuzgit/docs.html#fetch) — 隣のリポジトリもまとめて fetch**
+
+`-s` / `--siblings` を付けると、現在の worktree root の親ディレクトリ直下だけを走査して（再帰しません）、
+`.git` を持つディレクトリを候補にします。候補行は `<ディレクトリ名>  <現在のブランチ>  <リモート>` で、
+現在のリポジトリは選択済みで始まります。`Tab` で複数選択すれば、複数リポジトリをまとめて
+fetch できます。fetch できないリポジトリは黙って消さず、除外した件数をヘッダーに示します。
+
+```
+$ gz fetch --siblings
+現在のリポジトリを選択済みにしています。Tab: 選択の切替 / Enter: 取得  |  除外 1 件（リモート未登録 / bare）
+>>mike  main  origin
+  alpha  main  origin
+  zulu  main  origin
+```
+
+**[`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) — 複数ブランチをまとめて追随させる**
+
+選ばせるのは「どのローカルブランチを upstream へ追随させるか」だけで、取り込みは fast-forward のみです。
+現在のブランチは選択済みで始まります。候補一覧の順に 1 件ずつ直列に実行し、途中で失敗しても中断せず、
+最後に成功・失敗の件数を集計します。upstream 未設定などで対象にできないブランチは、除外件数を
+ヘッダーに示します。
+
+```
+$ gz pull
+[1/4] main
+[2/4] alpha
+[3/4] diverged
+[4/4] zeta
+成功 3 件 / 失敗 1 件（失敗: diverged）
+```
+
 ## コマンド一覧
 
 | サブコマンド | 概要 |

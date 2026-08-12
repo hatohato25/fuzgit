@@ -18,7 +18,6 @@
         <a class="brand" href="index.html">fuzgit</a>
         <nav class="nav-inline" aria-label="Site">
           <a href="docs.html">Docs</a>
-          <a href="docs.html?lang=ja">日本語</a>
           <a href="#install">Install</a>
           <a href="https://github.com/hatohato25/fuzgit">GitHub</a>
         </nav>
@@ -59,17 +58,102 @@
         </div>
       </section>
 
-      <section class="band" id="demo">
+      <section class="band" id="picking">
         <div class="wrap">
-          <p class="section-label">Demo</p>
-          <h2>Choose the branches, then let git do the work</h2>
+          <p class="section-label">Picking</p>
+          <h2>Filter, preview, pick — nothing to remember</h2>
           <p class="lede">
-            <code>gz pull</code> is the clearest example of the model: it asks
-            only <em>which local branches should follow their upstream</em>, and
-            then fast-forwards them one at a time.
+            The two commands where a fuzzy finder pays off immediately:
+            <code>gz branch</code> and <code>gz stash</code>. Type the fragment
+            you do remember, let the preview confirm it is the right one, and
+            press <kbd>Enter</kbd> to run the git operation.
           </p>
 
           <div class="two-col">
+            <figure class="term">
+              <div class="term-bar">gz branch --all — switching</div>
+              <pre><code><span class="prompt">$</span> <span class="cmd">gz branch --all</span>
+<span class="sel">&gt; * main</span>
+    feature/login
+    origin/feature/search</code></pre>
+              <figcaption>
+                You never type a branch name: you filter the list until the one
+                you meant is in front of you. The current branch carries the
+                same leading <code>*</code> as <code>git branch</code>, and
+                <b>the preview shows the 50 most recent commits</b> of the
+                highlighted branch (<code>git log --oneline --decorate</code>).
+                With <code>--all</code>, remote-tracking branches join the list
+                — picking <code>origin/feature/search</code> switches by the
+                short name, so git’s DWIM creates the tracking local branch.
+              </figcaption>
+            </figure>
+
+            <figure class="term">
+              <div class="term-bar">gz stash apply — searching stashes</div>
+              <pre><code><span class="prompt">$</span> <span class="cmd">gz stash apply</span>
+<span class="sel">&gt; stash@{0}: On main: half-done auth refactor</span>
+  stash@{1}: On feature/search: draft of the search form</code></pre>
+              <figcaption>
+                Candidates for <code>apply</code> / <code>pop</code> /
+                <code>drop</code> are <code>stash@{n}: &lt;message&gt;</code>, so
+                <b>you filter by what you wrote, not by index</b>. The preview
+                is <code>git stash show -p --color=always</code>, and
+                <code>drop</code> — the one step that cannot be undone — asks
+                for confirmation (<code>[y/N]</code>) first.
+              </figcaption>
+            </figure>
+          </div>
+
+          <figure class="term spaced">
+            <div class="term-bar">gz stash push — stash only what you picked</div>
+            <pre><code><span class="prompt">$</span> <span class="cmd">gz stash push -m "half-done auth refactor"</span>
+<span class="sel">&gt;&gt; M src/auth.rs</span>
+ &gt;  M src/session.rs
+    M README.md</code></pre>
+            <figcaption>
+              <code>push</code> picks <em>files</em> rather than a stash.
+              <kbd>Tab</kbd> selects several of them and <b>only the files you
+              picked are stashed</b> — everything you left alone stays in the
+              working tree. Staged changes are stashed too, so the preview is
+              the diff against HEAD (<code>git diff HEAD</code>);
+              <code>-u</code> adds untracked files to the list.
+            </figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="band" id="batch">
+        <div class="wrap">
+          <p class="section-label">In one go</p>
+          <h2>Pick several targets, then let git do the work</h2>
+          <p class="lede">
+            The same model, except that what you pick is a <em>set</em>:
+            <code>gz fetch -s</code> updates several repositories and
+            <code>gz pull</code> brings several branches up to their upstream —
+            one selection, one run, one summary.
+          </p>
+
+          <div class="two-col">
+            <figure class="term">
+              <div class="term-bar">gz fetch --siblings — the repositories next door</div>
+              <pre><code><span class="prompt">$</span> <span class="cmd">gz fetch --siblings</span>
+<span class="hint">現在のリポジトリを選択済みにしています。Tab: 選択の切替 / Enter: 取得  |  除外 1 件（リモート未登録 / bare）</span>
+<span class="sel">&gt;&gt;mike  main  origin</span>
+  alpha  main  origin
+  zulu  main  origin</code></pre>
+              <figcaption>
+                <b>The header, in English:</b> “the current repository starts
+                selected. Tab: toggle selection / Enter: fetch | 1 excluded (no
+                remote registered / bare)”. <code>-s</code> (<code>--siblings</code>)
+                scans the parent directory of the current worktree root
+                <b>one level deep only</b> and offers every directory that
+                contains a <code>.git</code>; a line reads
+                <code>&lt;directory&gt;  &lt;current branch&gt;  &lt;remotes&gt;</code>.
+                Repositories that cannot be fetched are excluded, never silently
+                — the number skipped is in the header.
+              </figcaption>
+            </figure>
+
             <figure class="term">
               <div class="term-bar">gz pull — selection</div>
               <pre><code><span class="prompt">$</span> <span class="cmd">gz pull</span>
@@ -80,37 +164,33 @@
                 <b>The header, in English:</b> “the current branch starts
                 selected. Tab: toggle selection / Enter: fast-forward only | 2
                 excluded (no upstream / remote not registered / in use by
-                another worktree)”. Branches that cannot be pulled are never
-                silently dropped — the number skipped is shown.
-              </figcaption>
-            </figure>
-
-            <figure class="term">
-              <div class="term-bar">gz pull — run</div>
-              <pre><code><span class="prompt">$</span> <span class="cmd">gz pull</span>
-[1/4] main
-[2/4] alpha
-[3/4] diverged
-[4/4] zeta
-<span class="warn">成功 3 件 / 失敗 1 件（失敗: diverged）</span></code></pre>
-              <figcaption>
-                <b>The summary, in English:</b> “3 succeeded / 1 failed (failed:
-                diverged)”. Branches are integrated serially in list order; a
-                failure never stops the run, and a branch that could not
-                fast-forward is left exactly as it was.
+                another worktree)”. It asks only <em>which local branches should
+                follow their upstream</em> — the destination is fixed to each
+                branch’s own upstream, and integration is fast-forward only.
               </figcaption>
             </figure>
           </div>
 
           <figure class="term spaced">
-            <div class="term-bar">gz fetch — nothing to choose</div>
-            <pre><code><span class="prompt">$</span> <span class="cmd">gz fetch</span>
-<span class="hint">リモート `origin` から取得します（登録されているリモートが 1 つのため、選択を省略しました）</span></code></pre>
+            <div class="term-bar">gz pull — run</div>
+            <pre><code><span class="prompt">$</span> <span class="cmd">gz pull</span>
+[1/4] main
+[2/4] alpha
+[3/4] diverged
+[4/4] zeta
+<span class="warn">成功 3 件 / 失敗 1 件（失敗: diverged）</span>
+<span class="hint">fast-forward できなかったブランチは、そのブランチへ切り替えてから `gz sync --rebase` または `gz sync --merge` で取り込めます</span></code></pre>
             <figcaption>
-              <b>In English:</b> “fetching from remote <code>origin</code> (only
-              one remote is registered, so the selection step was skipped)”. The
-              finder only opens when there is something to choose — but fuzgit
-              always tells you what it acted on.
+              <b>In English:</b> “3 succeeded / 1 failed (failed: diverged)” /
+              “branches that could not fast-forward can be integrated by
+              switching to them and running <code>gz sync --rebase</code> or
+              <code>gz sync --merge</code>”. Targets run <b>serially, in list
+              order</b>, each announced with
+              <code>[&lt;n&gt;/&lt;total&gt;]</code> so you can tell whose output
+              git is printing; <b>a failure never stops the run</b>, and the
+              tally comes at the end. <code>gz fetch --siblings</code> reports
+              the same way. fuzgit only points at the next step — it never
+              starts <code>gz sync</code> for you.
             </figcaption>
           </figure>
 
