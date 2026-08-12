@@ -11,7 +11,7 @@ use assert_cmd::Command;
 const BIN_NAME: &str = "gz";
 
 /// `gz` のすべてのサブコマンド名。ヘルプ出力の検証に用いる。
-const SUBCOMMANDS: [&str; 19] = [
+const SUBCOMMANDS: [&str; 20] = [
     "branch",
     "log",
     "cherry-pick",
@@ -29,6 +29,7 @@ const SUBCOMMANDS: [&str; 19] = [
     "status",
     "diff",
     "fetch",
+    "pull",
     "sync",
     "worktree",
 ];
@@ -1130,6 +1131,185 @@ fn fetch_documents_the_prune_option_and_takes_no_remote_argument() {
         !output.status.success(),
         "the remote is chosen in the finder, not on the command line"
     );
+}
+
+/// `gz fetch --help` に `--siblings`（短縮形 `-s`）が載っていることを確認する（FR-23）。
+#[test]
+fn fetch_documents_the_siblings_option_in_both_spellings() {
+    let output = gz()
+        .args(["fetch", "--help"])
+        .output()
+        .expect("failed to run gz fetch --help");
+
+    assert!(output.status.success(), "gz fetch --help should succeed");
+
+    let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
+    for spelling in ["--siblings", "-s"] {
+        assert!(
+            stdout.contains(spelling),
+            "`{spelling}` should be documented:\n{stdout}"
+        );
+    }
+}
+
+/// 走査範囲に fetch できるリポジトリが 1 つも無い場合、`gz fetch --siblings` は
+/// finder を起動せずに理由を伝えて終了することを確認する（FR-23）。
+///
+/// ネットワークを伴う経路（実際の取得）は自動テストの対象外とし、実機（ローカルの bare
+/// リポジトリを remote に設定した使い捨てリポジトリ）で確認する。
+#[test]
+fn fetch_siblings_reports_when_nothing_can_be_fetched() {
+    // 走査するのはワークツリー root の親ディレクトリであるため、他のテストの一時
+    // ディレクトリが兄弟として並ばないよう、専用の親ディレクトリを用意する
+    let parent = TempDir::new("fetch-siblings-scope");
+    let work = parent.path().join("work");
+    std::fs::create_dir_all(&work).expect("failed to create the work tree");
+    git_in(&work, &["init", "--quiet", "--initial-branch=main"]);
+
+    for arguments in [
+        vec!["fetch", "--siblings"],
+        vec!["fetch", "-s"],
+        vec!["fetch", "--prune", "--siblings"],
+    ] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(&work)
+            // 事前チェックが失われた場合に TUI で待ち続けないよう、上限を設けて打ち切る
+            .timeout(FINDER_GUARD_TIMEOUT)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should exit non-zero when nothing can be fetched"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("fetch できるリポジトリがありません"),
+            "the reason should be given for gz {arguments:?}:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "nothing should be written to stdout for gz {arguments:?}"
+        );
+    }
+}
+
+/// `--siblings` を指定しない限り兄弟リポジトリは走査対象にならないことを確認する（FR-23）。
+///
+/// 兄弟にリモート付きのリポジトリを置いても、既定の `gz fetch` は現在のリポジトリの
+/// リモートだけを見て「リモートが無い」と伝えて終了する。
+#[test]
+fn fetch_without_the_siblings_flag_never_looks_at_the_neighbours() {
+    let parent = TempDir::new("fetch-siblings-default");
+    let work = parent.path().join("work");
+    let neighbour = parent.path().join("neighbour");
+    for directory in [&work, &neighbour] {
+        std::fs::create_dir_all(directory).expect("failed to create a work tree");
+        git_in(directory, &["init", "--quiet", "--initial-branch=main"]);
+    }
+    git_in(
+        &neighbour,
+        &["remote", "add", "origin", "https://example.invalid/o.git"],
+    );
+
+    let output = gz()
+        .arg("fetch")
+        .current_dir(&work)
+        .timeout(FINDER_GUARD_TIMEOUT)
+        .output()
+        .expect("failed to run gz fetch");
+
+    assert!(
+        !output.status.success(),
+        "the current repository has no remote of its own"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("git remote add"),
+        "the neighbour must not be used as a fallback:\n{stderr}"
+    );
+}
+
+/// `gz pull` は取り込めるブランチが無い場合、fetch する前に案内して停止することを確認する。
+///
+/// ネットワークを伴う経路（リモートごとの `git fetch`、ブランチごとの取り込み）は
+/// 自動テストの対象外とし、実機（ローカルの bare リポジトリを remote に設定した
+/// 使い捨てリポジトリ）で確認する（`gz fetch` / `gz sync` と同方針）。
+/// ここで検証するのは、対象を推測して別のブランチ・リモートへ倒さないこと。
+#[test]
+fn pull_reports_when_no_branch_can_follow_an_upstream() {
+    let dir = empty_repository("pull-no-candidate");
+    commit_in(dir.path(), "a.txt", "first\n", "first commit");
+
+    let output = gz()
+        .arg("pull")
+        .current_dir(dir.path())
+        // 事前チェックが失われた場合に TUI・ネットワークで待ち続けないよう上限を設ける
+        .timeout(FINDER_GUARD_TIMEOUT)
+        .output()
+        .expect("failed to run gz pull");
+
+    assert!(
+        !output.status.success(),
+        "gz pull should exit non-zero without any candidate"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("gz push -u"),
+        "the fuzgit way of setting an upstream should be suggested:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--set-upstream-to"),
+        "the plain git way should be suggested too:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "nothing should be written to stdout"
+    );
+}
+
+/// `gz pull` が取り込み方式のフラグも対象の位置引数も持たないことを確認する。
+///
+/// 方式は fast-forward 固定（方式を選ぶのは `gz sync`）、対象は選択で決める設計であり、
+/// どちらもコマンドラインから指定させない。
+#[test]
+fn pull_documents_the_fast_forward_only_integration_and_takes_no_arguments() {
+    let output = gz()
+        .args(["pull", "--help"])
+        .output()
+        .expect("failed to run gz pull --help");
+
+    assert!(output.status.success(), "gz pull --help should succeed");
+
+    let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
+    assert!(
+        stdout.contains("fast-forward"),
+        "the fixed integration method should be documented:\n{stdout}"
+    );
+
+    let dir = empty_repository("pull-arguments");
+    for arguments in [
+        vec!["pull", "--rebase"],
+        vec!["pull", "--merge"],
+        vec!["pull", "--siblings"],
+        vec!["pull", "--prune"],
+        vec!["pull", "main"],
+    ] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            .timeout(FINDER_GUARD_TIMEOUT)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should be rejected by the command line definition"
+        );
+    }
 }
 
 /// `gz sync` は upstream が定まらない場合、fetch する前に原因を伝えて停止することを確認する。

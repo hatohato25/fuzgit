@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use skim::prelude::*;
 
 use crate::error::{Error, Result};
-use crate::git::exec::capture_git;
+use crate::git::exec::{capture_git, capture_git_in};
 
 /// ファイル内容のプレビューで読み込む最大バイト数。
 ///
@@ -48,7 +48,21 @@ pub enum PreviewSource {
     /// プレビューを表示しない。
     None,
     /// `git <args>` の出力を ANSI カラー付きで表示する。
+    ///
+    /// 実行はプロセスのカレントディレクトリで行われる（＝現在のリポジトリ）。
+    /// 別のリポジトリを対象にする場合は [`PreviewSource::GitIn`] を使う。
     Git(Vec<String>),
+    /// `directory` をカレントディレクトリとして `git <args>` を実行し、その出力を表示する。
+    ///
+    /// 現在のリポジトリ以外（`gz fetch --siblings` の兄弟リポジトリ）のプレビューに用いる。
+    /// ディレクトリは cwd として渡し、**引数配列には載せない**（`git -C <path>` 方式を採らない）。
+    /// パスをコマンドの引数へ埋め込まないという既存方針を保つため。
+    GitIn {
+        /// git を実行するディレクトリ。カレントディレクトリに依存しないよう絶対パスを渡すこと。
+        directory: PathBuf,
+        /// `git` に渡す引数配列。
+        args: Vec<String>,
+    },
     /// ローカルファイルの内容をそのまま表示する。
     ///
     /// 未追跡ファイルは git の管理下に無く差分を取れないため、内容を直接読んで表示する。
@@ -74,6 +88,16 @@ fn render_git(args: &[String]) -> std::result::Result<String, String> {
         .map_err(|err| err.to_string())
 }
 
+/// `directory` をカレントディレクトリとして `git <args>` を実行し、プレビュー本文を得る。
+///
+/// [`render_git`] と同じく、失敗しても選択操作を止めず表示用のメッセージを `Err` として返す。
+fn render_git_in(directory: &Path, args: &[String]) -> std::result::Result<String, String> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    capture_git_in(directory, &args)
+        .map(|stdout| String::from_utf8_lossy(&stdout).into_owned())
+        .map_err(|err| err.to_string())
+}
+
 /// ファイルの内容を読んでプレビュー本文を得る。
 ///
 /// 読み取れない場合も選択操作を止めず、表示用のメッセージを `Err` として返す。
@@ -95,6 +119,9 @@ fn render(source: &PreviewSource) -> String {
     match source {
         PreviewSource::None => String::new(),
         PreviewSource::Git(args) => render_git(args).unwrap_or_else(|message| message),
+        PreviewSource::GitIn { directory, args } => {
+            render_git_in(directory, args).unwrap_or_else(|message| message)
+        }
         PreviewSource::File(path) => render_file(path).unwrap_or_else(|message| message),
         PreviewSource::Composite(sections) => render_composite(sections),
     }
@@ -190,6 +217,10 @@ impl SkimItem for FinderItem {
                 Ok(text) => ItemPreview::AnsiText(text),
                 // プレビュー失敗で選択操作全体を中断させたくないため、
                 // エラー内容をプレビュー領域に表示するに留める
+                Err(message) => ItemPreview::Text(message),
+            },
+            PreviewSource::GitIn { directory, args } => match render_git_in(directory, args) {
+                Ok(text) => ItemPreview::AnsiText(text),
                 Err(message) => ItemPreview::Text(message),
             },
             // ファイル内容は git の出力と違い色付けされていないため、そのまま表示する
@@ -502,6 +533,68 @@ mod tests {
             ),
             _ => panic!("a file preview must produce plain text"),
         }
+    }
+
+    #[test]
+    fn a_git_in_preview_runs_in_the_given_repository() {
+        // 現在のリポジトリではなく、指定したディレクトリの情報が出ることを確かめる
+        let dir = crate::test_support::TempDir::new("finder-git-in");
+        crate::test_support::init_repository(dir.path());
+        let head = crate::test_support::commit(dir.path(), "sibling commit");
+
+        let item = FinderItem::new(
+            "sibling".to_string(),
+            "sibling".to_string(),
+            PreviewSource::GitIn {
+                directory: dir.path().to_path_buf(),
+                args: vec!["rev-parse".to_string(), "HEAD".to_string()],
+            },
+        );
+
+        match item.preview(preview_context()) {
+            ItemPreview::AnsiText(text) => assert_eq!(text.trim(), head),
+            _ => panic!("a git preview must be rendered as ANSI text"),
+        }
+    }
+
+    #[test]
+    fn a_failing_git_in_preview_shows_the_reason_instead_of_failing() {
+        let dir = crate::test_support::TempDir::new("finder-git-in-failure");
+        crate::test_support::init_repository(dir.path());
+
+        let item = FinderItem::new(
+            "sibling".to_string(),
+            "sibling".to_string(),
+            PreviewSource::GitIn {
+                directory: dir.path().to_path_buf(),
+                args: vec!["fuzgit-no-such-subcommand".to_string()],
+            },
+        );
+
+        match item.preview(preview_context()) {
+            ItemPreview::Text(message) => assert!(
+                message.contains("fuzgit-no-such-subcommand"),
+                "the failing command should be named: {message}"
+            ),
+            _ => panic!("a failing preview must produce plain text"),
+        }
+    }
+
+    #[test]
+    fn a_git_in_preview_can_be_a_section_of_a_composite() {
+        let dir = crate::test_support::TempDir::new("finder-git-in-composite");
+        crate::test_support::init_repository(dir.path());
+        let head = crate::test_support::commit(dir.path(), "sibling commit");
+
+        let sections = vec![(
+            "HEAD".to_string(),
+            PreviewSource::GitIn {
+                directory: dir.path().to_path_buf(),
+                args: vec!["rev-parse".to_string(), "HEAD".to_string()],
+            },
+        )];
+
+        assert_eq!(render_composite(&sections), format!("── HEAD ──\n{head}"));
     }
 
     /// 内容が固定のセクションを作る（git を実行せずに連結結果だけを検証するため）。

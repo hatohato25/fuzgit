@@ -98,6 +98,32 @@ pub enum Error {
     #[error("作業ツリーがありません。bare リポジトリでは実行できない操作です")]
     NoWorktree,
 
+    /// 兄弟リポジトリの走査範囲（ワークツリー root の親ディレクトリ）を決められない。
+    ///
+    /// リポジトリがファイルシステムの root 直下にある場合に起こる。走査範囲が定まらない状態で
+    /// 暗黙に現在のリポジトリだけへ倒すと、指定した `--siblings` が黙って無視されるため停止する。
+    #[error(
+        "ワークツリーのルート `{}` の親ディレクトリを取得できないため、\
+         兄弟リポジトリの走査範囲を決められません",
+        .workdir.display()
+    )]
+    NoSiblingScope {
+        /// 親ディレクトリを取得できなかったワークツリーのルート（正規化済み）。
+        workdir: std::path::PathBuf,
+    },
+
+    /// リポジトリ探索に伴うファイルシステムの読み取りに失敗した。
+    #[error("{operation}に失敗しました: {}", .path.display())]
+    FilesystemReadFailed {
+        /// 失敗した操作の説明（例: `パスの正規化`）。
+        operation: String,
+        /// 操作の対象パス。
+        path: std::path::PathBuf,
+        /// 標準ライブラリ側の I/O エラー。
+        #[source]
+        source: std::io::Error,
+    },
+
     /// ユーザーが fuzzy finder を中断した（Esc / Ctrl-C）。
     #[error("選択が中断されました")]
     Cancelled,

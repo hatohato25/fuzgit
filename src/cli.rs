@@ -173,12 +173,25 @@ pub enum Command {
         commit: bool,
     },
 
-    /// リモートを選択して fetch する
+    /// fetch の対象を決めて取得する
+    ///
+    /// リモートが 1 つだけの場合は選択の余地が無いため、finder を起動せず即座に取得する。
     Fetch {
         /// リモートで削除されたブランチの追跡参照も掃除する
         #[arg(long)]
         prune: bool,
+
+        /// 同じ階層に並ぶリポジトリも対象に含めて一括で取得する
+        #[arg(long, short)]
+        siblings: bool,
     },
+
+    /// ブランチを選んで upstream へ追随させる（fast-forward のみ）
+    ///
+    /// 取り込み方式は fast-forward に固定し、`--rebase` / `--merge` は提供しない
+    /// （方式を選んで 1 本だけ同期するのは `gz sync`）。対象は選択で決めるため
+    /// 位置引数を取らず、`--siblings` / `--prune` も持たない。
+    Pull,
 
     /// 現在のブランチを upstream と同期する
     ///
@@ -679,14 +692,70 @@ mod tests {
     fn fetch_takes_the_prune_flag() {
         let cli = Cli::try_parse_from(["gz", "fetch", "--prune"]).expect("fetch should parse");
         match cli.command {
-            Command::Fetch { prune } => assert!(prune),
+            Command::Fetch { prune, .. } => assert!(prune),
             other => panic!("unexpected subcommand: {other:?}"),
         }
 
         let cli = Cli::try_parse_from(["gz", "fetch"]).expect("fetch should parse bare");
         match cli.command {
-            Command::Fetch { prune } => assert!(!prune),
+            Command::Fetch { prune, .. } => assert!(!prune),
             other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fetch_takes_the_siblings_flag_in_both_spellings() {
+        for argument in ["--siblings", "-s"] {
+            let cli = Cli::try_parse_from(["gz", "fetch", argument])
+                .unwrap_or_else(|err| panic!("`gz fetch {argument}` should parse: {err}"));
+            match cli.command {
+                Command::Fetch { siblings, .. } => {
+                    assert!(siblings, "`{argument}` should enable it")
+                }
+                other => panic!("unexpected subcommand: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn fetch_targets_only_the_current_repository_by_default() {
+        // 兄弟リポジトリへの通信はフラグの明示指定に限る（requirements.md FR-23）
+        let cli = Cli::try_parse_from(["gz", "fetch"]).expect("fetch should parse bare");
+
+        match cli.command {
+            Command::Fetch { siblings, .. } => assert!(!siblings),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fetch_accepts_pruning_together_with_siblings() {
+        // 併用時は選択したすべてのリポジトリに `--prune` が適用される（排他ではない）
+        let cli = Cli::try_parse_from(["gz", "fetch", "--prune", "--siblings"])
+            .expect("`gz fetch --prune --siblings` should parse");
+
+        match cli.command {
+            Command::Fetch { prune, siblings } => assert_eq!((prune, siblings), (true, true)),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pull_takes_no_options_and_no_target_argument() {
+        let cli = Cli::try_parse_from(["gz", "pull"]).expect("pull should parse bare");
+        assert!(matches!(cli.command, Command::Pull));
+
+        // 取り込み方式は fast-forward 固定（方式を選ぶのは `gz sync`）であり、
+        // 対象は選択で決めるため名前を打つ余地も設けない
+        for arguments in [
+            ["gz", "pull", "--rebase"],
+            ["gz", "pull", "--merge"],
+            ["gz", "pull", "--siblings"],
+            ["gz", "pull", "--prune"],
+            ["gz", "pull", "main"],
+        ] {
+            let parsed = Cli::try_parse_from(arguments);
+            assert!(parsed.is_err(), "`{arguments:?}` must be rejected");
         }
     }
 

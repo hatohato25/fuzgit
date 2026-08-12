@@ -113,10 +113,33 @@ fn map_spawn_error(source: std::io::Error, args: &[&str]) -> Error {
 /// - 起動に失敗した場合は [`Error::GitSpawnFailed`]
 /// - 非ゼロ終了した場合は [`Error::GitRunFailed`]（失敗の詳細は git が端末へ直接出力済み）
 pub fn run_git(args: &[&str]) -> Result<()> {
-    log_command(None, args);
+    run(None, args)
+}
 
-    let status = Command::new("git")
-        .args(args)
+/// [`run_git`] と同じだが、`directory` をカレントディレクトリとして実行する。
+///
+/// 継承 stdio のまま実行ディレクトリだけを差し替えるためのもので、[`capture_git_in`] と対になる。
+/// 現在のリポジトリ以外に対して書き込み系操作を行う経路（`gz fetch --siblings`）で用いる。
+/// 認証プロンプト・進捗・更新された参照の一覧は [`run_git`] と同じく git に委ねる。
+///
+/// # Errors
+///
+/// [`run_git`] と同じ。
+pub fn run_git_in(directory: &Path, args: &[&str]) -> Result<()> {
+    run(Some(directory), args)
+}
+
+/// `git` を標準入出力を継承したまま実行する。`directory` 指定時はそこを作業ディレクトリとする。
+fn run(directory: Option<&Path>, args: &[&str]) -> Result<()> {
+    log_command(directory, args);
+
+    let mut command = Command::new("git");
+    command.args(args);
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
+
+    let status = command
         .status()
         .map_err(|source| map_spawn_error(source, args))?;
 
@@ -337,6 +360,51 @@ mod tests {
             Error::GitRunFailed { command, code } => {
                 assert_eq!(command, "git fuzgit-no-such-subcommand");
                 assert_eq!(code, Some(1));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_git_in_runs_in_the_given_directory() {
+        use crate::test_support::{TempDir, init_repository};
+
+        let dir = TempDir::new("exec-run-in");
+        init_repository(dir.path());
+
+        // ローカル設定への書き込みは、実行されたリポジトリが 1 つに定まることを後から確認できる
+        // （出力を持たないコマンドのため、継承 stdio でもテスト出力を汚さない）
+        run_git_in(
+            dir.path(),
+            &["config", "--local", "fuzgit.probe", "written"],
+        )
+        .expect("git config should succeed in the temporary repository");
+
+        let stdout = capture_git_in(dir.path(), &["config", "--local", "--get", "fuzgit.probe"])
+            .expect("the value should be readable back");
+        let text = String::from_utf8(stdout).expect("git config emits utf-8");
+
+        assert_eq!(text.trim(), "written");
+    }
+
+    #[test]
+    fn run_git_in_reports_a_failure_as_a_run_failure() {
+        use crate::test_support::{TempDir, init_repository};
+
+        let dir = TempDir::new("exec-run-in-failure");
+        init_repository(dir.path());
+
+        // 未設定のキーの読み出しは、何も出力せずに非ゼロ終了する
+        let err = run_git_in(
+            dir.path(),
+            &["config", "--local", "--get", "fuzgit.missing"],
+        )
+        .expect_err("an unset key must fail");
+
+        match err {
+            Error::GitRunFailed { command, code } => {
+                assert_eq!(command, "git config");
+                assert_ne!(code, Some(0));
             }
             other => panic!("unexpected error: {other:?}"),
         }

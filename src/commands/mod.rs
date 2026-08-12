@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use crate::cli::{Command, StashCommand};
 use crate::commands::diff::DiffMode;
-use crate::commands::fetch::PruneMode;
+use crate::commands::fetch::{FetchScope, PruneMode};
 use crate::commands::fixup::FixupKind;
 use crate::commands::merge::MergeMode;
 use crate::commands::push::UpstreamUpdate;
@@ -32,6 +32,7 @@ pub mod fixup;
 pub mod in_progress;
 pub mod log;
 pub mod merge;
+pub mod pull;
 pub mod push;
 pub mod rebase;
 pub mod reflog;
@@ -170,14 +171,20 @@ pub fn dispatch(command: &Command) -> Result<()> {
             &repository,
             DiffMode::from_flags(*staged, *head, *upstream, *branch, *commit)?,
         ),
-        Command::Fetch { prune } => {
+        Command::Fetch { prune, siblings } => {
             let prune = if *prune {
                 PruneMode::Prune
             } else {
                 PruneMode::Keep
             };
-            fetch::run(&repository, prune)
+            let scope = if *siblings {
+                FetchScope::Siblings
+            } else {
+                FetchScope::Current
+            };
+            fetch::run(&repository, scope, prune)
         }
+        Command::Pull => pull::run(&repository),
         Command::Sync { rebase, merge } => {
             sync::run(&repository, SyncMode::from_flags(*rebase, *merge)?)
         }

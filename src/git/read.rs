@@ -262,6 +262,35 @@ pub fn remote_tracking_refs_args(remote: &str) -> Vec<String> {
     ]
 }
 
+/// ローカルブランチの追跡状況を 1 行ずつ並べる `git for-each-ref` の書式。
+///
+/// `%(HEAD)` は HEAD が指すブランチにだけ `*` を、それ以外には空白を出す（`git branch` と同じ体裁）。
+/// upstream が設定されていないブランチと、upstream に対して差が無いブランチでは
+/// `%(if)` で該当部分ごと省き、行末に空の欄が残らないようにする。
+/// ahead/behind の文言（`[ahead 2, behind 1]` / `[gone]`）は git の表記をそのまま用いる。
+const BRANCH_TRACKING_FORMAT: &str = "--format=%(HEAD) %(refname:short)\
+%(if)%(upstream)%(then) → %(upstream:short)%(end)\
+%(if)%(upstream:track)%(then) %(upstream:track)%(end)";
+
+/// ローカルブランチとその追跡状況を列挙する `git for-each-ref` の実行引数を組み立てる。
+///
+/// 読むのは `refs/heads` と `refs/remotes` の参照および `.git/config` の upstream 設定だけで、
+/// **作業ツリーを走査しない**。`git status --branch` でも同じ追跡状況を得られるが、
+/// あちらは追跡状況の前に index の refresh（全ファイルの stat、必要なら再ハッシュ）を伴い、
+/// 規模の大きいリポジトリでは秒単位を要する（tasks.md の実測メモ）。プレビューは
+/// カーソル移動のたびに同期実行されるため、走査を伴わないこちらを用いる。
+///
+/// [`remote_url_args`] と同じくネットワークへは接続しない
+/// （追跡状況は前回の fetch までに取得済みの参照との比較で求まる）。
+#[must_use]
+pub fn branch_tracking_args() -> Vec<String> {
+    vec![
+        "for-each-ref".to_owned(),
+        "refs/heads".to_owned(),
+        BRANCH_TRACKING_FORMAT.to_owned(),
+    ]
+}
+
 /// ブランチに設定された upstream（`branch.<name>.remote` / `.merge`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Upstream {
@@ -526,6 +555,124 @@ pub fn push_targets(repository: &gix::Repository) -> Result<Vec<PushTarget>> {
     }
 
     Ok(targets)
+}
+
+/// upstream へ追随させられるローカルブランチ 1 件分の情報（`gz pull`）。
+///
+/// `remote` は [`remotes`] が列挙した名前と一致することを確認済みの値、`tracking_ref` は
+/// [`Upstream::tracking_ref`] が組み立てたローカルの追跡参照であり、いずれもユーザーの
+/// 自由入力ではない。`git fetch` / `git merge` の位置引数は `--` で保護できないため、
+/// この由来を保つことがそのままインジェクション対策になる（design.md セキュリティ設計）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullTarget {
+    /// ローカルブランチの短縮名。
+    pub branch: String,
+    /// upstream のリモート名（`origin` 等）。
+    pub remote: String,
+    /// upstream のローカル追跡参照（`refs/remotes/<remote>/<branch>`）。
+    pub tracking_ref: String,
+    /// HEAD が指しているブランチかどうか。
+    ///
+    /// チェックアウト中のブランチへの ref 更新は git が拒否するため、取り込みの経路が
+    /// 他のブランチ（`git fetch .`）と異なる（`git merge --ff-only`）。
+    pub is_current: bool,
+}
+
+/// [`pull_targets`] の走査結果。
+///
+/// 除外件数を finder のヘッダーへ出せるよう、候補と併せて返す（[`crate::git::siblings::SiblingScan`]
+/// と同型）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullScan {
+    /// 取り込み対象にできるブランチ。現在のブランチが先頭、以降はブランチ名の昇順。
+    pub targets: Vec<PullTarget>,
+    /// 取り込み先を決められない・更新できないため候補から除外したブランチの件数。
+    ///
+    /// 黙って消さずに件数を示せるよう、候補と併せて返す。
+    pub excluded: usize,
+}
+
+/// 1 件のローカルブランチから取り込み対象を組み立てる。候補にできない場合は `None`。
+///
+/// `remotes` / `checked_out` は呼び出し側が一度だけ集めたものを受け取る
+/// （ブランチごとに git を起動しないため）。
+fn pull_target(
+    repository: &gix::Repository,
+    branch: &BranchInfo,
+    remotes: &HashSet<String>,
+    checked_out: &HashSet<String>,
+) -> Result<Option<PullTarget>> {
+    // 他の worktree でチェックアウト中のブランチは、git が ref の更新を拒否する
+    // （`refusing to fetch into branch '%s' checked out at '%s'`）。
+    // 現在のブランチだけは作業ツリーごと更新する経路（`git merge --ff-only`）を持つため残す
+    if !branch.is_current && checked_out.contains(&branch.name) {
+        return Ok(None);
+    }
+
+    let Some(upstream) = upstream(repository, &branch.name)? else {
+        return Ok(None);
+    };
+
+    // `branch.<name>.merge` がリモート側のブランチを指していない設定では追跡参照を
+    // 組み立てられない。取り込み元を推測せずに候補から外す
+    let Some(tracking_ref) = upstream.tracking_ref() else {
+        return Ok(None);
+    };
+
+    // `branch.<name>.remote` には URL を直接書くこともできる。その値をそのまま git へ渡すと
+    // fuzgit が列挙していない対象へ通信することになるため、登録済みのリモート名である
+    // ことを確かめる（`gz sync` の resolve_target と同じ検査。design.md セキュリティ設計）
+    if !remotes.contains(&upstream.remote) {
+        return Ok(None);
+    }
+
+    Ok(Some(PullTarget {
+        branch: branch.name.clone(),
+        remote: upstream.remote,
+        tracking_ref,
+        is_current: branch.is_current,
+    }))
+}
+
+/// upstream へ追随させられるローカルブランチを列挙する（現在のブランチが先頭、以降は名前順）。
+///
+/// 候補は upstream が設定され、そこからリモート追跡参照を組み立てられ、かつその
+/// リモートが登録済みであるローカルブランチに限る。それ以外と、他の worktree で
+/// チェックアウト中のブランチは候補から除外し、件数を [`PullScan::excluded`] として返す。
+///
+/// detached HEAD はエラーにしない（[`push_targets`] が [`Error::DetachedHead`] を返すのとの
+/// 違い）。`gz pull` は複数のローカルブランチを対象にする一括処理であり、現在のブランチが
+/// 無くても他のブランチは通常どおり取り込めるため。
+///
+/// 起動する `git` プロセスは [`worktrees`] の `git worktree list` 1 回だけで、upstream と
+/// リモートの解決は `gix` のプロセス内読み取りで行う。ahead/behind は求めない
+/// （全ブランチ分の `rev-list` は 1 ブランチあたり 2 プロセスを要し、候補一覧の
+/// 応答性（非機能要件 200ms）を圧迫するため。値は取り込み後に git 自身が示す）。
+///
+/// # Errors
+///
+/// - 作業ツリーを持たない bare リポジトリの場合は [`Error::NoWorktree`]
+/// - ローカルブランチが 1 件も無く、その原因が unborn HEAD である場合は [`Error::UnbornHead`]
+/// - worktree 一覧の取得・パースに失敗した場合、ブランチ・リモート・upstream の読み取りに
+///   失敗した場合はそれぞれのエラー
+pub fn pull_targets(repository: &gix::Repository) -> Result<PullScan> {
+    let checked_out = checked_out_branches(&worktrees(workdir(repository)?)?);
+    let remotes: HashSet<String> = remotes(repository)?.into_iter().collect();
+
+    let mut targets = Vec::new();
+    let mut excluded = 0;
+    for branch in branches(repository, BranchScope::Local)? {
+        match pull_target(repository, &branch, &remotes, &checked_out)? {
+            Some(target) => targets.push(target),
+            None => excluded += 1,
+        }
+    }
+
+    // `branches` は名前順で返すため、現在のブランチを先頭へ引き上げるだけで
+    // 「現在のブランチが先頭、以降は名前順」が確定する（`siblings::discover` と同じ規則）
+    targets.sort_by_key(|target| std::cmp::Reverse(target.is_current));
+
+    Ok(PullScan { targets, excluded })
 }
 
 /// 進行中の git 操作のうち、fuzgit が復帰メニューを提供するもの。
@@ -2827,12 +2974,137 @@ mod tests {
         assert!(output.is_empty(), "unexpected output: {output:?}");
     }
 
+    /// 追跡状況の各行を取り出す。
+    fn tracking_lines(workdir: &Path) -> Vec<String> {
+        let output = capture_git_in(workdir, &to_str(&branch_tracking_args()))
+            .expect("the branch tracking state should be readable");
+
+        String::from_utf8_lossy(&output)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// `origin` を登録済みの、1 コミットだけ持つテストリポジトリを用意する。
+    ///
+    /// `git branch --set-upstream-to` は参照の存在だけでなく `remote.<name>` の設定も見るため、
+    /// 追跡参照を作る前にリモートを登録しておく。
+    fn repository_with_origin(label: &str) -> (TempDir, String) {
+        let (dir, _repository, head) = repository_with_one_commit(label);
+        git_in(
+            dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/origin.git",
+            ],
+        );
+
+        (dir, head)
+    }
+
+    #[test]
+    fn every_local_branch_is_listed_with_its_upstream_and_its_distance() {
+        let (dir, head) = repository_with_origin("read-branch-tracking");
+        git_in(dir.path(), &["branch", "behind"]);
+        create_remote_branch(dir.path(), "origin/main", &head);
+        git_in(
+            dir.path(),
+            &["branch", "--set-upstream-to=origin/main", "main"],
+        );
+        // upstream 側だけが 1 件進んでいる状態を作る（fetch 済みの追跡参照との比較）
+        let ahead = commit(dir.path(), "second commit");
+        create_remote_branch(dir.path(), "origin/behind", &ahead);
+        git_in(
+            dir.path(),
+            &["branch", "--set-upstream-to=origin/behind", "behind"],
+        );
+
+        assert_eq!(
+            tracking_lines(dir.path()),
+            [
+                "  behind → origin/behind [behind 1]",
+                "* main → origin/main [ahead 1]",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_branch_without_an_upstream_is_listed_by_name_alone() {
+        // upstream が無いブランチで空の欄（矢印だけの行）を出さない
+        let (dir, _repository, _head) = repository_with_one_commit("read-branch-tracking-no-up");
+
+        assert_eq!(tracking_lines(dir.path()), ["* main"]);
+    }
+
+    #[test]
+    fn a_branch_level_with_its_upstream_shows_no_distance() {
+        let (dir, head) = repository_with_origin("read-branch-tracking-level");
+        create_remote_branch(dir.path(), "origin/main", &head);
+        git_in(
+            dir.path(),
+            &["branch", "--set-upstream-to=origin/main", "main"],
+        );
+
+        assert_eq!(tracking_lines(dir.path()), ["* main → origin/main"]);
+    }
+
+    #[test]
+    fn a_branch_whose_upstream_disappeared_is_marked_as_gone() {
+        // 追跡参照が消えたことを黙って隠さない（git の `[gone]` をそのまま出す）
+        let (dir, head) = repository_with_origin("read-branch-tracking-gone");
+        create_remote_branch(dir.path(), "origin/main", &head);
+        git_in(
+            dir.path(),
+            &["branch", "--set-upstream-to=origin/main", "main"],
+        );
+        git_in(
+            dir.path(),
+            &["update-ref", "-d", "refs/remotes/origin/main"],
+        );
+
+        assert_eq!(tracking_lines(dir.path()), ["* main → origin/main [gone]"]);
+    }
+
+    #[test]
+    fn the_branch_tracking_state_is_read_without_walking_the_work_tree() {
+        // `git status` は追跡状況を出す前に index を refresh する（全ファイルを stat し、
+        // 食い違えば内容を読み直す）ため、大きな作業ツリーでは秒単位を要する。
+        // プレビューはカーソル移動のたびに同期実行されるので、走査を伴う経路を使わない
+        let arguments = branch_tracking_args();
+
+        assert_eq!(arguments[0], "for-each-ref");
+        assert!(
+            !arguments.iter().any(|argument| argument == "status"),
+            "the work tree must not be walked: {arguments:?}"
+        );
+    }
+
+    #[test]
+    fn a_large_work_tree_does_not_slow_the_branch_tracking_state_down() {
+        // 作業ツリーの規模に依存しないことを、追跡参照だけを増やしても変わらない出力で示す
+        let (dir, head) = repository_with_origin("read-branch-tracking-large");
+        create_remote_branch(dir.path(), "origin/main", &head);
+        git_in(
+            dir.path(),
+            &["branch", "--set-upstream-to=origin/main", "main"],
+        );
+        for index in 0..200 {
+            write_file(dir.path(), &format!("file{index}.txt"), "contents\n");
+        }
+
+        // 未追跡ファイルが 200 件あっても、走査しないため出力は変わらない
+        assert_eq!(tracking_lines(dir.path()), ["* main → origin/main"]);
+    }
+
     #[test]
     fn the_remote_preview_arguments_never_reach_the_network() {
         // ネットワークを伴う git のサブコマンド（fetch / ls-remote 等）を含まないことを構造的に確かめる
         for arguments in [
             remote_url_args("origin"),
             remote_tracking_refs_args("origin"),
+            branch_tracking_args(),
         ] {
             assert!(
                 matches!(arguments[0].as_str(), "remote" | "for-each-ref"),
@@ -3260,6 +3532,200 @@ mod tests {
             "a branch tracking a differently named reference is a different destination"
         );
         assert!(!targets_upstream(None, "origin", "main"));
+    }
+
+    /// `origin` を登録済みで、`main` に 1 コミットを持つ `gz pull` 用のリポジトリを用意する。
+    fn repository_for_pull(label: &str) -> (TempDir, String) {
+        let (dir, _repository, head) = repository_with_one_commit(label);
+        add_remote(dir.path(), "origin");
+
+        (dir, head)
+    }
+
+    /// `origin/<branch>` の追跡参照を作り、`<branch>` の upstream として設定する。
+    ///
+    /// ネットワークは使わず、fetch 済みの追跡参照がある状態を直接作る。
+    fn set_upstream(path: &Path, branch: &str, head: &str) {
+        create_remote_branch(path, &format!("origin/{branch}"), head);
+        git_in(
+            path,
+            &[
+                "branch",
+                &format!("--set-upstream-to=origin/{branch}"),
+                branch,
+            ],
+        );
+    }
+
+    /// 取り込み対象のブランチ名を候補順に取り出す。
+    fn target_branches(scan: &PullScan) -> Vec<&str> {
+        scan.targets
+            .iter()
+            .map(|target| target.branch.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_pull_target_carries_the_upstream_of_its_branch() {
+        let (dir, head) = repository_for_pull("read-pull-targets");
+        set_upstream(dir.path(), "main", &head);
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let scan = pull_targets(&repository).expect("pull targets should be generated");
+
+        assert_eq!(
+            scan.targets,
+            [PullTarget {
+                branch: "main".to_owned(),
+                remote: "origin".to_owned(),
+                tracking_ref: "refs/remotes/origin/main".to_owned(),
+                is_current: true,
+            }]
+        );
+        assert_eq!(scan.excluded, 0);
+    }
+
+    #[test]
+    fn a_branch_without_an_upstream_is_excluded_and_counted() {
+        let (dir, head) = repository_for_pull("read-pull-targets-no-upstream");
+        set_upstream(dir.path(), "main", &head);
+        create_branch(dir.path(), "solo");
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let scan = pull_targets(&repository).expect("pull targets should be generated");
+
+        assert_eq!(
+            target_branches(&scan),
+            ["main"],
+            "a branch without an upstream has no source to pull from"
+        );
+        assert_eq!(scan.excluded, 1, "the excluded branch must be counted");
+    }
+
+    #[test]
+    fn a_branch_tracking_an_unregistered_remote_is_excluded_and_counted() {
+        // `branch.<name>.remote` には URL を直接書ける。fuzgit が列挙していない対象へ
+        // 通信させないため、登録済みのリモート名でないものは候補にしない
+        let (dir, head) = repository_for_pull("read-pull-targets-url-remote");
+        set_upstream(dir.path(), "main", &head);
+        create_branch(dir.path(), "direct");
+        git_in(
+            dir.path(),
+            &[
+                "config",
+                "branch.direct.remote",
+                "https://example.invalid/direct.git",
+            ],
+        );
+        git_in(
+            dir.path(),
+            &["config", "branch.direct.merge", "refs/heads/direct"],
+        );
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let scan = pull_targets(&repository).expect("pull targets should be generated");
+
+        assert_eq!(target_branches(&scan), ["main"]);
+        assert_eq!(scan.excluded, 1);
+    }
+
+    #[test]
+    fn a_branch_checked_out_in_another_worktree_is_excluded_and_counted() {
+        // git はチェックアウト中のブランチへの ref 更新を拒否するため、取り込めない
+        let (dir, head) = repository_for_pull("read-pull-targets-worktree");
+        set_upstream(dir.path(), "main", &head);
+        create_branch(dir.path(), "shared");
+        set_upstream(dir.path(), "shared", &head);
+        git_in(
+            dir.path(),
+            &["worktree", "add", "--quiet", "linked", "shared"],
+        );
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let scan = pull_targets(&repository).expect("pull targets should be generated");
+
+        assert_eq!(target_branches(&scan), ["main"]);
+        assert_eq!(scan.excluded, 1);
+    }
+
+    #[test]
+    fn every_kind_of_exclusion_is_counted_together() {
+        let (dir, head) = repository_for_pull("read-pull-targets-excluded-count");
+        set_upstream(dir.path(), "main", &head);
+        create_branch(dir.path(), "solo");
+        create_branch(dir.path(), "direct");
+        git_in(
+            dir.path(),
+            &[
+                "config",
+                "branch.direct.remote",
+                "https://example.invalid/direct.git",
+            ],
+        );
+        git_in(
+            dir.path(),
+            &["config", "branch.direct.merge", "refs/heads/direct"],
+        );
+        create_branch(dir.path(), "shared");
+        set_upstream(dir.path(), "shared", &head);
+        git_in(
+            dir.path(),
+            &["worktree", "add", "--quiet", "linked", "shared"],
+        );
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let scan = pull_targets(&repository).expect("pull targets should be generated");
+
+        assert_eq!(target_branches(&scan), ["main"]);
+        assert_eq!(
+            scan.excluded, 3,
+            "the branches without an upstream, with an unregistered remote, \
+and checked out elsewhere are all counted"
+        );
+    }
+
+    #[test]
+    fn the_current_branch_comes_first_and_the_rest_follow_by_name() {
+        let (dir, head) = repository_for_pull("read-pull-targets-order");
+        for branch in ["zebra", "alpha"] {
+            create_branch(dir.path(), branch);
+            set_upstream(dir.path(), branch, &head);
+        }
+        set_upstream(dir.path(), "main", &head);
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let scan = pull_targets(&repository).expect("pull targets should be generated");
+
+        assert_eq!(target_branches(&scan), ["main", "alpha", "zebra"]);
+        assert_eq!(
+            scan.targets
+                .iter()
+                .map(|target| target.is_current)
+                .collect::<Vec<_>>(),
+            [true, false, false]
+        );
+    }
+
+    #[test]
+    fn a_detached_head_still_offers_the_other_branches() {
+        // `push_targets` は detached HEAD を `Error::DetachedHead` にするが、`gz pull` は
+        // 複数のブランチを対象にする一括処理であり、現在のブランチが無いだけで成立する
+        let (dir, head) = repository_for_pull("read-pull-targets-detached");
+        set_upstream(dir.path(), "main", &head);
+        create_branch(dir.path(), "alpha");
+        set_upstream(dir.path(), "alpha", &head);
+        git_in(dir.path(), &["switch", "--quiet", "--detach", &head]);
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let scan = pull_targets(&repository).expect("a detached HEAD must not be an error");
+
+        assert_eq!(target_branches(&scan), ["alpha", "main"]);
+        assert!(
+            scan.targets.iter().all(|target| !target.is_current),
+            "a detached HEAD checks out no branch: {targets:?}",
+            targets = scan.targets
+        );
+        assert_eq!(scan.excluded, 0);
     }
 
     #[test]

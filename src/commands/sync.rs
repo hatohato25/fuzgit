@@ -214,7 +214,12 @@ fn fetch_args(remote: &str) -> Vec<String> {
 }
 
 /// 取り込みに用いる git コマンドの引数を組み立てる。
-fn integrate_args(mode: SyncMode, reference: &str) -> Vec<String> {
+///
+/// `gz pull`（FR-24）が現在のブランチへ fast-forward で取り込む経路からも呼ぶ。
+/// 「現在のブランチ 1 本を ff-only で取り込む」場合だけが両コマンドの重なりであり、
+/// 引数の組み立てを 2 か所に持つと片方だけが変わり得るため、ここへ集約する
+/// （両者が一致することは `commands::pull` の単体テストでも固定している）。
+pub(crate) fn integrate_args(mode: SyncMode, reference: &str) -> Vec<String> {
     let mut args = match mode {
         SyncMode::FfOnly => vec!["merge".to_owned(), "--ff-only".to_owned()],
         SyncMode::Merge => vec!["merge".to_owned()],
