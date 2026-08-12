@@ -600,16 +600,22 @@ section.band {
   color: var(--fg-strong);
 }
 
-/* Default (also the no-JS fallback): English is shown, Japanese is hidden. */
-[lang="ja"] {
+/* Default (also the no-JS fallback): English is shown, Japanese is hidden.
+
+   All three rules are scoped under `body` on purpose: <html> itself carries
+   lang="en"/lang="ja" so assistive technology reads the document in the right
+   language, and an unscoped [lang="ja"] would match the root element and hide
+   the entire page. Keeping `body` in every selector also preserves the
+   specificity order (default 0,1,1 < data-lang overrides 0,2,2). */
+body [lang="ja"] {
   display: none;
 }
 
-html[data-lang="ja"] [lang="ja"] {
+html[data-lang="ja"] body [lang="ja"] {
   display: revert;
 }
 
-html[data-lang="ja"] [lang="en"] {
+html[data-lang="ja"] body [lang="en"] {
   display: none;
 }
 
