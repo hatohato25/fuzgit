@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>fuzgit — pick, search and trace your way through git</title>
+    <meta
+      name="description"
+      content="fuzgit (command: gz) is a git CLI built around a fuzzy finder: list candidates, filter and pick with a preview, then run the git operation."
+    />
+    <link rel="stylesheet" href="assets/style.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="wrap">
+        <a class="brand" href="index.html">fuzgit</a>
+        <nav class="nav-inline" aria-label="Site">
+          <a href="docs.html">Docs</a>
+          <a href="docs.html?lang=ja">日本語</a>
+          <a href="#install">Install</a>
+          <a href="https://github.com/hatohato25/fuzgit">GitHub</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero">
+        <div class="wrap">
+          <h1>fuzgit</h1>
+          <p class="tagline">Pick, search, and trace your way through git.</p>
+          <p class="lede">
+            You should not have to remember a branch name or a commit hash to
+            get work done. Every fuzgit subcommand follows the same model:
+            <strong
+              >build the candidate list, filter and pick it in a fuzzy finder
+              (with a preview), then run the git operation</strong
+            >. The fuzzy finder is
+            <a href="https://crates.io/crates/skim">skim</a>, embedded as a
+            library — no external <code>fzf</code> or <code>sk</code> binary is
+            required.
+          </p>
+          <p class="binary-note">
+            package <b>fuzgit</b> &nbsp;·&nbsp; command <b>gz</b>
+            &nbsp;·&nbsp; written in Rust &nbsp;·&nbsp; MIT
+          </p>
+          <div class="cta-row">
+            <a class="btn btn-primary" href="docs.html">Get started</a>
+            <a class="btn" href="https://github.com/hatohato25/fuzgit">
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path
+                  d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+                />
+              </svg>
+              View on GitHub
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id="demo">
+        <div class="wrap">
+          <p class="section-label">Demo</p>
+          <h2>Choose the branches, then let git do the work</h2>
+          <p class="lede">
+            <code>gz pull</code> is the clearest example of the model: it asks
+            only <em>which local branches should follow their upstream</em>, and
+            then fast-forwards them one at a time.
+          </p>
+
+          <div class="two-col">
+            <figure class="term">
+              <div class="term-bar">gz pull — selection</div>
+              <pre><code><span class="prompt">$</span> <span class="cmd">gz pull</span>
+<span class="hint">現在のブランチを選択済みにしています。Tab: 選択の切替 / Enter: fast-forward のみで取り込み  |  除外 2 件（upstream 未設定 / リモート未登録 / 他の worktree で使用中）</span>
+<span class="sel">&gt;&gt;* main  →  origin/main</span>
+    feature-a  →  origin/feature-a</code></pre>
+              <figcaption>
+                <b>The header, in English:</b> “the current branch starts
+                selected. Tab: toggle selection / Enter: fast-forward only | 2
+                excluded (no upstream / remote not registered / in use by
+                another worktree)”. Branches that cannot be pulled are never
+                silently dropped — the number skipped is shown.
+              </figcaption>
+            </figure>
+
+            <figure class="term">
+              <div class="term-bar">gz pull — run</div>
+              <pre><code><span class="prompt">$</span> <span class="cmd">gz pull</span>
+[1/4] main
+[2/4] alpha
+[3/4] diverged
+[4/4] zeta
+<span class="warn">成功 3 件 / 失敗 1 件（失敗: diverged）</span></code></pre>
+              <figcaption>
+                <b>The summary, in English:</b> “3 succeeded / 1 failed (failed:
+                diverged)”. Branches are integrated serially in list order; a
+                failure never stops the run, and a branch that could not
+                fast-forward is left exactly as it was.
+              </figcaption>
+            </figure>
+          </div>
+
+          <figure class="term spaced">
+            <div class="term-bar">gz fetch — nothing to choose</div>
+            <pre><code><span class="prompt">$</span> <span class="cmd">gz fetch</span>
+<span class="hint">リモート `origin` から取得します（登録されているリモートが 1 つのため、選択を省略しました）</span></code></pre>
+            <figcaption>
+              <b>In English:</b> “fetching from remote <code>origin</code> (only
+              one remote is registered, so the selection step was skipped)”. The
+              finder only opens when there is something to choose — but fuzgit
+              always tells you what it acted on.
+            </figcaption>
+          </figure>
+
+          <div class="note">
+            <p>
+              <strong>Note:</strong> fuzgit’s own messages are currently written
+              in Japanese, so the terminal excerpts above are shown verbatim
+              with an English gloss. Everything git prints (update tables,
+              conflicts, authentication prompts) comes straight from git.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id="features">
+        <div class="wrap">
+          <p class="section-label">Why fuzgit</p>
+          <h2>Design, not features</h2>
+
+          <div class="feature-grid">
+            <article class="feature">
+              <h3>One model, every command</h3>
+              <p>
+                List candidates → filter and pick in the fuzzy finder with a
+                preview → run the git operation. Learn it once and every
+                subcommand behaves the same way.
+              </p>
+            </article>
+
+            <article class="feature">
+              <h3>Previews never hit the network</h3>
+              <p>
+                Candidate lists and previews are built from local repository
+                data only. A preview is regenerated on every cursor move, so a
+                network round trip there would block the whole display.
+              </p>
+            </article>
+
+            <article class="feature">
+              <h3>Only three commands go online</h3>
+              <p>
+                <code>gz fetch</code>, <code>gz pull</code> and
+                <code>gz sync</code> use the network — plus the
+                <code>git push</code> that <code>gz push</code> runs after you
+                decide. Everything else is local.
+              </p>
+            </article>
+
+            <article class="feature">
+              <h3>Built not to lose your work</h3>
+              <p>
+                Destructive operations confirm first, <code>gz pull</code> is
+                fast-forward only, merge shows a conflict prediction, force push
+                is not offered and history is never rewritten automatically.
+              </p>
+            </article>
+
+            <article class="feature">
+              <h3>No shell, no injection surface</h3>
+              <p>
+                git is always executed with an argument array, never through a
+                shell, and previews run git from Rust instead of handing skim a
+                command string. Picked values are verified against the candidate
+                list before they reach git.
+              </p>
+            </article>
+
+            <article class="feature">
+              <h3>Fast first paint</h3>
+              <p>
+                Candidates are read with
+                <a href="https://crates.io/crates/gix">gitoxide (gix)</a>.
+                Anything that would need one <code>git</code> process per
+                candidate — ahead/behind across repositories, for instance — is
+                moved into the preview so the list appears immediately.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id="commands">
+        <div class="wrap">
+          <p class="section-label">Reference</p>
+          <h2>Commands</h2>
+          <p class="lede">
+            <code>gz &lt;subcommand&gt; [options]</code>. Running
+            <code>gz</code> with no arguments — or <code>gz --help</code> —
+            lists the subcommands.
+          </p>
+
+          <div class="table-wrap">
+            <table>
+              <caption class="table-caption">
+                Every row links to its section in the documentation.
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Subcommand</th>
+                  <th scope="col">What it does</th>
+                  <th scope="col">Selection</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><a href="docs.html#branch"><code>gz branch</code></a></td>
+                  <td>
+                    Pick a branch and switch to it (subcommands also create,
+                    delete and tidy up branches)
+                  </td>
+                  <td>single / depends on subcommand</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#log"><code>gz log</code></a></td>
+                  <td>
+                    Trace the commit history and print the full hash to stdout
+                  </td>
+                  <td>single</td>
+                </tr>
+                <tr>
+                  <td>
+                    <a href="docs.html#cherry-pick"><code>gz cherry-pick</code></a>
+                  </td>
+                  <td>Pick commits and cherry-pick them</td>
+                  <td>multiple</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#restore"><code>gz restore</code></a></td>
+                  <td>Pick files to restore or unstage</td>
+                  <td>multiple</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#add"><code>gz add</code></a></td>
+                  <td>Pick unstaged and untracked files and stage them</td>
+                  <td>multiple</td>
+                </tr>
+                <tr>
+                  <td>
+                    <a href="docs.html#stash"><code>gz stash &lt;subcommand&gt;</code></a>
+                  </td>
+                  <td>
+                    Stash changes away, and search stashes to apply or drop them
+                  </td>
+                  <td>depends on subcommand</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#tag"><code>gz tag</code></a></td>
+                  <td>Pick a tag to print, switch to, or diff</td>
+                  <td>single</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#reflog"><code>gz reflog</code></a></td>
+                  <td>
+                    Trace the HEAD reflog and recover commits you thought were
+                    lost
+                  </td>
+                  <td>single</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#commit"><code>gz commit</code></a></td>
+                  <td>Pick changed files and commit only those</td>
+                  <td>multiple</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#push"><code>gz push</code></a></td>
+                  <td>
+                    Pick the push target (remote × current branch) and push
+                  </td>
+                  <td>single</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#fixup"><code>gz fixup</code></a></td>
+                  <td>Pick the commit to amend and create a fixup commit</td>
+                  <td>single</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#merge"><code>gz merge</code></a></td>
+                  <td>
+                    Pick the branch to merge (recovery menu while one is in
+                    progress)
+                  </td>
+                  <td>single</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#rebase"><code>gz rebase</code></a></td>
+                  <td>
+                    Pick the base to rebase onto (recovery menu while one is in
+                    progress)
+                  </td>
+                  <td>single</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#revert"><code>gz revert</code></a></td>
+                  <td>Pick the commits to undo and revert them</td>
+                  <td>multiple</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#status"><code>gz status</code></a></td>
+                  <td>
+                    List changed files and act on the ones you pick (two-step
+                    selection)
+                  </td>
+                  <td>multiple → single</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#diff"><code>gz diff</code></a></td>
+                  <td>Pick what to compare and show the diff</td>
+                  <td>depends on mode</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#fetch"><code>gz fetch</code></a></td>
+                  <td>
+                    Decide what to fetch and fetch it (<code>--siblings</code>
+                    also fetches the repositories next door;
+                    <strong>uses the network</strong>)
+                  </td>
+                  <td>single / multiple with <code>--siblings</code></td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#pull"><code>gz pull</code></a></td>
+                  <td>
+                    Pick branches and bring them up to their upstream in one go
+                    (fast-forward only; <strong>uses the network</strong>)
+                  </td>
+                  <td>multiple</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#sync"><code>gz sync</code></a></td>
+                  <td>
+                    Sync the current branch with its upstream
+                    (<strong>uses the network</strong>)
+                  </td>
+                  <td>none</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#worktree"><code>gz worktree</code></a></td>
+                  <td>List and manage worktrees</td>
+                  <td>single</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id="install">
+        <div class="wrap">
+          <p class="section-label">Install</p>
+          <h2>Build it from source</h2>
+          <p class="lede">
+            fuzgit is not published to crates.io yet, so install it from a local
+            clone.
+          </p>
+
+          <pre><code>git clone https://github.com/hatohato25/fuzgit.git
+cd fuzgit
+cargo install --path .</code></pre>
+
+          <p>
+            This installs <code>~/.cargo/bin/gz</code> (the package is
+            <code>fuzgit</code>, the command is <code>gz</code>). To try it
+            without installing:
+          </p>
+
+          <pre><code>cargo build --release
+./target/release/gz --help</code></pre>
+
+          <h3>Requirements</h3>
+          <ul>
+            <li>
+              <strong>git must be installed (required).</strong> Write
+              operations and coloured diff previews shell out to the system
+              <code>git</code>; gix is used to read repository data.
+            </li>
+            <li>
+              <strong>Git 2.38+ for the merge conflict prediction
+              (optional).</strong> Older git simply skips the prediction — the
+              merge itself still runs.
+            </li>
+            <li>
+              A stable Rust toolchain to build it (Rust 1.85 or newer, because
+              the crate uses edition 2024).
+            </li>
+          </ul>
+
+          <p>
+            <a class="btn btn-primary" href="docs.html">Read the docs</a>
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <span>fuzgit — MIT License</span>
+        <span>
+          <a href="docs.html">Documentation</a> ·
+          <a href="docs.html?lang=ja">ドキュメント（日本語）</a> ·
+          <a href="https://github.com/hatohato25/fuzgit">GitHub</a>
+        </span>
+      </div>
+    </footer>
+  </body>
+</html>
