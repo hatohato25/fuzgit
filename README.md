@@ -1,35 +1,41 @@
 # fuzgit
 
-fuzzy finder で「選ぶ」「探す」「辿る」ことを軸にした git 操作 CLI ツールです。
+**English** | [日本語](README.ja.md)
 
-ブランチ名やコミットハッシュを正確に覚えていなくても、絞り込みと選択だけで日常的な git 操作を
-完結できることを目指しています。すべてのサブコマンドが
-**候補一覧の取得 → fuzzy finder で絞り込み・選択（＋プレビュー）→ git 操作の実行**
-という同じ操作モデルに従います。fuzzy finder は [skim](https://crates.io/crates/skim) を
-ライブラリとして組み込んでいるため、外部の `fzf` / `sk` バイナリは不要です。
+A git CLI built around picking, searching, and tracing with a fuzzy finder.
 
-- パッケージ名: **`fuzgit`**
-- 実行コマンド名（バイナリ名）: **`gz`**
+Even when you don't remember the exact branch name or commit hash, you can complete everyday git
+operations just by filtering and selecting. Every subcommand follows the same model:
+**collect candidates → filter and select in a fuzzy finder (with preview) → run the git operation**.
+The fuzzy finder is [skim](https://crates.io/crates/skim) embedded as a library, so no external
+`fzf` / `sk` binary is required.
 
-## ドキュメント
+- Package name: **`fuzgit`**
+- Executable (binary) name: **`gz`**
 
-**各コマンドの詳細・キー操作・ネットワーク操作・終了コード・設計方針は、ドキュメントサイトを参照してください。**
+## Documentation
 
-- **<https://hatohato25.github.io/fuzgit/>** — ランディングページ
-- **<https://hatohato25.github.io/fuzgit/docs.html>** — ドキュメント（English / 日本語）
+**For per-command details, key bindings, network operations, exit codes, and design notes, see the
+documentation site.**
 
-## 前提条件
+- **<https://hatohato25.github.io/fuzgit/>** — landing page
+- **<https://hatohato25.github.io/fuzgit/docs.html>** — documentation (English / 日本語)
 
-- **システムに `git` がインストールされていること（必須）**
-  書き込み系の操作とプレビュー用の色付き差分生成は、システムの `git` コマンドへシェルアウトして
-  実行します（リポジトリ情報の読み取りには [gix](https://crates.io/crates/gix) を使います）。
-- **`gz merge` のコンフリクト予測には Git 2.38 以降が必要です（任意）**
-  2.38 未満では予測の表示だけを省略し、merge の実行はそのまま続けます。
-- ビルドする場合は stable の Rust ツールチェイン（edition 2024 を使うため Rust 1.85 以降）
+Note: the CLI's own messages, headers, and prompts are currently in Japanese, so the terminal
+examples below show the actual Japanese output.
 
-## インストール
+## Requirements
 
-crates.io へは未公開のため、リポジトリを取得してローカルからインストールします。
+- **`git` must be installed on your system (required)**
+  Write operations and colored diff generation for previews shell out to the system `git` command
+  ([gix](https://crates.io/crates/gix) is used for reading repository information).
+- **Git 2.38 or later for `gz merge` conflict prediction (optional)**
+  On older versions only the prediction display is skipped; the merge itself still runs.
+- A stable Rust toolchain if you build from source (Rust 1.85 or later, since it uses edition 2024)
+
+## Installation
+
+The crate is not published on crates.io yet, so clone the repository and install locally.
 
 ```sh
 git clone https://github.com/hatohato25/fuzgit.git
@@ -37,37 +43,37 @@ cd fuzgit
 cargo install --path .
 ```
 
-`~/.cargo/bin/gz` がインストールされます（パッケージ名は `fuzgit`、コマンド名は `gz`）。
+This installs `~/.cargo/bin/gz` (package name `fuzgit`, command name `gz`).
 
-インストールせずに試す場合:
+To try it without installing:
 
 ```sh
 cargo build --release
 ./target/release/gz --help
 ```
 
-## クイックスタート
+## Quick start
 
 ```sh
-gz branch              # ブランチを選んで切り替える
-gz status              # 変更ファイルを選んで、add / restore / stash / commit などを行う
-git show "$(gz log)"   # コミットを選んでフルハッシュを受け取る
+gz branch              # pick a branch and switch to it
+gz status              # pick changed files, then add / restore / stash / commit them
+git show "$(gz log)"   # pick a commit and get its full hash
 ```
 
-引数なしの `gz` および `gz --help` でサブコマンド一覧を表示します。
+Running `gz` with no arguments, or `gz --help`, lists the subcommands.
 
-## 主な機能
+## Highlights
 
-全 20 コマンドの中でも、fuzgit の性格がよく分かる 4 つです。
+Four of the 20 commands that best show what fuzgit is about.
 
-### 探して選ぶ
+### Search and pick
 
-**[`gz branch`](https://hatohato25.github.io/fuzgit/docs.html#branch) — ブランチを選んで切り替える**
+**[`gz branch`](https://hatohato25.github.io/fuzgit/docs.html#branch) — pick a branch and switch to it**
 
-ブランチ名を正確に覚えていなくても、絞り込んで選ぶだけで切り替えられます。プレビューには
-選択中ブランチの直近 50 件のコミット（`git log --oneline --decorate`）を表示します。
-`--all` を付けるとリモート追跡ブランチも候補に含まれ、`origin/feature` を選ぶと git の DWIM により
-追跡ローカルブランチが作成されます。
+You don't need to remember the exact branch name; just filter and select. The preview shows the last
+50 commits of the highlighted branch (`git log --oneline --decorate`). With `--all`, remote-tracking
+branches are included as candidates, and selecting `origin/feature` creates a tracking local branch
+through git's DWIM behavior.
 
 ```
 $ gz branch --all
@@ -76,21 +82,22 @@ $ gz branch --all
     origin/feature/search
 ```
 
-**[`gz stash`](https://hatohato25.github.io/fuzgit/docs.html#stash) — stash を検索して復元する**
+**[`gz stash`](https://hatohato25.github.io/fuzgit/docs.html#stash) — search stashes and restore them**
 
-`apply` / `pop` / `drop` の候補は `stash@{n}: <メッセージ>` 形式なので、番号ではなくメッセージで
-絞り込めます。プレビューは `git stash show -p --color=always`、`drop` は実行前に確認プロンプト
-（`[y/N]`）を表示します。`gz stash push` は `Tab` で複数選択でき、**選んだファイルだけ**が
-退避されます（選ばなかった変更は作業ツリーに残ります）。
+Candidates for `apply` / `pop` / `drop` are shown as `stash@{n}: <message>`, so you can filter by
+message instead of by number. The preview is `git stash show -p --color=always`, and `drop` asks for
+confirmation (`[y/N]`) before running. `gz stash push` supports multi-select with `Tab`, and stashes
+**only the files you picked** (unselected changes stay in the working tree).
 
-### 選んでまとめて実行する
+### Pick many, run once
 
-**[`gz fetch -s`](https://hatohato25.github.io/fuzgit/docs.html#fetch) — 隣のリポジトリもまとめて fetch**
+**[`gz fetch -s`](https://hatohato25.github.io/fuzgit/docs.html#fetch) — fetch neighboring repositories too**
 
-`-s` / `--siblings` を付けると、現在の worktree root の親ディレクトリ直下だけを走査して（再帰しません）、
-`.git` を持つディレクトリを候補にします。候補行は `<ディレクトリ名>  <現在のブランチ>  <リモート>` で、
-現在のリポジトリは選択済みで始まります。`Tab` で複数選択すれば、複数リポジトリをまとめて
-fetch できます。fetch できないリポジトリは黙って消さず、除外した件数をヘッダーに示します。
+With `-s` / `--siblings`, fuzgit scans only the directory directly above the current worktree root
+(no recursion) and offers every directory containing a `.git` as a candidate. Each line is
+`<directory name>  <current branch>  <remote>`, and the current repository starts out selected.
+Multi-select with `Tab` to fetch several repositories at once. Repositories that can't be fetched are
+not silently dropped — the number excluded is shown in the header.
 
 ```
 $ gz fetch --siblings
@@ -100,12 +107,13 @@ $ gz fetch --siblings
   zulu  main  origin
 ```
 
-**[`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) — 複数ブランチをまとめて追随させる**
+**[`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) — bring several branches up to date at once**
 
-選ばせるのは「どのローカルブランチを upstream へ追随させるか」だけで、取り込みは fast-forward のみです。
-現在のブランチは選択済みで始まります。候補一覧の順に 1 件ずつ直列に実行し、途中で失敗しても中断せず、
-最後に成功・失敗の件数を集計します。upstream 未設定などで対象にできないブランチは、除外件数を
-ヘッダーに示します。
+The only thing you pick is which local branches should follow their upstream, and integration is
+fast-forward only. The current branch starts out selected. Branches run one at a time in list order;
+a failure doesn't abort the run, and the successes and failures are tallied at the end. Branches that
+can't be targeted (for example, no upstream configured) are reported as an excluded count in the
+header.
 
 ```
 $ gz pull
@@ -116,37 +124,37 @@ $ gz pull
 成功 3 件 / 失敗 1 件（失敗: diverged）
 ```
 
-## コマンド一覧
+## Commands
 
-| サブコマンド | 概要 |
+| Subcommand | Description |
 |---|---|
-| [`gz branch`](https://hatohato25.github.io/fuzgit/docs.html#branch) | ブランチを選んで切り替える（サブコマンドで作成・削除・整理も行う） |
-| [`gz log`](https://hatohato25.github.io/fuzgit/docs.html#log) | コミット履歴を辿り、フルハッシュを標準出力へ出す |
-| [`gz cherry-pick`](https://hatohato25.github.io/fuzgit/docs.html#cherry-pick) | コミットを選んで cherry-pick する |
-| [`gz restore`](https://hatohato25.github.io/fuzgit/docs.html#restore) | ファイルを選んで復元・アンステージする |
-| [`gz add`](https://hatohato25.github.io/fuzgit/docs.html#add) | 未ステージ・未追跡ファイルを選んでステージする |
-| [`gz stash <サブコマンド>`](https://hatohato25.github.io/fuzgit/docs.html#stash) | 変更を stash へ退避し、stash を検索して適用・破棄する |
-| [`gz tag`](https://hatohato25.github.io/fuzgit/docs.html#tag) | タグを選んで出力・切替・差分表示する |
-| [`gz reflog`](https://hatohato25.github.io/fuzgit/docs.html#reflog) | HEAD の reflog を辿り、失われたコミットを取り出す |
-| [`gz commit`](https://hatohato25.github.io/fuzgit/docs.html#commit) | 変更ファイルを選んで、選んだものだけをコミットする |
-| [`gz push`](https://hatohato25.github.io/fuzgit/docs.html#push) | push 先（リモート × 現在ブランチ）を選んで push する |
-| [`gz fixup`](https://hatohato25.github.io/fuzgit/docs.html#fixup) | 修正対象のコミットを選んで fixup コミットを作る |
-| [`gz merge`](https://hatohato25.github.io/fuzgit/docs.html#merge) | merge するブランチを選ぶ（進行中は復帰メニュー） |
-| [`gz rebase`](https://hatohato25.github.io/fuzgit/docs.html#rebase) | rebase の base を選ぶ（進行中は復帰メニュー） |
-| [`gz revert`](https://hatohato25.github.io/fuzgit/docs.html#revert) | 打ち消すコミットを選んで revert する |
-| [`gz status`](https://hatohato25.github.io/fuzgit/docs.html#status) | 変更ファイルを一覧し、選んだファイルに操作を行う（2 段選択） |
-| [`gz diff`](https://hatohato25.github.io/fuzgit/docs.html#diff) | 比較対象を選んで差分を表示する |
-| [`gz fetch`](https://hatohato25.github.io/fuzgit/docs.html#fetch) | fetch の対象を決めて取得する（`--siblings` で隣のリポジトリも一括取得。**ネットワークを使う**） |
-| [`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) | ブランチを選んで upstream へまとめて追随させる（fast-forward のみ。**ネットワークを使う**） |
-| [`gz sync`](https://hatohato25.github.io/fuzgit/docs.html#sync) | 現在ブランチを upstream と同期する（**ネットワークを使う**） |
-| [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | worktree を一覧・管理する |
+| [`gz branch`](https://hatohato25.github.io/fuzgit/docs.html#branch) | Pick a branch and switch to it (subcommands also create, delete, and tidy up) |
+| [`gz log`](https://hatohato25.github.io/fuzgit/docs.html#log) | Trace commit history and print the full hash to stdout |
+| [`gz cherry-pick`](https://hatohato25.github.io/fuzgit/docs.html#cherry-pick) | Pick a commit and cherry-pick it |
+| [`gz restore`](https://hatohato25.github.io/fuzgit/docs.html#restore) | Pick files to restore or unstage |
+| [`gz add`](https://hatohato25.github.io/fuzgit/docs.html#add) | Pick unstaged and untracked files to stage |
+| [`gz stash <subcommand>`](https://hatohato25.github.io/fuzgit/docs.html#stash) | Stash changes, then search stashes to apply or drop them |
+| [`gz tag`](https://hatohato25.github.io/fuzgit/docs.html#tag) | Pick a tag to print, switch to, or diff |
+| [`gz reflog`](https://hatohato25.github.io/fuzgit/docs.html#reflog) | Trace the HEAD reflog and recover lost commits |
+| [`gz commit`](https://hatohato25.github.io/fuzgit/docs.html#commit) | Pick changed files and commit only those |
+| [`gz push`](https://hatohato25.github.io/fuzgit/docs.html#push) | Pick a push target (remote × current branch) and push |
+| [`gz fixup`](https://hatohato25.github.io/fuzgit/docs.html#fixup) | Pick the commit to amend and create a fixup commit |
+| [`gz merge`](https://hatohato25.github.io/fuzgit/docs.html#merge) | Pick a branch to merge (resume menu while one is in progress) |
+| [`gz rebase`](https://hatohato25.github.io/fuzgit/docs.html#rebase) | Pick the rebase base (resume menu while one is in progress) |
+| [`gz revert`](https://hatohato25.github.io/fuzgit/docs.html#revert) | Pick a commit to revert |
+| [`gz status`](https://hatohato25.github.io/fuzgit/docs.html#status) | List changed files and act on the ones you pick (two-step selection) |
+| [`gz diff`](https://hatohato25.github.io/fuzgit/docs.html#diff) | Pick what to compare and show the diff |
+| [`gz fetch`](https://hatohato25.github.io/fuzgit/docs.html#fetch) | Choose what to fetch (`--siblings` fetches neighboring repositories too. **uses the network**) |
+| [`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) | Pick branches and bring them up to their upstream at once (fast-forward only. **uses the network**) |
+| [`gz sync`](https://hatohato25.github.io/fuzgit/docs.html#sync) | Sync the current branch with its upstream (**uses the network**) |
+| [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | List and manage worktrees |
 
-オプション・候補の作り方・プレビューの内容・確認プロンプトの有無は
-[ドキュメント](https://hatohato25.github.io/fuzgit/docs.html)に記載しています。
+Options, how candidates are built, what the preview shows, and whether a confirmation prompt appears
+are all described in the [documentation](https://hatohato25.github.io/fuzgit/docs.html).
 
-## 開発
+## Development
 
-変更のたびに、以下の順にすべて成功することを確認してください。
+After every change, make sure all of the following succeed, in this order.
 
 ```sh
 cargo build
@@ -155,10 +163,10 @@ cargo fmt --check
 cargo test
 ```
 
-- テスト方針・設計方針・モジュール構成:
-  [ドキュメント](https://hatohato25.github.io/fuzgit/docs.html#development)
-- ドキュメントサイトのソースは `docs/`（GitHub Pages が `main` ブランチの `docs/` を公開します）
+- Testing policy, design notes, and module layout:
+  [documentation](https://hatohato25.github.io/fuzgit/docs.html#development)
+- The documentation site's source lives in `docs/` (GitHub Pages publishes `docs/` from the `main` branch)
 
-## ライセンス
+## License
 
-MIT License. 全文は [LICENSE](LICENSE) を参照してください。
+MIT License. See [LICENSE](LICENSE) for the full text.
