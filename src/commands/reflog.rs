@@ -7,6 +7,7 @@ use anyhow::{Context as _, Result, anyhow};
 use crate::finder::{FinderItem, PreviewSource, select_one};
 use crate::git::exec::run_git;
 use crate::git::read::{ReflogEntry, head_reflog};
+use crate::i18n::{Language, Messages};
 
 /// 一覧に表示する短縮ハッシュの桁数。
 const SHORT_ID_LENGTH: usize = 7;
@@ -20,38 +21,46 @@ const SHORT_ID_LENGTH: usize = 7;
 ///
 /// reflog の取得、選択（中断を含む）、標準出力への書き込み、`git branch` の実行に
 /// 失敗した場合にエラーを返す。
-pub fn run(repository: &gix::Repository, branch: Option<&str>) -> Result<()> {
-    let candidates = head_reflog(repository).context("reflog の取得に失敗しました")?;
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    branch: Option<&str>,
+) -> Result<()> {
+    let candidates = head_reflog(repository).context(messages.reflog().read_failed())?;
 
-    let items = candidates.iter().map(to_item).collect();
+    let items = candidates
+        .iter()
+        .map(|entry| to_item(language, entry))
+        .collect();
     let selected = select_one(items)?;
 
     let entry = candidates
         .iter()
         .find(|candidate| candidate.selector() == selected)
-        .ok_or_else(|| anyhow!("選択された reflog エントリ `{selected}` が候補に見つかりません"))?;
+        .ok_or_else(|| anyhow!(messages.reflog().selection_not_found(&selected)))?;
 
     match branch {
         Some(name) => {
             let arguments = branch_args(name, &entry.id);
             let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-            run_git(&arguments)
-                .with_context(|| format!("ブランチ `{name}` の作成に失敗しました"))?;
+            run_git(language, &arguments)
+                .with_context(|| messages.reflog().branch_creation_failed(name))?;
 
             // git branch は成功時に何も出力しないため、作成結果を標準エラーへ知らせる
             // （標準出力はパイプ利用のために空けておく）
             writeln!(
                 std::io::stderr(),
-                "ブランチ `{name}` を {id} に作成しました",
-                id = entry.id
+                "{created}",
+                created = messages.reflog().branch_created(name, &entry.id)
             )
-            .context("標準エラー出力への書き込みに失敗しました")?;
+            .context(messages.common().stderr_write_failed())?;
         }
         None => {
             // パイプ利用を想定し、stdout にはフルハッシュ以外を混ぜない。
             // パイプ先が先に閉じた場合に panic しないよう、書き込みエラーは明示的に伝播する
             writeln!(std::io::stdout(), "{id}", id = entry.id)
-                .context("標準出力への書き込みに失敗しました")?;
+                .context(messages.common().stdout_write_failed())?;
         }
     }
 
@@ -102,11 +111,12 @@ fn branch_args(name: &str, id: &str) -> Vec<String> {
 }
 
 /// reflog エントリを finder の候補へ変換する。
-fn to_item(entry: &ReflogEntry) -> FinderItem {
+fn to_item(language: Language, entry: &ReflogEntry) -> FinderItem {
     FinderItem::new(
         display_line(entry),
         entry.selector(),
         PreviewSource::Git(preview_args(entry)),
+        language.messages(),
     )
 }
 
@@ -171,6 +181,57 @@ mod tests {
     #[test]
     fn an_item_keeps_the_selector_as_its_key() {
         // 同じコミット・同じメッセージのエントリが並び得るため、キーには位置を使う
-        assert_eq!(to_item(&entry(12, "commit: first")).key(), "HEAD@{12}");
+        assert_eq!(
+            to_item(Language::Japanese, &entry(12, "commit: first")).key(),
+            "HEAD@{12}"
+        );
+    }
+
+    #[test]
+    fn every_reflog_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let reflog = language.messages().reflog();
+
+            assert!(
+                !reflog.read_failed().trim().is_empty(),
+                "{language:?} left a message empty"
+            );
+            assert!(
+                reflog.selection_not_found("HEAD@{3}").contains("HEAD@{3}"),
+                "{language:?} must mention the selected entry"
+            );
+            assert!(
+                reflog
+                    .branch_creation_failed("recovered")
+                    .contains("recovered"),
+                "{language:?} must mention the branch"
+            );
+
+            let created = reflog.branch_created("recovered", COMMIT_ID);
+            assert!(
+                created.contains("recovered") && created.contains(COMMIT_ID),
+                "{language:?} must mention the branch and the commit: {created}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reflog_wording_is_translated() {
+        let japanese = Language::Japanese.messages().reflog();
+        let english = Language::English.messages().reflog();
+
+        assert_ne!(japanese.read_failed(), english.read_failed());
+        assert_ne!(
+            japanese.selection_not_found("HEAD@{0}"),
+            english.selection_not_found("HEAD@{0}")
+        );
+        assert_ne!(
+            japanese.branch_creation_failed("recovered"),
+            english.branch_creation_failed("recovered")
+        );
+        assert_ne!(
+            japanese.branch_created("recovered", COMMIT_ID),
+            english.branch_created("recovered", COMMIT_ID)
+        );
     }
 }

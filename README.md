@@ -21,9 +21,6 @@ documentation site.**
 - **<https://hatohato25.github.io/fuzgit/>** — landing page
 - **<https://hatohato25.github.io/fuzgit/docs.html>** — documentation (English / 日本語)
 
-Note: the CLI's own messages, headers, and prompts are currently in Japanese, so the terminal
-examples below show the actual Japanese output.
-
 ## Requirements
 
 - **`git` must be installed on your system (required)**
@@ -61,6 +58,42 @@ git show "$(gz log)"   # pick a commit and get its full hash
 ```
 
 Running `gz` with no arguments, or `gz --help`, lists the subcommands.
+
+## Language
+
+Messages, prompts, finder headers, and `--help` come in **English and Japanese**. The default is
+English; switch to Japanese with:
+
+```sh
+git config --global fuzgit.lang ja   # persistent. --local sets it per repository
+gz --lang ja branch                  # one-off, on any subcommand
+```
+
+The display language is resolved in this order, and the first layer that decides it wins.
+
+| Priority | Source |
+|---|---|
+| 1 | `--lang <ja\|en\|auto>` (global option, available on every subcommand) |
+| 2 | `FUZGIT_LANG` environment variable |
+| 3 | `git config fuzgit.lang` (system / global / local / worktree all apply as usual) |
+| 4 | `LC_ALL` → `LC_MESSAGES` → `LANGUAGE` → `LANG` |
+| 5 | fallback: `en` |
+
+Layers 1-3 are explicit instructions to fuzgit, so any value other than `ja` / `en` / `auto` stops
+with an error. Layer 4 only describes the environment, so a value fuzgit cannot interpret
+(including `C` and `POSIX`) is not an error — resolution just moves on to the fallback. `auto`
+skips the remaining explicit layers and resolves from the environment. fuzgit has no configuration
+file of its own; it borrows git's `fuzgit.lang` key, which is also readable outside a repository.
+
+Two limits are worth knowing:
+
+- **Messages from git itself are not guaranteed to be translated.** fuzgit tells the git commands
+  it runs which language to speak, but whether a catalog exists depends on how git was built (NLS)
+  and on the installed locale data. In particular **git upstream ships no Japanese catalog**, so
+  git's own output stays English even when you pick `ja`.
+- **Text that clap prints on its own (`Usage:`, `Options:`, `Commands:`, parser errors) stays in
+  English**, because clap 4 has no localization hook. fuzgit's own descriptions in `--help` do
+  switch.
 
 ## Highlights
 
@@ -101,7 +134,7 @@ not silently dropped — the number excluded is shown in the header.
 
 ```
 $ gz fetch --siblings
-現在のリポジトリを選択済みにしています。Tab: 選択の切替 / Enter: 取得  |  除外 1 件（リモート未登録 / bare）
+The current repository is preselected. Tab: toggle the selection / Enter: fetch  |  1 excluded (no remote / bare)
 >>mike  main  origin
   alpha  main  origin
   zulu  main  origin
@@ -121,7 +154,7 @@ $ gz pull
 [2/4] alpha
 [3/4] diverged
 [4/4] zeta
-成功 3 件 / 失敗 1 件（失敗: diverged）
+3 succeeded / 1 failed (failed: diverged)
 ```
 
 ## Commands

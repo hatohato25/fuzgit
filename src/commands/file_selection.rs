@@ -6,6 +6,7 @@
 use anyhow::{Result, bail};
 
 use crate::git::read::FileChange;
+use crate::i18n::Messages;
 
 /// リネーム・コピーの変更元パスを git の対象に含めるかどうか。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +88,7 @@ fn display_line(change: &FileChange) -> String {
 /// 選択されたキーが一覧に含まれない場合にエラーを返す（対象を取り違えたまま
 /// git 操作を実行しないよう、暗黙に読み飛ばさない）。
 fn resolve_by_key<'a, T>(
+    messages: &dyn Messages,
     items: &'a [T],
     selected: &[String],
     key: impl Fn(&T) -> &str,
@@ -98,8 +100,9 @@ fn resolve_by_key<'a, T>(
         .collect();
     if !missing.is_empty() {
         bail!(
-            "選択されたファイル {} が候補に見つかりません",
-            missing.join(", ")
+            messages
+                .file_selection()
+                .selection_not_found(&missing.join(", "))
         );
     }
 
@@ -115,10 +118,13 @@ fn resolve_by_key<'a, T>(
 ///
 /// [`resolve_by_key`] と同じ。
 pub fn resolve<'a>(
+    messages: &dyn Messages,
     candidates: &'a [FileCandidate],
     selected: &[String],
 ) -> Result<Vec<&'a FileCandidate>> {
-    resolve_by_key(candidates, selected, |candidate| candidate.key.as_str())
+    resolve_by_key(messages, candidates, selected, |candidate| {
+        candidate.key.as_str()
+    })
 }
 
 /// 選択されたパスに対応する変更ファイルを、一覧の並び順で返す。
@@ -132,10 +138,11 @@ pub fn resolve<'a>(
 ///
 /// [`resolve_by_key`] と同じ。
 pub fn resolve_changes<'a>(
+    messages: &dyn Messages,
     changes: &'a [FileChange],
     selected: &[String],
 ) -> Result<Vec<&'a FileChange>> {
-    resolve_by_key(changes, selected, |change| change.path.as_str())
+    resolve_by_key(messages, changes, selected, |change| change.path.as_str())
 }
 
 /// 選択された候補が git の対象とするパスを、重複を除いて集める。
@@ -153,6 +160,7 @@ pub fn target_paths(selected: &[&FileCandidate]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Language;
 
     fn change(path: &str, code: &str) -> FileChange {
         let mut codes = code.chars();
@@ -244,7 +252,8 @@ mod tests {
         let candidates = candidates();
         let selected = vec!["c.txt".to_owned(), "a.txt".to_owned()];
 
-        let resolved = resolve(&candidates, &selected).expect("all keys are candidates");
+        let resolved = resolve(Language::Japanese.messages(), &candidates, &selected)
+            .expect("all keys are candidates");
 
         assert_eq!(keys(&resolved), ["a.txt", "c.txt"]);
     }
@@ -254,7 +263,8 @@ mod tests {
         let candidates = candidates();
         let selected = vec!["b.txt".to_owned()];
 
-        let resolved = resolve(&candidates, &selected).expect("all keys are candidates");
+        let resolved = resolve(Language::Japanese.messages(), &candidates, &selected)
+            .expect("all keys are candidates");
 
         assert_eq!(keys(&resolved), ["b.txt"]);
     }
@@ -264,7 +274,8 @@ mod tests {
         let candidates = candidates();
         let selected = vec!["a.txt".to_owned(), "z.txt".to_owned()];
 
-        let err = resolve(&candidates, &selected).expect_err("unknown key must be rejected");
+        let err = resolve(Language::Japanese.messages(), &candidates, &selected)
+            .expect_err("unknown key must be rejected");
 
         assert!(
             err.to_string().contains("z.txt"),
@@ -281,7 +292,8 @@ mod tests {
         ];
         let selected = vec!["c.txt".to_owned(), "a.txt".to_owned()];
 
-        let resolved = resolve_changes(&changes, &selected).expect("all paths are listed");
+        let resolved = resolve_changes(Language::Japanese.messages(), &changes, &selected)
+            .expect("all paths are listed");
 
         assert_eq!(
             resolved
@@ -297,7 +309,8 @@ mod tests {
         let changes = [change("a.txt", "M ")];
         let selected = vec!["z.txt".to_owned()];
 
-        let err = resolve_changes(&changes, &selected).expect_err("unknown path must be rejected");
+        let err = resolve_changes(Language::Japanese.messages(), &changes, &selected)
+            .expect_err("unknown path must be rejected");
 
         assert!(
             err.to_string().contains("z.txt"),
@@ -311,7 +324,8 @@ mod tests {
         let changes = [rename("new.txt", "old.txt", "R ")];
         let selected = vec!["new.txt".to_owned()];
 
-        let resolved = resolve_changes(&changes, &selected).expect("the new path is the key");
+        let resolved = resolve_changes(Language::Japanese.messages(), &changes, &selected)
+            .expect("the new path is the key");
 
         assert_eq!(resolved[0].original_path.as_deref(), Some("old.txt"));
     }
@@ -340,6 +354,36 @@ mod tests {
             target_paths(&[&rename, &plain]),
             ["new.txt", "shared.txt"],
             "a duplicated path must not be passed to git twice"
+        );
+    }
+
+    #[test]
+    fn every_file_selection_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let missing = language
+                .messages()
+                .file_selection()
+                .selection_not_found("a.txt, z.txt");
+
+            assert!(!missing.trim().is_empty(), "{language:?} left it empty");
+            assert!(
+                missing.contains("a.txt") && missing.contains("z.txt"),
+                "{language:?} must name every missing path: {missing}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_file_selection_wording_is_translated() {
+        assert_ne!(
+            Language::Japanese
+                .messages()
+                .file_selection()
+                .selection_not_found("a.txt"),
+            Language::English
+                .messages()
+                .file_selection()
+                .selection_not_found("a.txt")
         );
     }
 }

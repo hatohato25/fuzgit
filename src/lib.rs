@@ -8,6 +8,7 @@ pub mod commands;
 pub mod error;
 pub mod finder;
 pub mod git;
+pub mod i18n;
 
 #[cfg(test)]
 mod test_support;

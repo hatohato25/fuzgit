@@ -22,30 +22,7 @@ use crate::error::Error;
 use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with};
 use crate::git::exec::run_git;
 use crate::git::read::{PullScan, PullTarget, operation_in_progress, pull_targets};
-
-/// 取り込める候補が 1 件も無い場合の案内。
-///
-/// 原因は upstream 未設定・追跡参照を組み立てられない設定・リモート未登録・他の worktree で
-/// 使用中のいずれかであるため、候補の条件を添えたうえで upstream の設定方法を示す
-/// （`gz sync` の `resolve_target` と同じ語彙）。
-const NO_CANDIDATE_MESSAGE: &str = "upstream へ追随させられるブランチがありません\
-（upstream が設定され、そのリモートが登録済みのローカルブランチが対象です）。\
-`gz push -u` で push するか、`git branch --set-upstream-to=<remote>/<branch>` で設定してください";
-
-/// 1 件でも取り込めなかった場合にアプリ層へ返すメッセージ。
-///
-/// 個々の失敗理由は git が実行時にその場で表示済みであり、ここでは再掲しない
-/// （`gz fetch --siblings` の `PARTIAL_FAILURE_MESSAGE` と同じ扱い）。
-const PARTIAL_FAILURE_MESSAGE: &str = "一部のブランチで取り込みに失敗しました";
-
-/// fast-forward できなかったブランチがある場合にだけ添える案内。
-///
-/// 履歴の統合方法（merge コミットを作るのか、作り直すのか）はユーザーの明示指定に限るため、
-/// `gz pull` は方式を切り替えて再実行することはせず、次の手段を示すだけに留める
-/// （design.md「`gz sync` との境界」）。`gz sync` の対象は現在のブランチであるため、
-/// 切り替えが必要なことも併せて示す。
-const FAST_FORWARD_GUIDANCE: &str = "fast-forward できなかったブランチは、\
-そのブランチへ切り替えてから `gz sync --rebase` または `gz sync --merge` で取り込めます";
+use crate::i18n::{Language, Messages};
 
 /// 自分自身のリポジトリを指す `git fetch` の取得元。
 ///
@@ -69,26 +46,8 @@ const UPSTREAM_ARROW: &str = "  →  ";
 /// リモート追跡参照の接頭辞。表示用の短縮名（`origin/main`）を得るために取り除く。
 const TRACKING_PREFIX: &str = "refs/remotes/";
 
-/// 候補一覧の上部に固定表示する操作説明。
-///
-/// 取り込み方式は選ばせないため、何が起きるのか（fast-forward のみ）を選ぶ前に示す。
-const PULL_HEADER: &str =
-    "現在のブランチを選択済みにしています。Tab: 選択の切替 / Enter: fast-forward のみで取り込み";
-
 /// ヘッダー内の区切り（`gz fetch --siblings` と同じ体裁）。
 const HEADER_SEPARATOR: &str = "  |  ";
-
-/// finder を省略して対象を確定したことを伝える 1 行の後半（省略した理由）。
-///
-/// finder が出ない理由をその場で示すために添える（`gz fetch` と同方式）。
-const SINGLE_TARGET_REASON: &str = "候補が 1 件のため、選択を省略しました";
-
-/// プレビューで未取り込みのコミットを示すセクションの見出し。
-///
-/// 比較の相手はローカルに保存済みの追跡参照であり、リモートの現在の状態ではない。
-/// いつの情報なのかを見出しに書いて、古い内容を最新と取り違えないようにする
-/// （同じ理由で候補行にも ahead/behind は載せない。[`display_line`] を参照）。
-const UNMERGED_SECTION: &str = "未取り込みのコミット（前回の fetch 時点）";
 
 /// プレビューに表示する最大コミット数。
 const PREVIEW_COMMIT_COUNT: &str = "50";
@@ -131,45 +90,51 @@ impl PullDecision {
 /// 候補の生成に失敗した場合、取り込めるブランチが 1 件も無い場合、選択に失敗した場合
 /// （中断を含む）にエラーを返す。取り込みが 1 件でも失敗した場合も、集計を表示したうえで
 /// エラーを返す（成功した分は巻き戻さない。design.md「abort によるロールバックを採らない理由」）。
-pub fn run(repository: &gix::Repository) -> Result<()> {
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+) -> Result<()> {
     // 進行中の merge / rebase を残したまま新しい取り込みは開始できないため、
     // 候補を出す前に復帰メニューへ委譲する（`gz sync` と同じ）
     if let Some(operation) = operation_in_progress(repository) {
-        return in_progress::run(repository, operation);
+        return in_progress::run(language, messages, repository, operation);
     }
 
-    let scan = pull_targets(repository).context("取り込み対象の候補生成に失敗しました")?;
+    let scan = pull_targets(repository).context(messages.pull().targets_read_failed())?;
 
     let targets = match PullDecision::from_targets(&scan.targets) {
-        PullDecision::NoCandidate => bail!(NO_CANDIDATE_MESSAGE),
+        PullDecision::NoCandidate => bail!(messages.pull().no_candidates()),
         PullDecision::Fixed => {
             // 候補は 1 件だけ（[`PullDecision::Fixed`]）。finder を出さない以上、
             // どのブランチを取り込むのかはここでしか示せない
             let targets: Vec<&PullTarget> = scan.targets.iter().collect();
             for target in &targets {
-                report_target(&mut std::io::stderr(), target)?;
+                report_target(messages, &mut std::io::stderr(), target)?;
             }
             targets
         }
         PullDecision::Choose => {
             let options = FinderOptions::new(SelectionMode::Multi)
-                .with_header(pull_header(&scan))
+                .with_header(pull_header(messages, &scan))
                 // 事前選択は表示文字列の完全一致で判定される（`crate::finder::FinderOptions`）
                 .with_preselect(preselect(&scan.targets));
-            let selected = select_many_with(items(&scan.targets), &options)?;
+            let selected = select_many_with(items(language, messages, &scan.targets), &options)?;
 
             // skim は選択した順に返すため、候補一覧の順序（現在のブランチが先頭、
             // 以降は名前順）へ揃え直したうえで、キーが候補に含まれることを検証する
-            in_candidate_order(&scan.targets, &selected)?
+            in_candidate_order(messages, &scan.targets, &selected)?
         }
     };
 
-    let summary = pull_each(&targets, &mut std::io::stderr(), run_git)?;
-    report_summary(&mut std::io::stderr(), &summary)?;
+    let summary = pull_each(messages, &targets, &mut std::io::stderr(), |arguments| {
+        run_git(language, arguments)
+    })?;
+    report_summary(messages, &mut std::io::stderr(), &summary)?;
 
     if summary.has_failure() {
         // 集計は表示済み。ここでは終了コードを 1 にするためにエラーを返す
-        bail!(PARTIAL_FAILURE_MESSAGE);
+        bail!(messages.pull().partial_failure());
     }
 
     Ok(())
@@ -212,14 +177,11 @@ fn tracking_name(target: &PullTarget) -> &str {
 /// 取り込み方式（fast-forward のみ）は選ばせないため操作説明として常に示し、
 /// 除外件数は「黙って消さない」ために除外があるときだけ添える
 /// （`gz fetch --siblings` の `sibling_header` と同じ体裁）。
-fn pull_header(scan: &PullScan) -> String {
-    let mut sections = vec![PULL_HEADER.to_owned()];
+fn pull_header(messages: &dyn Messages, scan: &PullScan) -> String {
+    let mut sections = vec![messages.pull().header().to_owned()];
 
     if scan.excluded > 0 {
-        sections.push(format!(
-            "除外 {excluded} 件（upstream 未設定 / リモート未登録 / 他の worktree で使用中）",
-            excluded = scan.excluded
-        ));
+        sections.push(messages.pull().excluded_count(scan.excluded));
     }
 
     sections.join(HEADER_SEPARATOR)
@@ -240,14 +202,15 @@ fn preselect(targets: &[PullTarget]) -> Vec<String> {
 /// 取り込み対象を finder の候補へ変換する。
 ///
 /// 照合キーはブランチ名（[`pull_targets`] が列挙した値であり、ユーザーの自由入力ではない）。
-fn items(targets: &[PullTarget]) -> Vec<FinderItem> {
+fn items(language: Language, messages: &dyn Messages, targets: &[PullTarget]) -> Vec<FinderItem> {
     targets
         .iter()
         .map(|target| {
             FinderItem::new(
                 display_line(target),
                 target.branch.clone(),
-                preview_source(target),
+                preview_source(messages, target),
+                language.messages(),
             )
         })
         .collect()
@@ -259,9 +222,9 @@ fn items(targets: &[PullTarget]) -> Vec<FinderItem> {
 /// （design.md「候補生成・プレビューでネットワークアクセスを行わない」）。
 /// プレビューは選択項目ごとに同期実行されるため、ここで往復遅延や認証プロンプトを
 /// 挟むと描画がそのままブロックされる。
-fn preview_source(target: &PullTarget) -> PreviewSource {
+fn preview_source(messages: &dyn Messages, target: &PullTarget) -> PreviewSource {
     PreviewSource::Composite(vec![(
-        UNMERGED_SECTION.to_owned(),
+        messages.pull().unmerged_section().to_owned(),
         PreviewSource::Git(preview_args(target)),
     )])
 }
@@ -300,6 +263,7 @@ fn preview_args(target: &PullTarget) -> Vec<String> {
 /// 候補一覧に無いブランチ名が含まれていた場合にエラーを返す（対象を取り違えたまま
 /// ローカルの参照を更新しないよう、暗黙に読み飛ばさない）。
 fn in_candidate_order<'a>(
+    messages: &dyn Messages,
     targets: &'a [PullTarget],
     selected: &[String],
 ) -> Result<Vec<&'a PullTarget>> {
@@ -309,10 +273,7 @@ fn in_candidate_order<'a>(
         .map(String::as_str)
         .collect();
     if !missing.is_empty() {
-        bail!(
-            "選択されたブランチ {branches} が候補に見つかりません",
-            branches = missing.join(", ")
-        );
+        bail!(messages.pull().selection_not_found(&missing.join(", ")));
     }
 
     Ok(targets
@@ -356,7 +317,7 @@ impl PullSummary {
 ///
 /// 並列化しない（git 自身も複数リモートの fetch を既定で逐次実行する。man git-fetch）。
 /// 実行そのものを引数で受け取るのは、ネットワークや git の有無に依存せず集計と中断の
-/// 判断を単体テストできるようにするため（本番は [`run_git`] を渡す。
+/// 判断を単体テストできるようにするため（本番は表示言語を束ねた [`run_git`] を渡す。
 /// [`crate::commands::fetch`] の `fetch_each` と同方式）。
 ///
 /// # Errors
@@ -365,21 +326,26 @@ impl PullSummary {
 /// 環境の問題でありブランチごとの失敗ではないため、残りを実行せずその場で返す。
 /// 進捗の書き込みに失敗した場合も同様。
 fn pull_each(
+    messages: &dyn Messages,
     targets: &[&PullTarget],
     writer: &mut impl std::io::Write,
     mut run: impl FnMut(&[&str]) -> crate::error::Result<()>,
 ) -> Result<PullSummary> {
-    let failed_remotes = fetch_remotes(targets, &mut run)?;
+    let failed_remotes = fetch_remotes(messages, targets, &mut run)?;
 
     let mut summary = PullSummary::default();
     for (index, target) in targets.iter().enumerate() {
         // git 自身の出力（更新された参照の一覧・fast-forward できない旨）も標準エラーへ
         // 出るため、この区切りが無いとどのブランチの出力なのか読み取れない
-        report_line(writer, &progress_line(index, targets.len(), target))?;
+        report_line(
+            messages,
+            writer,
+            &progress_line(index, targets.len(), target),
+        )?;
 
         if failed_remotes.iter().any(|remote| remote == &target.remote) {
             // 黙って飛ばすと成功したように見えるため、理由を示したうえで失敗に数える
-            report_line(writer, &skipped_line(target))?;
+            report_line(messages, writer, &skipped_line(messages, target))?;
             summary.failed.push(target.branch.clone());
             continue;
         }
@@ -397,10 +363,8 @@ fn pull_each(
                 summary.not_fast_forwarded += 1;
             }
             Err(error) => {
-                return Err(anyhow::Error::from(error).context(format!(
-                    "`{branch}` の取り込みを開始できませんでした",
-                    branch = target.branch
-                )));
+                return Err(anyhow::Error::from(error)
+                    .context(messages.pull().integration_start_failed(&target.branch)));
             }
         }
     }
@@ -415,6 +379,7 @@ fn pull_each(
 /// git の起動自体に失敗した場合（[`Error::GitNotFound`] / [`Error::GitSpawnFailed`]）は
 /// 残りのリモートを取得せずその場で返す。
 fn fetch_remotes(
+    messages: &dyn Messages,
     targets: &[&PullTarget],
     run: &mut impl FnMut(&[&str]) -> crate::error::Result<()>,
 ) -> Result<Vec<String>> {
@@ -429,9 +394,9 @@ fn fetch_remotes(
             // 到達不能・認証拒否は他のリモートと無関係なので、記録して次のリモートへ進む
             Err(Error::GitRunFailed { .. }) => failed.push(remote),
             Err(error) => {
-                return Err(anyhow::Error::from(error).context(format!(
-                    "リモート `{remote}` からの取得を開始できませんでした"
-                )));
+                return Err(
+                    anyhow::Error::from(error).context(messages.pull().fetch_start_failed(&remote))
+                );
             }
         }
     }
@@ -506,27 +471,18 @@ fn progress_line(index: usize, total: usize, target: &PullTarget) -> String {
 }
 
 /// upstream のリモートを取得できなかったために取り込みを飛ばすことを伝える 1 行。
-fn skipped_line(target: &PullTarget) -> String {
-    format!(
-        "`{remote}` からの取得に失敗したため、`{branch}` の取り込みを飛ばしました",
-        remote = target.remote,
-        branch = target.branch
-    )
+fn skipped_line(messages: &dyn Messages, target: &PullTarget) -> String {
+    messages.pull().skipped(&target.remote, &target.branch)
 }
 
 /// 実行結果の集計を 1 行に組み立てる（`gz fetch --siblings` と同形式）。
-fn summary_line(summary: &PullSummary) -> String {
-    let mut line = format!(
-        "成功 {succeeded} 件 / 失敗 {failed} 件",
-        succeeded = summary.succeeded,
-        failed = summary.failed.len()
-    );
+fn summary_line(messages: &dyn Messages, summary: &PullSummary) -> String {
+    let mut line = messages
+        .common()
+        .run_summary(summary.succeeded, summary.failed.len());
 
     if summary.has_failure() {
-        line.push_str(&format!(
-            "（失敗: {branches}）",
-            branches = summary.failed.join(", ")
-        ));
+        line.push_str(&messages.common().failed_targets(&summary.failed.join(", ")));
     }
 
     line
@@ -539,13 +495,17 @@ fn summary_line(summary: &PullSummary) -> String {
 /// # Errors
 ///
 /// 書き込みに失敗した場合にエラーを返す。
-fn report_summary(writer: &mut impl std::io::Write, summary: &PullSummary) -> Result<()> {
-    report_line(writer, &summary_line(summary))?;
+fn report_summary(
+    messages: &dyn Messages,
+    writer: &mut impl std::io::Write,
+    summary: &PullSummary,
+) -> Result<()> {
+    report_line(messages, writer, &summary_line(messages, summary))?;
 
     // 案内は fast-forward できなかった場合にだけ添える。全件成功時や、リモートの取得に
     // 失敗しただけの場合に出すと、実行していない操作を促すことになる
     if summary.has_fast_forward_failure() {
-        report_line(writer, FAST_FORWARD_GUIDANCE)?;
+        report_line(messages, writer, messages.pull().fast_forward_guidance())?;
     }
 
     Ok(())
@@ -556,18 +516,19 @@ fn report_summary(writer: &mut impl std::io::Write, summary: &PullSummary) -> Re
 /// # Errors
 ///
 /// 書き込みに失敗した場合にエラーを返す。
-fn report_line(writer: &mut impl std::io::Write, line: &str) -> Result<()> {
-    writeln!(writer, "{line}").context("標準エラー出力への書き込みに失敗しました")?;
+fn report_line(
+    messages: &dyn Messages,
+    writer: &mut impl std::io::Write,
+    line: &str,
+) -> Result<()> {
+    writeln!(writer, "{line}").context(messages.common().stderr_write_failed())?;
 
     Ok(())
 }
 
 /// finder を省略して確定した対象を伝える 1 行を組み立てる。
-fn fixed_target_message(target: &PullTarget) -> String {
-    format!(
-        "`{branch}` を取り込みます（{SINGLE_TARGET_REASON}）",
-        branch = target.branch
-    )
+fn fixed_target_message(messages: &dyn Messages, target: &PullTarget) -> String {
+    messages.pull().fixed_target(&target.branch)
 }
 
 /// finder を省略して確定した対象を書き出す。
@@ -577,13 +538,22 @@ fn fixed_target_message(target: &PullTarget) -> String {
 /// # Errors
 ///
 /// 書き込みに失敗した場合にエラーを返す。
-fn report_target(writer: &mut impl std::io::Write, target: &PullTarget) -> Result<()> {
-    report_line(writer, &fixed_target_message(target))
+fn report_target(
+    messages: &dyn Messages,
+    writer: &mut impl std::io::Write,
+    target: &PullTarget,
+) -> Result<()> {
+    report_line(messages, writer, &fixed_target_message(messages, target))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 既定（日本語）の文言一式。文言そのものを固定するテスト以外はこれを使う。
+    fn messages() -> &'static dyn Messages {
+        Language::Japanese.messages()
+    }
 
     /// 候補 1 件分を組み立てる。
     fn target(branch: &str, is_current: bool) -> PullTarget {
@@ -674,14 +644,19 @@ mod tests {
 
     #[test]
     fn the_empty_result_explains_how_to_set_an_upstream() {
-        assert!(
-            NO_CANDIDATE_MESSAGE.contains("gz push -u"),
-            "the fuzgit way of setting an upstream should be offered: {NO_CANDIDATE_MESSAGE}"
-        );
-        assert!(
-            NO_CANDIDATE_MESSAGE.contains("git branch --set-upstream-to=<remote>/<branch>"),
-            "the plain git way should be offered too: {NO_CANDIDATE_MESSAGE}"
-        );
+        // コマンド列は翻訳しないため、どちらの言語でも同じ文字列が含まれる
+        for language in [Language::Japanese, Language::English] {
+            let message = language.messages().pull().no_candidates();
+
+            assert!(
+                message.contains("gz push -u"),
+                "the fuzgit way of setting an upstream should be offered: {message}"
+            );
+            assert!(
+                message.contains("git branch --set-upstream-to=<remote>/<branch>"),
+                "the plain git way should be offered too: {message}"
+            );
+        }
     }
 
     #[test]
@@ -748,7 +723,7 @@ mod tests {
 
     #[test]
     fn the_header_says_that_only_fast_forward_is_used() {
-        let header = pull_header(&scan(targets(), 0));
+        let header = pull_header(messages(), &scan(targets(), 0));
 
         assert!(
             header.contains("fast-forward"),
@@ -759,7 +734,7 @@ mod tests {
 
     #[test]
     fn the_header_states_how_many_branches_were_left_out() {
-        let header = pull_header(&scan(targets(), 2));
+        let header = pull_header(messages(), &scan(targets(), 2));
 
         assert!(header.contains('2'), "the count should be shown: {header}");
         assert!(
@@ -771,7 +746,7 @@ mod tests {
 
     #[test]
     fn nothing_is_said_about_exclusions_when_there_were_none() {
-        let header = pull_header(&scan(targets(), 0));
+        let header = pull_header(messages(), &scan(targets(), 0));
 
         assert!(
             !header.contains("除外"),
@@ -797,7 +772,7 @@ mod tests {
 
     #[test]
     fn a_candidate_is_keyed_by_its_branch_name() {
-        let items = items(&targets());
+        let items = items(Language::Japanese, messages(), &targets());
 
         assert_eq!(
             items.iter().map(FinderItem::key).collect::<Vec<_>>(),
@@ -809,7 +784,7 @@ mod tests {
     fn the_preview_lists_the_commits_that_would_be_integrated() {
         let candidate = target("main", true);
 
-        let sections = sections(&preview_source(&candidate));
+        let sections = sections(&preview_source(messages(), &candidate));
 
         assert_eq!(sections.len(), 1, "unexpected preview: {sections:?}");
         assert_eq!(
@@ -828,7 +803,7 @@ mod tests {
 
     #[test]
     fn the_preview_label_says_the_information_is_as_old_as_the_last_fetch() {
-        let sections = sections(&preview_source(&target("main", true)));
+        let sections = sections(&preview_source(messages(), &target("main", true)));
 
         assert!(
             sections[0].0.contains("前回の fetch"),
@@ -841,7 +816,7 @@ mod tests {
     fn no_preview_reaches_the_network() {
         // プレビューが読むのは保存済みの追跡参照だけ（design.md の設計原則）
         for candidate in targets() {
-            for (label, arguments) in sections(&preview_source(&candidate)) {
+            for (label, arguments) in sections(&preview_source(messages(), &candidate)) {
                 assert_eq!(
                     arguments.first().map(String::as_str),
                     Some("log"),
@@ -863,7 +838,7 @@ mod tests {
         // skim は選択した順に返す
         let selected = ["zulu", "main"].map(str::to_owned);
 
-        let targets = in_candidate_order(&candidates, &selected)
+        let targets = in_candidate_order(messages(), &candidates, &selected)
             .expect("keys taken from the candidates should resolve");
 
         assert_eq!(branches(&targets), ["main", "zulu"]);
@@ -874,8 +849,8 @@ mod tests {
         let candidates = targets();
         let selected = ["main".to_owned(), "elsewhere".to_owned()];
 
-        let err =
-            in_candidate_order(&candidates, &selected).expect_err("an unknown branch is rejected");
+        let err = in_candidate_order(messages(), &candidates, &selected)
+            .expect_err("an unknown branch is rejected");
 
         assert!(
             err.to_string().contains("elsewhere"),
@@ -889,21 +864,21 @@ mod tests {
         let selected = ["mai".to_owned()];
 
         assert!(
-            in_candidate_order(&candidates, &selected).is_err(),
+            in_candidate_order(messages(), &candidates, &selected).is_err(),
             "the key must match a candidate exactly"
         );
     }
 
     #[test]
     fn the_fixed_target_is_named_in_the_line_that_replaces_the_finder() {
-        let message = fixed_target_message(&target("main", true));
+        let message = fixed_target_message(messages(), &target("main", true));
 
         assert!(
             message.contains("main"),
             "the branch should be named: {message}"
         );
         assert!(
-            message.contains(SINGLE_TARGET_REASON),
+            message.contains(messages().pull().single_target_reason()),
             "the reason the finder was skipped should be given: {message}"
         );
         assert_eq!(message.lines().count(), 1, "1 行に収める: {message}");
@@ -914,11 +889,14 @@ mod tests {
         let only = target("main", true);
         let mut written = Vec::new();
 
-        report_target(&mut written, &only).expect("writing to a buffer should succeed");
+        report_target(messages(), &mut written, &only).expect("writing to a buffer should succeed");
 
         assert_eq!(
             String::from_utf8(written).expect("the message should be utf-8"),
-            format!("{message}\n", message = fixed_target_message(&only))
+            format!(
+                "{message}\n",
+                message = fixed_target_message(messages(), &only)
+            )
         );
     }
 
@@ -995,8 +973,8 @@ mod tests {
         let (calls, runner) = recording(succeed);
         let mut written = Vec::new();
 
-        let summary =
-            pull_each(&targets, &mut written, runner).expect("a successful run should not fail");
+        let summary = pull_each(messages(), &targets, &mut written, runner)
+            .expect("a successful run should not fail");
 
         assert_eq!(summary.succeeded, 3);
         assert!(summary.failed.is_empty());
@@ -1025,7 +1003,7 @@ mod tests {
         });
         let mut written = Vec::new();
 
-        let summary = pull_each(&targets, &mut written, runner)
+        let summary = pull_each(messages(), &targets, &mut written, runner)
             .expect("a remote failure is recorded, not propagated");
 
         assert_eq!(
@@ -1051,7 +1029,7 @@ mod tests {
 
     #[test]
     fn a_skipped_branch_names_both_the_remote_and_the_branch() {
-        let line = skipped_line(&target_on("upstream", "alpha", false));
+        let line = skipped_line(messages(), &target_on("upstream", "alpha", false));
 
         assert!(
             line.contains("upstream"),
@@ -1130,7 +1108,7 @@ mod tests {
         let (_calls, runner) = recording(succeed);
         let mut written = Vec::new();
 
-        pull_each(&targets, &mut written, runner).expect("the run should succeed");
+        pull_each(messages(), &targets, &mut written, runner).expect("the run should succeed");
 
         let text = String::from_utf8(written).expect("the progress should be utf-8");
         assert_eq!(
@@ -1153,7 +1131,7 @@ mod tests {
         });
         let mut written = Vec::new();
 
-        let summary = pull_each(&targets, &mut written, runner)
+        let summary = pull_each(messages(), &targets, &mut written, runner)
             .expect("a branch failure is recorded, not propagated");
 
         assert_eq!(summary.succeeded, 2);
@@ -1173,7 +1151,7 @@ mod tests {
         let (calls, runner) = recording(|_args: &[String]| Err(Error::GitNotFound));
         let mut written = Vec::new();
 
-        let err = pull_each(&targets, &mut written, runner)
+        let err = pull_each(messages(), &targets, &mut written, runner)
             .expect_err("a broken environment must stop the run");
 
         assert!(
@@ -1210,7 +1188,7 @@ mod tests {
         });
         let mut written = Vec::new();
 
-        let err = pull_each(&targets, &mut written, runner)
+        let err = pull_each(messages(), &targets, &mut written, runner)
             .expect_err("a broken environment must stop the run");
 
         assert!(
@@ -1232,7 +1210,7 @@ mod tests {
         };
 
         assert!(!summary.has_failure());
-        assert_eq!(summary_line(&summary), "成功 3 件 / 失敗 0 件");
+        assert_eq!(summary_line(messages(), &summary), "成功 3 件 / 失敗 0 件");
     }
 
     #[test]
@@ -1244,7 +1222,7 @@ mod tests {
         };
 
         assert!(summary.has_failure());
-        let line = summary_line(&summary);
+        let line = summary_line(messages(), &summary);
         assert!(
             line.contains("成功 1 件 / 失敗 2 件"),
             "both counts should be shown: {line}"
@@ -1264,7 +1242,8 @@ mod tests {
         };
         let mut written = Vec::new();
 
-        report_summary(&mut written, &summary).expect("writing to a buffer should succeed");
+        report_summary(messages(), &mut written, &summary)
+            .expect("writing to a buffer should succeed");
 
         let text = String::from_utf8(written).expect("the summary should be utf-8");
         assert_eq!(
@@ -1287,7 +1266,8 @@ mod tests {
         };
         let mut written = Vec::new();
 
-        report_summary(&mut written, &summary).expect("writing to a buffer should succeed");
+        report_summary(messages(), &mut written, &summary)
+            .expect("writing to a buffer should succeed");
 
         let text = String::from_utf8(written).expect("the summary should be utf-8");
         assert!(
@@ -1308,12 +1288,178 @@ mod tests {
         };
         let mut written = Vec::new();
 
-        report_summary(&mut written, &summary).expect("writing to a buffer should succeed");
+        report_summary(messages(), &mut written, &summary)
+            .expect("writing to a buffer should succeed");
 
         let text = String::from_utf8(written).expect("the summary should be utf-8");
         assert!(
             !text.contains("gz sync"),
             "the failure was not a divergence: {text}"
+        );
+    }
+
+    // --- 文言（FR-27） ---
+
+    /// 引数を取らない文言をまとめて取り出す。
+    fn plain_texts(language: Language) -> Vec<&'static str> {
+        let pull = language.messages().pull();
+
+        vec![
+            pull.targets_read_failed(),
+            pull.no_candidates(),
+            pull.header(),
+            pull.single_target_reason(),
+            pull.unmerged_section(),
+            pull.fast_forward_guidance(),
+            pull.partial_failure(),
+        ]
+    }
+
+    /// 引数を取る文言と、そこへ展開されるべき引数。
+    fn texts_with_arguments(language: Language) -> Vec<(String, &'static str)> {
+        let pull = language.messages().pull();
+
+        vec![
+            (pull.excluded_count(2), "2"),
+            (pull.fixed_target("main"), "main"),
+            (pull.selection_not_found("alpha, zulu"), "zulu"),
+            (pull.skipped("origin", "alpha"), "origin"),
+            (pull.skipped("origin", "alpha"), "alpha"),
+            (pull.fetch_start_failed("upstream"), "upstream"),
+            (pull.integration_start_failed("main"), "main"),
+        ]
+    }
+
+    #[test]
+    fn every_pull_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            for text in plain_texts(language) {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+        }
+    }
+
+    #[test]
+    fn every_pull_message_expands_its_arguments() {
+        for language in [Language::Japanese, Language::English] {
+            for (text, argument) in texts_with_arguments(language) {
+                assert!(
+                    text.contains(argument),
+                    "{language:?} must mention `{argument}`: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_pull_wording_is_translated() {
+        for (japanese, english) in plain_texts(Language::Japanese)
+            .into_iter()
+            .zip(plain_texts(Language::English))
+        {
+            assert_ne!(japanese, english, "the wording must be translated");
+        }
+
+        for ((japanese, _), (english, _)) in texts_with_arguments(Language::Japanese)
+            .into_iter()
+            .zip(texts_with_arguments(Language::English))
+        {
+            assert_ne!(japanese, english, "the wording must be translated");
+        }
+    }
+
+    #[test]
+    fn the_english_summary_is_translated_as_well() {
+        // 集計は `gz fetch --siblings` と共有する語彙から引く（[`CommonMessages::run_summary`]）
+        let summary = PullSummary {
+            succeeded: 1,
+            failed: vec!["alpha".to_owned()],
+            not_fast_forwarded: 1,
+        };
+
+        let japanese = summary_line(Language::Japanese.messages(), &summary);
+        let english = summary_line(Language::English.messages(), &summary);
+
+        assert_ne!(japanese, english, "the summary must be translated");
+        assert!(
+            english.contains('1') && english.contains("alpha"),
+            "the counts and the failed branch should be shown: {english}"
+        );
+        assert_eq!(english.lines().count(), 1, "1 行に収める: {english}");
+    }
+
+    #[test]
+    fn the_english_header_keeps_the_sections_on_one_line() {
+        let header = pull_header(Language::English.messages(), &scan(targets(), 2));
+
+        assert_eq!(header.lines().count(), 1, "1 行に収める: {header}");
+        assert!(
+            header.contains(HEADER_SEPARATOR),
+            "the sections should be separated: {header}"
+        );
+        assert!(
+            header.contains("fast-forward"),
+            "the integration method is git vocabulary and stays as it is: {header}"
+        );
+        assert!(header.contains('2'), "the count should be shown: {header}");
+    }
+
+    #[test]
+    fn the_preview_label_states_the_age_of_the_information_in_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let sections = sections(&preview_source(language.messages(), &target("main", true)));
+
+            assert!(
+                sections[0].0.contains("fetch"),
+                "{language:?} should state when the information was taken: {label}",
+                label = sections[0].0
+            );
+        }
+    }
+
+    #[test]
+    fn the_arguments_are_the_same_in_every_language() {
+        // 引数の組み立て（[`integrate_args`] / [`remote_fetch_args`]）は文言を持たないため、
+        // `gz sync` との一致（`the_current_branch_is_integrated_exactly_like_gz_sync_ff_only`）も
+        // 表示言語に左右されない
+        let candidates = targets();
+        let targets: Vec<&PullTarget> = candidates.iter().collect();
+
+        let mut runs = Vec::new();
+        for language in [Language::Japanese, Language::English] {
+            let (calls, runner) = recording(succeed);
+            let mut written = Vec::new();
+
+            pull_each(language.messages(), &targets, &mut written, runner)
+                .expect("a successful run should not fail");
+
+            runs.push((
+                recorded(&calls),
+                String::from_utf8(written).expect("the progress should be utf-8"),
+            ));
+        }
+
+        let [
+            (japanese_calls, japanese_progress),
+            (english_calls, english_progress),
+        ] = runs.as_slice()
+        else {
+            panic!("both languages should have been run: {runs:?}");
+        };
+        assert_eq!(
+            japanese_calls, english_calls,
+            "the arguments handed to git must not depend on the language"
+        );
+        assert!(
+            japanese_calls.contains(&crate::commands::sync::integrate_args(
+                SyncMode::FfOnly,
+                &candidates[0].tracking_ref
+            )),
+            "the current branch keeps using the `gz sync` ff-only arguments: {japanese_calls:?}"
+        );
+        assert_eq!(
+            japanese_progress, english_progress,
+            "the progress lines carry numbers and branch names only"
         );
     }
 }

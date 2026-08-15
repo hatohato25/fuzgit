@@ -9,10 +9,7 @@ use crate::cli::DEFAULT_COMMIT_LIMIT;
 use crate::finder::{FinderItem, PreviewSource, select_many};
 use crate::git::exec::run_git;
 use crate::git::read::{CommitInfo, CommitScope, commits};
-
-/// revert が中断された（コンフリクト等）際にユーザーが取れる操作の案内。
-const RESOLUTION_HINT: &str = "revert に失敗しました。\
-     解決後に `git revert --continue`、中止する場合は `git revert --abort` を実行してください";
+use crate::i18n::{Language, Messages};
 
 /// `git revert` にエディタを起動させないオプション。
 const NO_EDIT_OPTION: &str = "--no-edit";
@@ -51,20 +48,28 @@ impl MessageEditing {
 ///
 /// コミット履歴の取得、選択（中断を含む）、マージコミットが選択に含まれる場合、
 /// `git revert` の実行に失敗した場合にエラーを返す。
-pub fn run(repository: &gix::Repository, editing: MessageEditing) -> Result<()> {
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    editing: MessageEditing,
+) -> Result<()> {
     let candidates = commits(repository, CommitScope::Head, DEFAULT_COMMIT_LIMIT)
-        .context("コミット履歴の取得に失敗しました")?;
+        .context(messages.common().commit_history_read_failed())?;
 
-    let items = candidates.iter().map(to_item).collect();
+    let items = candidates
+        .iter()
+        .map(|commit| to_item(language, commit))
+        .collect();
     let selected = select_many(items)?;
 
-    let ordered = newest_first(&candidates, &selected)?;
+    let ordered = newest_first(messages, &candidates, &selected)?;
 
     // マージコミットが 1 件でも含まれていれば、他のコミットも revert せずに停止する。
     // 一部だけ適用してから失敗すると、どこまで進んだのかをユーザーが追う必要が出るため
-    let merges = merge_commits(repository, &ordered)?;
+    let merges = merge_commits(messages, repository, &ordered)?;
     if !merges.is_empty() {
-        bail!(merge_commit_message(&merges));
+        bail!(merge_commit_message(messages, &merges));
     }
 
     let hashes: Vec<String> = ordered.iter().map(|commit| commit.id.clone()).collect();
@@ -72,7 +77,7 @@ pub fn run(repository: &gix::Repository, editing: MessageEditing) -> Result<()> 
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
 
     // 継承 stdio で実行するため、コンフリクト時の git のメッセージはそのまま端末へ表示される
-    run_git(&arguments).context(RESOLUTION_HINT)?;
+    run_git(language, &arguments).context(messages.revert().resolution_hint())?;
 
     Ok(())
 }
@@ -100,11 +105,12 @@ fn preview_args(commit: &CommitInfo) -> Vec<String> {
 }
 
 /// コミットを finder の候補へ変換する。
-fn to_item(commit: &CommitInfo) -> FinderItem {
+fn to_item(language: Language, commit: &CommitInfo) -> FinderItem {
     FinderItem::new(
         display_line(commit),
         commit.id.clone(),
         PreviewSource::Git(preview_args(commit)),
+        language.messages(),
     )
 }
 
@@ -119,6 +125,7 @@ fn to_item(commit: &CommitInfo) -> FinderItem {
 ///
 /// 選択されたハッシュが候補一覧に含まれない場合にエラーを返す。
 fn newest_first<'a>(
+    messages: &dyn Messages,
     candidates: &'a [CommitInfo],
     selected: &[String],
 ) -> Result<Vec<&'a CommitInfo>> {
@@ -128,10 +135,7 @@ fn newest_first<'a>(
         .map(String::as_str)
         .collect();
     if !missing.is_empty() {
-        bail!(
-            "選択されたコミット {} が候補に見つかりません",
-            missing.join(", ")
-        );
+        bail!(messages.revert().selection_not_found(&missing.join(", ")));
     }
 
     Ok(candidates
@@ -145,12 +149,16 @@ fn newest_first<'a>(
 /// # Errors
 ///
 /// ハッシュを解釈できない場合、コミットオブジェクトを取得できない場合にエラーを返す。
-fn parent_count(repository: &gix::Repository, commit: &CommitInfo) -> Result<usize> {
+fn parent_count(
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    commit: &CommitInfo,
+) -> Result<usize> {
     let id = gix::ObjectId::from_hex(commit.id.as_bytes())
-        .with_context(|| format!("コミットハッシュ `{id}` を解釈できません", id = commit.id))?;
+        .with_context(|| messages.common().commit_hash_parse_failed(&commit.id))?;
     let object = repository
         .find_commit(id)
-        .with_context(|| format!("コミット `{id}` の取得に失敗しました", id = commit.id))?;
+        .with_context(|| messages.common().commit_read_failed(&commit.id))?;
 
     Ok(object.parent_ids().count())
 }
@@ -165,12 +173,13 @@ fn parent_count(repository: &gix::Repository, commit: &CommitInfo) -> Result<usi
 ///
 /// コミットオブジェクトの取得に失敗した場合にエラーを返す。
 fn merge_commits<'a>(
+    messages: &dyn Messages,
     repository: &gix::Repository,
     selected: &[&'a CommitInfo],
 ) -> Result<Vec<&'a CommitInfo>> {
     let mut merges = Vec::new();
     for commit in selected {
-        if parent_count(repository, commit)? >= MERGE_PARENT_COUNT {
+        if parent_count(messages, repository, commit)? >= MERGE_PARENT_COUNT {
             merges.push(*commit);
         }
     }
@@ -183,12 +192,8 @@ fn merge_commits<'a>(
 /// mainline（どちらの親を残すか）の指定はリポジトリの履歴構造の理解を要するため
 /// fuzgit では扱わない（requirements.md「スコープ外」）。原因と、素の git で実行する
 /// 手順をコピーできる形で示す。
-fn merge_commit_message(merges: &[&CommitInfo]) -> String {
-    let mut message = String::from(
-        "選択にマージコミットが含まれています。マージコミットの revert には\
-         打ち消す側の親の番号（`-m <parent-number>`）の指定が必要ですが、\
-         fuzgit は対応していません。素の git で次のように実行してください。",
-    );
+fn merge_commit_message(messages: &dyn Messages, merges: &[&CommitInfo]) -> String {
+    let mut message = String::from(messages.revert().merge_commit_selected());
 
     for commit in merges {
         message.push_str(&format!(
@@ -276,7 +281,8 @@ mod tests {
         let candidates = candidates();
         let selected = vec![id("aaaa"), id("cccc")];
 
-        let ordered = newest_first(&candidates, &selected).expect("all hashes are candidates");
+        let ordered = newest_first(Language::Japanese.messages(), &candidates, &selected)
+            .expect("all hashes are candidates");
 
         assert_eq!(ids(&ordered), [id("cccc"), id("aaaa")]);
     }
@@ -286,7 +292,8 @@ mod tests {
         let candidates = candidates();
         let selected = vec![id("cccc"), id("bbbb"), id("aaaa")];
 
-        let ordered = newest_first(&candidates, &selected).expect("all hashes are candidates");
+        let ordered = newest_first(Language::Japanese.messages(), &candidates, &selected)
+            .expect("all hashes are candidates");
 
         assert_eq!(ids(&ordered), [id("cccc"), id("bbbb"), id("aaaa")]);
     }
@@ -302,7 +309,8 @@ mod tests {
         ];
 
         for selected in selections {
-            let ordered = newest_first(&candidates, &selected).expect("all hashes are candidates");
+            let ordered = newest_first(Language::Japanese.messages(), &candidates, &selected)
+                .expect("all hashes are candidates");
 
             assert_eq!(
                 ids(&ordered),
@@ -317,7 +325,8 @@ mod tests {
         let candidates = candidates();
         let selected = vec![id("bbbb")];
 
-        let ordered = newest_first(&candidates, &selected).expect("all hashes are candidates");
+        let ordered = newest_first(Language::Japanese.messages(), &candidates, &selected)
+            .expect("all hashes are candidates");
 
         assert_eq!(ids(&ordered), [id("bbbb")]);
     }
@@ -327,7 +336,8 @@ mod tests {
         let candidates = candidates();
         let selected = vec![id("aaaa")];
 
-        let ordered = newest_first(&candidates, &selected).expect("all hashes are candidates");
+        let ordered = newest_first(Language::Japanese.messages(), &candidates, &selected)
+            .expect("all hashes are candidates");
 
         assert_eq!(ids(&ordered), [id("aaaa")]);
     }
@@ -337,7 +347,8 @@ mod tests {
         let candidates = candidates();
         let selected = vec![id("cccc"), id("dddd")];
 
-        let err = newest_first(&candidates, &selected).expect_err("unknown hash must be rejected");
+        let err = newest_first(Language::Japanese.messages(), &candidates, &selected)
+            .expect_err("unknown hash must be rejected");
 
         assert!(
             err.to_string().contains(&id("dddd")),
@@ -407,7 +418,7 @@ mod tests {
         let candidates = candidates();
         let commit = candidates.first().expect("candidates are not empty");
 
-        assert_eq!(to_item(commit).key(), id("cccc"));
+        assert_eq!(to_item(Language::Japanese, commit).key(), id("cccc"));
     }
 
     #[test]
@@ -418,11 +429,15 @@ mod tests {
         let merge = history.first().expect("the merge is the newest commit");
 
         assert_eq!(
-            parent_count(&repository, merge).expect("the commit exists"),
+            parent_count(Language::Japanese.messages(), &repository, merge)
+                .expect("the commit exists"),
             2
         );
         assert_eq!(
-            ids(&merge_commits(&repository, &[merge]).expect("the commit exists")),
+            ids(
+                &merge_commits(Language::Japanese.messages(), &repository, &[merge])
+                    .expect("the commit exists")
+            ),
             [merge.id.as_str()],
             "a merge commit must be reported before git revert runs"
         );
@@ -439,7 +454,7 @@ mod tests {
             .collect();
 
         assert!(
-            merge_commits(&repository, &ordinary)
+            merge_commits(Language::Japanese.messages(), &repository, &ordinary)
                 .expect("the commits exist")
                 .is_empty(),
             "only merge commits need the parent number"
@@ -455,7 +470,8 @@ mod tests {
         let root = history.last().expect("the history has commits");
 
         assert_eq!(
-            parent_count(&repository, root).expect("the commit exists"),
+            parent_count(Language::Japanese.messages(), &repository, root)
+                .expect("the commit exists"),
             0
         );
     }
@@ -465,7 +481,7 @@ mod tests {
         let (_dir, repository) = repository_with_a_merge("revert-unknown");
         let candidates = candidates();
 
-        let error = parent_count(&repository, &candidates[0])
+        let error = parent_count(Language::Japanese.messages(), &repository, &candidates[0])
             .expect_err("a commit that is not in the repository cannot be resolved");
 
         assert!(
@@ -477,7 +493,7 @@ mod tests {
     #[test]
     fn the_merge_message_names_the_commit_and_the_command_to_run() {
         let candidates = candidates();
-        let message = merge_commit_message(&[&candidates[0]]);
+        let message = merge_commit_message(Language::Japanese.messages(), &[&candidates[0]]);
 
         assert!(
             message.contains("マージコミット"),
@@ -497,7 +513,10 @@ mod tests {
     fn every_merge_commit_of_the_selection_is_listed() {
         let candidates = candidates();
 
-        let message = merge_commit_message(&[&candidates[0], &candidates[2]]);
+        let message = merge_commit_message(
+            Language::Japanese.messages(),
+            &[&candidates[0], &candidates[2]],
+        );
 
         assert_eq!(
             message
@@ -506,6 +525,73 @@ mod tests {
                 .count(),
             2,
             "each merge commit needs its own command: {message}"
+        );
+    }
+
+    #[test]
+    fn every_revert_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let revert = language.messages().revert();
+
+            for text in [revert.resolution_hint(), revert.merge_commit_selected()] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+            // ユーザーがそのまま打ち込むコマンド列であるため、どの言語でも同じ綴りで現れる
+            assert!(
+                revert.resolution_hint().contains("git revert --continue")
+                    && revert.resolution_hint().contains("git revert --abort"),
+                "{language:?} must spell out both commands: {text}",
+                text = revert.resolution_hint()
+            );
+            assert!(
+                revert
+                    .merge_commit_selected()
+                    .contains("-m <parent-number>"),
+                "{language:?} must name the option git would need: {text}",
+                text = revert.merge_commit_selected()
+            );
+
+            assert!(
+                revert
+                    .selection_not_found(&id("dddd"))
+                    .contains(&id("dddd")),
+                "{language:?} must name the missing hash"
+            );
+        }
+    }
+
+    #[test]
+    fn the_revert_wording_is_translated() {
+        let japanese = Language::Japanese.messages().revert();
+        let english = Language::English.messages().revert();
+
+        assert_ne!(japanese.resolution_hint(), english.resolution_hint());
+        assert_ne!(
+            japanese.merge_commit_selected(),
+            english.merge_commit_selected()
+        );
+        assert_ne!(
+            japanese.selection_not_found(&id("dddd")),
+            english.selection_not_found(&id("dddd"))
+        );
+    }
+
+    #[test]
+    fn the_english_merge_message_still_lists_every_command() {
+        let candidates = candidates();
+
+        let message = merge_commit_message(
+            Language::English.messages(),
+            &[&candidates[0], &candidates[2]],
+        );
+
+        assert_eq!(
+            message
+                .lines()
+                .filter(|line| line.contains("git revert -m 1"))
+                .count(),
+            2,
+            "the commands must not depend on the display language: {message}"
         );
     }
 }

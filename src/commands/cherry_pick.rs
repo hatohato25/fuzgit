@@ -6,29 +6,34 @@ use crate::cli::DEFAULT_COMMIT_LIMIT;
 use crate::finder::{FinderItem, PreviewSource, select_many};
 use crate::git::exec::run_git;
 use crate::git::read::{CommitInfo, CommitScope, commits};
-
-/// cherry-pick が中断された（コンフリクト等）際にユーザーが取れる操作の案内。
-const RESOLUTION_HINT: &str = "cherry-pick に失敗しました。\
-     解決後に `git cherry-pick --continue`、中止する場合は `git cherry-pick --abort` を実行してください";
+use crate::i18n::{Language, Messages};
 
 /// コミットを複数選択し、選択順ではなく履歴順（古い順）に cherry-pick する。
 ///
 /// # Errors
 ///
 /// コミット履歴の取得、選択（中断を含む）、`git cherry-pick` の実行に失敗した場合にエラーを返す。
-pub fn run(repository: &gix::Repository, scope: CommitScope<'_>) -> Result<()> {
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    scope: CommitScope<'_>,
+) -> Result<()> {
     let candidates = commits(repository, scope, DEFAULT_COMMIT_LIMIT)
-        .context("コミット履歴の取得に失敗しました")?;
+        .context(messages.common().commit_history_read_failed())?;
 
-    let items = candidates.iter().map(to_item).collect();
+    let items = candidates
+        .iter()
+        .map(|commit| to_item(language, commit))
+        .collect();
     let selected = select_many(items)?;
 
-    let ordered = oldest_first(&candidates, &selected)?;
+    let ordered = oldest_first(messages, &candidates, &selected)?;
     let arguments = cherry_pick_args(&ordered);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
 
     // 継承 stdio で実行するため、コンフリクト時の git のメッセージはそのまま端末へ表示される
-    run_git(&arguments).context(RESOLUTION_HINT)?;
+    run_git(language, &arguments).context(messages.cherry_pick().resolution_hint())?;
 
     Ok(())
 }
@@ -56,11 +61,12 @@ fn preview_args(commit: &CommitInfo) -> Vec<String> {
 }
 
 /// コミットを finder の候補へ変換する。
-fn to_item(commit: &CommitInfo) -> FinderItem {
+fn to_item(language: Language, commit: &CommitInfo) -> FinderItem {
     FinderItem::new(
         display_line(commit),
         commit.id.clone(),
         PreviewSource::Git(preview_args(commit)),
+        language.messages(),
     )
 }
 
@@ -73,7 +79,11 @@ fn to_item(commit: &CommitInfo) -> FinderItem {
 /// # Errors
 ///
 /// 選択されたハッシュが候補一覧に含まれない場合にエラーを返す。
-fn oldest_first(candidates: &[CommitInfo], selected: &[String]) -> Result<Vec<String>> {
+fn oldest_first(
+    messages: &dyn Messages,
+    candidates: &[CommitInfo],
+    selected: &[String],
+) -> Result<Vec<String>> {
     let missing: Vec<&str> = selected
         .iter()
         .filter(|hash| !candidates.iter().any(|candidate| &candidate.id == *hash))
@@ -81,8 +91,9 @@ fn oldest_first(candidates: &[CommitInfo], selected: &[String]) -> Result<Vec<St
         .collect();
     if !missing.is_empty() {
         bail!(
-            "選択されたコミット {} が候補に見つかりません",
-            missing.join(", ")
+            messages
+                .cherry_pick()
+                .selection_not_found(&missing.join(", "))
         );
     }
 
@@ -131,7 +142,8 @@ mod tests {
         let candidates = candidates();
         let selected = vec![id("cccc"), id("aaaa")];
 
-        let ordered = oldest_first(&candidates, &selected).expect("all hashes are candidates");
+        let ordered = oldest_first(Language::Japanese.messages(), &candidates, &selected)
+            .expect("all hashes are candidates");
 
         assert_eq!(ordered, [id("aaaa"), id("cccc")]);
     }
@@ -141,7 +153,8 @@ mod tests {
         let candidates = candidates();
         let selected = vec![id("aaaa"), id("bbbb"), id("cccc")];
 
-        let ordered = oldest_first(&candidates, &selected).expect("all hashes are candidates");
+        let ordered = oldest_first(Language::Japanese.messages(), &candidates, &selected)
+            .expect("all hashes are candidates");
 
         assert_eq!(ordered, [id("aaaa"), id("bbbb"), id("cccc")]);
     }
@@ -151,7 +164,8 @@ mod tests {
         let candidates = candidates();
         let selected = vec![id("bbbb")];
 
-        let ordered = oldest_first(&candidates, &selected).expect("all hashes are candidates");
+        let ordered = oldest_first(Language::Japanese.messages(), &candidates, &selected)
+            .expect("all hashes are candidates");
 
         assert_eq!(ordered, [id("bbbb")]);
     }
@@ -161,7 +175,8 @@ mod tests {
         let candidates = candidates();
         let selected = vec![id("cccc")];
 
-        let ordered = oldest_first(&candidates, &selected).expect("all hashes are candidates");
+        let ordered = oldest_first(Language::Japanese.messages(), &candidates, &selected)
+            .expect("all hashes are candidates");
 
         assert_eq!(ordered, [id("cccc")]);
     }
@@ -171,7 +186,8 @@ mod tests {
         let candidates = candidates();
         let selected = vec![id("cccc"), id("dddd")];
 
-        let err = oldest_first(&candidates, &selected).expect_err("unknown hash must be rejected");
+        let err = oldest_first(Language::Japanese.messages(), &candidates, &selected)
+            .expect_err("unknown hash must be rejected");
 
         assert!(
             err.to_string().contains(&id("dddd")),
@@ -224,6 +240,46 @@ mod tests {
         let candidates = candidates();
         let commit = candidates.first().expect("candidates are not empty");
 
-        assert_eq!(to_item(commit).key(), id("cccc"));
+        assert_eq!(to_item(Language::Japanese, commit).key(), id("cccc"));
+    }
+
+    #[test]
+    fn every_cherry_pick_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let cherry_pick = language.messages().cherry_pick();
+            let missing = cherry_pick.selection_not_found("aaaa, bbbb");
+
+            assert!(
+                missing.contains("aaaa") && missing.contains("bbbb"),
+                "{language:?} must name every missing hash: {missing}"
+            );
+            assert!(
+                !cherry_pick.resolution_hint().trim().is_empty(),
+                "{language:?} left the hint empty"
+            );
+            // ユーザーがそのまま打ち込むコマンド列は訳さない
+            assert!(
+                cherry_pick
+                    .resolution_hint()
+                    .contains("git cherry-pick --continue")
+                    && cherry_pick
+                        .resolution_hint()
+                        .contains("git cherry-pick --abort"),
+                "{language:?} must keep the commands to run: {hint}",
+                hint = cherry_pick.resolution_hint()
+            );
+        }
+    }
+
+    #[test]
+    fn the_cherry_pick_wording_is_translated() {
+        let japanese = Language::Japanese.messages().cherry_pick();
+        let english = Language::English.messages().cherry_pick();
+
+        assert_ne!(
+            japanese.selection_not_found("aaaa"),
+            english.selection_not_found("aaaa")
+        );
+        assert_ne!(japanese.resolution_hint(), english.resolution_hint());
     }
 }

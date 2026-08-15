@@ -7,6 +7,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use crate::finder::{FinderItem, PreviewSource, select_one};
 use crate::git::exec::run_git;
 use crate::git::read::{PushTarget, push_targets};
+use crate::i18n::{Language, Messages};
 
 /// `git push` に upstream を設定させるオプション（`-u` の長い綴り）。
 const SET_UPSTREAM_OPTION: &str = "--set-upstream";
@@ -16,9 +17,6 @@ const SET_UPSTREAM_OPTION: &str = "--set-upstream";
 /// 記号ではなく語で示すのは、凡例なしで意味が分かるようにするため
 /// （絞り込みのクエリとしても使える）。
 const UPSTREAM_NOTE: &str = "  (upstream)";
-
-/// リモート追跡参照がまだ無い候補の表示。
-const NO_TRACKING_REF: &str = "追跡参照なし";
 
 /// プレビューに表示する最大コミット数。
 const PREVIEW_COMMIT_COUNT: &str = "50";
@@ -52,15 +50,21 @@ impl UpstreamUpdate {
 ///
 /// 候補の取得（detached HEAD を含む）、選択（中断を含む）、`git push` の実行に失敗した場合に
 /// エラーを返す。
-pub fn run(repository: &gix::Repository, upstream: UpstreamUpdate) -> Result<()> {
-    let candidates = push_targets(repository).context("push 先の候補の取得に失敗しました")?;
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    upstream: UpstreamUpdate,
+) -> Result<()> {
+    let candidates = push_targets(repository).context(messages.push().targets_read_failed())?;
     if candidates.is_empty() {
-        bail!(
-            "push 先のリモートが登録されていません。`git remote add <名前> <URL>` で追加してください"
-        );
+        bail!(messages.push().no_remotes());
     }
 
-    let items = candidates.iter().map(to_item).collect();
+    let items = candidates
+        .iter()
+        .map(|target| to_item(language, messages, target))
+        .collect();
     let selected = select_one(items)?;
 
     // `git push` はパス以外の位置引数を取り `--` で保護できないため、
@@ -68,26 +72,22 @@ pub fn run(repository: &gix::Repository, upstream: UpstreamUpdate) -> Result<()>
     let target = candidates
         .iter()
         .find(|candidate| candidate.tracking_name() == selected)
-        .ok_or_else(|| anyhow!("選択された push 先 `{selected}` が候補に見つかりません"))?;
+        .ok_or_else(|| anyhow!(messages.push().selection_not_found(&selected)))?;
 
     let arguments = push_args(target, upstream);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(&arguments).with_context(|| {
-        format!(
-            "{name} への push に失敗しました",
-            name = target.tracking_name()
-        )
-    })?;
+    run_git(language, &arguments)
+        .with_context(|| messages.push().push_failed(&target.tracking_name()))?;
 
     Ok(())
 }
 
 /// 一覧に表示する 1 行を組み立てる。この文字列がそのまま絞り込みの対象になる。
-fn display_line(target: &PushTarget) -> String {
+fn display_line(messages: &dyn Messages, target: &PushTarget) -> String {
     let mut line = format!(
         "{name}  {counts}",
         name = target.tracking_name(),
-        counts = counts(target)
+        counts = counts(messages, target)
     );
     if target.is_upstream {
         line.push_str(UPSTREAM_NOTE);
@@ -96,11 +96,14 @@ fn display_line(target: &PushTarget) -> String {
 }
 
 /// リモート追跡参照に対する進み・遅れの表示。
-fn counts(target: &PushTarget) -> String {
+///
+/// 進み・遅れは数値であり訳す余地が無いが、追跡参照が無い場合の注記は fuzgit 自身の
+/// 説明語であるため表示言語に合わせる。
+fn counts(messages: &dyn Messages, target: &PushTarget) -> String {
     match target.ahead_behind {
         Some((ahead, behind)) => format!("ahead {ahead} / behind {behind}"),
         // まだ push していないリモートには比較対象が無く、進み・遅れを数えられない
-        None => NO_TRACKING_REF.to_owned(),
+        None => messages.push().no_tracking_ref().to_owned(),
     }
 }
 
@@ -132,11 +135,12 @@ fn preview_args(target: &PushTarget) -> Vec<String> {
 }
 
 /// push 先を finder の候補へ変換する。
-fn to_item(target: &PushTarget) -> FinderItem {
+fn to_item(language: Language, messages: &dyn Messages, target: &PushTarget) -> FinderItem {
     FinderItem::new(
-        display_line(target),
+        display_line(messages, target),
         target.tracking_name(),
         PreviewSource::Git(preview_args(target)),
+        language.messages(),
     )
 }
 
@@ -170,7 +174,10 @@ mod tests {
     #[test]
     fn a_line_shows_the_destination_with_its_counts() {
         assert_eq!(
-            display_line(&target("origin", Some((2, 1)))),
+            display_line(
+                Language::Japanese.messages(),
+                &target("origin", Some((2, 1)))
+            ),
             "origin/main  ahead 2 / behind 1"
         );
     }
@@ -178,7 +185,7 @@ mod tests {
     #[test]
     fn a_destination_without_a_tracking_reference_says_so() {
         assert_eq!(
-            display_line(&target("backup", None)),
+            display_line(Language::Japanese.messages(), &target("backup", None)),
             "backup/main  追跡参照なし"
         );
     }
@@ -191,11 +198,15 @@ mod tests {
         };
 
         assert_eq!(
-            display_line(&upstream),
+            display_line(Language::Japanese.messages(), &upstream),
             "origin/main  ahead 0 / behind 0  (upstream)"
         );
         assert!(
-            !display_line(&target("origin", Some((0, 0)))).contains("upstream"),
+            !display_line(
+                Language::Japanese.messages(),
+                &target("origin", Some((0, 0)))
+            )
+            .contains("upstream"),
             "a destination that is not the upstream must not be marked"
         );
     }
@@ -234,7 +245,11 @@ mod tests {
 
     #[test]
     fn an_item_keeps_the_destination_as_its_key() {
-        let item = to_item(&target("origin", Some((1, 0))));
+        let item = to_item(
+            Language::Japanese,
+            Language::Japanese.messages(),
+            &target("origin", Some((1, 0))),
+        );
 
         assert_eq!(item.key(), "origin/main");
     }
@@ -273,5 +288,66 @@ mod tests {
             ["push", "origin", "feature/login"]
         );
         assert_eq!(target.tracking_name(), "origin/feature/login");
+    }
+
+    #[test]
+    fn every_push_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let push = language.messages().push();
+
+            for text in [
+                push.targets_read_failed(),
+                push.no_remotes(),
+                push.no_tracking_ref(),
+            ] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+            // ユーザーがそのまま打ち込むコマンドであるため、どの言語でも同じ綴りで現れる
+            assert!(
+                push.no_remotes().contains("git remote add"),
+                "{language:?} must spell out the command: {text}",
+                text = push.no_remotes()
+            );
+
+            assert!(
+                push.selection_not_found("origin/main")
+                    .contains("origin/main"),
+                "{language:?} must name the selection"
+            );
+            assert!(
+                push.push_failed("origin/main").contains("origin/main"),
+                "{language:?} must name the destination"
+            );
+        }
+    }
+
+    #[test]
+    fn the_push_wording_is_translated() {
+        let japanese = Language::Japanese.messages().push();
+        let english = Language::English.messages().push();
+
+        assert_ne!(
+            japanese.targets_read_failed(),
+            english.targets_read_failed()
+        );
+        assert_ne!(japanese.no_remotes(), english.no_remotes());
+        assert_ne!(japanese.no_tracking_ref(), english.no_tracking_ref());
+        assert_ne!(
+            japanese.selection_not_found("origin/main"),
+            english.selection_not_found("origin/main")
+        );
+        assert_ne!(
+            japanese.push_failed("origin/main"),
+            english.push_failed("origin/main")
+        );
+    }
+
+    #[test]
+    fn a_destination_without_a_tracking_reference_says_so_in_english() {
+        // 候補行の主たる内容（リモート名・ブランチ名）は訳さないが、注記は表示言語に従う
+        assert_eq!(
+            display_line(Language::English.messages(), &target("backup", None)),
+            "backup/main  no tracking ref"
+        );
     }
 }

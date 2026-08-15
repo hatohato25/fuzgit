@@ -137,14 +137,12 @@
             <figure class="term">
               <div class="term-bar">gz fetch --siblings — the repositories next door</div>
               <pre><code><span class="prompt">$</span> <span class="cmd">gz fetch --siblings</span>
-<span class="hint">現在のリポジトリを選択済みにしています。Tab: 選択の切替 / Enter: 取得  |  除外 1 件（リモート未登録 / bare）</span>
+<span class="hint">The current repository is preselected. Tab: toggle the selection / Enter: fetch  |  1 excluded (no remote / bare)</span>
 <span class="sel">&gt;&gt;mike  main  origin</span>
   alpha  main  origin
   zulu  main  origin</code></pre>
               <figcaption>
-                <b>The header, in English:</b> “the current repository starts
-                selected. Tab: toggle selection / Enter: fetch | 1 excluded (no
-                remote registered / bare)”. <code>-s</code> (<code>--siblings</code>)
+                <code>-s</code> (<code>--siblings</code>)
                 scans the parent directory of the current worktree root
                 <b>one level deep only</b> and offers every directory that
                 contains a <code>.git</code>; a line reads
@@ -157,14 +155,11 @@
             <figure class="term">
               <div class="term-bar">gz pull — selection</div>
               <pre><code><span class="prompt">$</span> <span class="cmd">gz pull</span>
-<span class="hint">現在のブランチを選択済みにしています。Tab: 選択の切替 / Enter: fast-forward のみで取り込み  |  除外 2 件（upstream 未設定 / リモート未登録 / 他の worktree で使用中）</span>
+<span class="hint">The current branch is preselected. Tab: toggle the selection / Enter: integrate with a fast-forward only  |  2 excluded (no upstream / remote not registered / in use by another worktree)</span>
 <span class="sel">&gt;&gt;* main  →  origin/main</span>
     feature-a  →  origin/feature-a</code></pre>
               <figcaption>
-                <b>The header, in English:</b> “the current branch starts
-                selected. Tab: toggle selection / Enter: fast-forward only | 2
-                excluded (no upstream / remote not registered / in use by
-                another worktree)”. It asks only <em>which local branches should
+                It asks only <em>which local branches should
                 follow their upstream</em> — the destination is fixed to each
                 branch’s own upstream, and integration is fast-forward only.
               </figcaption>
@@ -178,13 +173,10 @@
 [2/4] alpha
 [3/4] diverged
 [4/4] zeta
-<span class="warn">成功 3 件 / 失敗 1 件（失敗: diverged）</span>
-<span class="hint">fast-forward できなかったブランチは、そのブランチへ切り替えてから `gz sync --rebase` または `gz sync --merge` で取り込めます</span></code></pre>
+<span class="warn">3 succeeded / 1 failed (failed: diverged)</span>
+<span class="hint">A branch that could not fast-forward can be integrated with `gz sync --rebase` or `gz sync --merge` after switching to it</span></code></pre>
             <figcaption>
-              <b>In English:</b> “3 succeeded / 1 failed (failed: diverged)” /
-              “branches that could not fast-forward can be integrated by
-              switching to them and running <code>gz sync --rebase</code> or
-              <code>gz sync --merge</code>”. Targets run <b>serially, in list
+              Targets run <b>serially, in list
               order</b>, each announced with
               <code>[&lt;n&gt;/&lt;total&gt;]</code> so you can tell whose output
               git is printing; <b>a failure never stops the run</b>, and the
@@ -196,10 +188,11 @@
 
           <div class="note">
             <p>
-              <strong>Note:</strong> fuzgit’s own messages are currently written
-              in Japanese, so the terminal excerpts above are shown verbatim
-              with an English gloss. Everything git prints (update tables,
-              conflicts, authentication prompts) comes straight from git.
+              <strong>Note:</strong> the terminal excerpts above show fuzgit’s
+              English output, which is the default; the same lines come out in
+              Japanese with <a href="#language"><code>--lang ja</code></a>.
+              Everything git prints (update tables, conflicts, authentication
+              prompts) comes straight from git.
             </p>
           </div>
         </div>
@@ -268,6 +261,96 @@
                 moved into the preview so the list appears immediately.
               </p>
             </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="band" id="language">
+        <div class="wrap">
+          <p class="section-label">Language</p>
+          <h2>English or Japanese, decided in one place</h2>
+          <p class="lede">
+            Messages, confirmation prompts, finder headers and
+            <code>--help</code> come in English and Japanese. English is the
+            default, and a single git config entry makes it Japanese
+            everywhere.
+          </p>
+
+          <pre><code>git config --global fuzgit.lang ja   # persistent (--local sets it per repository)
+gz --lang ja branch                  # one-off, on any subcommand</code></pre>
+
+          <div class="table-wrap">
+            <table>
+              <caption class="table-caption">
+                The first layer that decides the language wins; the ones below
+                it are not consulted.
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col">Priority</th>
+                  <th scope="col">Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>1</td>
+                  <td>
+                    <code>--lang &lt;ja|en|auto&gt;</code> — a global option,
+                    accepted by every subcommand
+                  </td>
+                </tr>
+                <tr>
+                  <td>2</td>
+                  <td><code>FUZGIT_LANG</code> environment variable</td>
+                </tr>
+                <tr>
+                  <td>3</td>
+                  <td>
+                    <code>git config fuzgit.lang</code> — system / global /
+                    local / worktree all apply as usual
+                  </td>
+                </tr>
+                <tr>
+                  <td>4</td>
+                  <td>
+                    <code>LC_ALL</code> &rarr; <code>LC_MESSAGES</code> &rarr;
+                    <code>LANGUAGE</code> &rarr; <code>LANG</code>
+                  </td>
+                </tr>
+                <tr>
+                  <td>5</td>
+                  <td>fallback: <code>en</code></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p>
+            Layers 1&ndash;3 are explicit instructions to fuzgit, so a value
+            other than <code>ja</code> / <code>en</code> / <code>auto</code>
+            stops with an error. Layer 4 only describes the environment, so a
+            value fuzgit cannot interpret — <code>C</code> and
+            <code>POSIX</code> included — is not an error and resolution moves
+            on. <code>auto</code> skips the remaining explicit layers and reads
+            the environment. There is no fuzgit configuration file: it borrows
+            git&rsquo;s <code>fuzgit.lang</code> key, which is read without
+            starting a <code>git</code> process and works outside a repository
+            too.
+          </p>
+
+          <div class="note">
+            <p>
+              <strong>Two limits.</strong> fuzgit tells the git commands it runs
+              which language to speak, but <b>whether git has that translation
+              is not guaranteed</b> — it depends on the git build (NLS) and the
+              installed locale data, and git upstream ships no Japanese
+              catalog, so git&rsquo;s own output stays English even with
+              <code>ja</code>. And the text clap prints on its own
+              (<code>Usage:</code>, <code>Options:</code>,
+              <code>Commands:</code>, parser errors) <b>stays English</b>,
+              because clap 4 has no localization hook; fuzgit&rsquo;s own
+              descriptions in <code>--help</code> do switch.
+            </p>
           </div>
         </div>
       </section>

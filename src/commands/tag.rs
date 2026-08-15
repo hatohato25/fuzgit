@@ -7,6 +7,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use crate::finder::{FinderItem, PreviewSource, select_one};
 use crate::git::exec::run_git;
 use crate::git::read::{TagInfo, tags};
+use crate::i18n::{Language, Messages};
 
 /// 選択したタグに対して行う操作。
 ///
@@ -30,12 +31,12 @@ impl TagAction {
     /// # Errors
     ///
     /// `--switch` と `--diff` が同時に指定された場合にエラーを返す。
-    pub fn from_flags(switch: bool, diff: bool) -> Result<Self> {
+    pub fn from_flags(messages: &dyn Messages, switch: bool, diff: bool) -> Result<Self> {
         match (switch, diff) {
             (false, false) => Ok(Self::Print),
             (true, false) => Ok(Self::Switch),
             (false, true) => Ok(Self::Diff),
-            (true, true) => bail!("`--switch` と `--diff` は同時に指定できません"),
+            (true, true) => bail!(messages.tag().conflicting_actions()),
         }
     }
 }
@@ -46,37 +47,42 @@ impl TagAction {
 ///
 /// タグ一覧の取得、選択（中断を含む）、標準出力への書き込み、`git` の実行に失敗した場合に
 /// エラーを返す。
-pub fn run(repository: &gix::Repository, action: TagAction) -> Result<()> {
-    let candidates = tags(repository).context("タグ一覧の取得に失敗しました")?;
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    action: TagAction,
+) -> Result<()> {
+    let candidates = tags(repository).context(messages.common().tag_list_read_failed())?;
 
-    let items = candidates.iter().map(to_item).collect();
+    let items = candidates
+        .iter()
+        .map(|tag| to_item(language, tag))
+        .collect();
     let selected = select_one(items)?;
 
     let tag = candidates
         .iter()
         .find(|candidate| candidate.name == selected)
-        .ok_or_else(|| anyhow!("選択されたタグ `{selected}` が候補に見つかりません"))?;
+        .ok_or_else(|| anyhow!(messages.tag().selection_not_found(&selected)))?;
 
     match action {
         TagAction::Print => {
             // パイプ利用を想定し、stdout にはタグ名以外を混ぜない。
             // パイプ先が先に閉じた場合に panic しないよう、書き込みエラーは明示的に伝播する
             writeln!(std::io::stdout(), "{name}", name = tag.name)
-                .context("標準出力への書き込みに失敗しました")?;
+                .context(messages.common().stdout_write_failed())?;
         }
         TagAction::Switch => {
             let arguments = switch_args(tag);
             let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-            run_git(&arguments).with_context(|| {
-                format!("タグ `{name}` への切り替えに失敗しました", name = tag.name)
-            })?;
+            run_git(language, &arguments)
+                .with_context(|| messages.tag().switch_failed(&tag.name))?;
         }
         TagAction::Diff => {
             let arguments = diff_args(tag);
             let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-            run_git(&arguments).with_context(|| {
-                format!("タグ `{name}` との差分表示に失敗しました", name = tag.name)
-            })?;
+            run_git(language, &arguments).with_context(|| messages.tag().diff_failed(&tag.name))?;
         }
     }
 
@@ -128,11 +134,12 @@ fn diff_args(tag: &TagInfo) -> Vec<String> {
 }
 
 /// タグを finder の候補へ変換する。
-fn to_item(tag: &TagInfo) -> FinderItem {
+fn to_item(language: Language, tag: &TagInfo) -> FinderItem {
     FinderItem::new(
         display_line(tag),
         tag.name.clone(),
         PreviewSource::Git(preview_args(tag)),
+        language.messages(),
     )
 }
 
@@ -161,7 +168,8 @@ mod tests {
     #[test]
     fn no_flag_prints_the_tag_name() {
         assert_eq!(
-            TagAction::from_flags(false, false).expect("no flag is always valid"),
+            TagAction::from_flags(Language::Japanese.messages(), false, false)
+                .expect("no flag is always valid"),
             TagAction::Print
         );
     }
@@ -169,7 +177,8 @@ mod tests {
     #[test]
     fn the_switch_flag_selects_switch() {
         assert_eq!(
-            TagAction::from_flags(true, false).expect("--switch alone is valid"),
+            TagAction::from_flags(Language::Japanese.messages(), true, false)
+                .expect("--switch alone is valid"),
             TagAction::Switch
         );
     }
@@ -177,14 +186,15 @@ mod tests {
     #[test]
     fn the_diff_flag_selects_diff() {
         assert_eq!(
-            TagAction::from_flags(false, true).expect("--diff alone is valid"),
+            TagAction::from_flags(Language::Japanese.messages(), false, true)
+                .expect("--diff alone is valid"),
             TagAction::Diff
         );
     }
 
     #[test]
     fn combining_switch_and_diff_is_rejected_instead_of_favouring_one() {
-        let err = TagAction::from_flags(true, true)
+        let err = TagAction::from_flags(Language::Japanese.messages(), true, true)
             .expect_err("--switch and --diff must not be combined silently");
 
         assert!(
@@ -229,6 +239,56 @@ mod tests {
 
     #[test]
     fn an_item_keeps_the_tag_name_as_its_key() {
-        assert_eq!(to_item(&annotated()).key(), "v1.0");
+        assert_eq!(to_item(Language::Japanese, &annotated()).key(), "v1.0");
+    }
+
+    #[test]
+    fn every_tag_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let tag = language.messages().tag();
+
+            assert!(
+                !tag.conflicting_actions().trim().is_empty(),
+                "{language:?} left a message empty"
+            );
+            // オプション名は訳さないため、どの言語でもそのまま現れる
+            assert!(
+                tag.conflicting_actions().contains("--switch")
+                    && tag.conflicting_actions().contains("--diff"),
+                "{language:?} must name both options: {text}",
+                text = tag.conflicting_actions()
+            );
+
+            for text in [
+                tag.selection_not_found("v1.0"),
+                tag.switch_failed("v1.0"),
+                tag.diff_failed("v1.0"),
+            ] {
+                assert!(
+                    text.contains("v1.0"),
+                    "{language:?} must mention the tag: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_tag_wording_is_translated() {
+        let japanese = Language::Japanese.messages().tag();
+        let english = Language::English.messages().tag();
+
+        assert_ne!(
+            japanese.conflicting_actions(),
+            english.conflicting_actions()
+        );
+        assert_ne!(
+            japanese.selection_not_found("v1.0"),
+            english.selection_not_found("v1.0")
+        );
+        assert_ne!(
+            japanese.switch_failed("v1.0"),
+            english.switch_failed("v1.0")
+        );
+        assert_ne!(japanese.diff_failed("v1.0"), english.diff_failed("v1.0"));
     }
 }

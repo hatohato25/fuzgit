@@ -16,8 +16,9 @@ use crate::commands::revert::MessageEditing;
 use crate::commands::stash::{StashAction, UntrackedFiles};
 use crate::commands::sync::SyncMode;
 use crate::commands::tag::TagAction;
+use crate::error;
 use crate::git::read::{BranchScope, CommitScope};
-use crate::git::repo;
+use crate::i18n::{Language, Messages};
 
 pub mod add;
 pub mod branch;
@@ -68,13 +69,23 @@ pub(crate) fn status_preview_args() -> Vec<String> {
 
 /// サブコマンドを対応する実装へ振り分ける。
 ///
+/// `repository` は `main` が開いた結果をそのまま受け取る。リポジトリを開く位置が `main` に
+/// あるのは、表示言語の解決が `git config fuzgit.lang` を必要とし、かつリポジトリ外でも
+/// 成立しなければならないため（design.md「起動シーケンス」）。**開けなかった場合の判定は
+/// 従来どおりここで行う**ので、サブコマンドから見た挙動は変わらない。
+///
 /// # Errors
 ///
 /// リポジトリのオープンに失敗した場合、および各サブコマンドの処理が失敗した場合にエラーを返す。
-pub fn dispatch(command: &Command) -> Result<()> {
+pub fn dispatch(
+    language: Language,
+    messages: &dyn Messages,
+    repository: error::Result<gix::Repository>,
+    command: &Command,
+) -> Result<()> {
     // すべてのサブコマンドが git リポジトリ内での実行を前提とするため、
     // 個別処理へ入る前にここで一度だけ検証してエラーメッセージを統一する
-    let repository = repo::discover_from_current_dir()?;
+    let repository = repository?;
 
     match command {
         // サブコマンドなしは従来どおりの切替（FR-1）。管理操作は branch_manage が担う
@@ -85,17 +96,17 @@ pub fn dispatch(command: &Command) -> Result<()> {
                 } else {
                     BranchScope::Local
                 };
-                branch::run(&repository, scope)
+                branch::run(language, messages, &repository, scope)
             }
-            Some(command) => branch_manage::run(&repository, command),
+            Some(command) => branch_manage::run(language, messages, &repository, command),
         },
-        Command::Log { limit } => log::run(&repository, *limit),
+        Command::Log { limit } => log::run(language, messages, &repository, *limit),
         Command::CherryPick { branch } => {
             let scope = match branch {
                 Some(name) => CommitScope::Branch(name),
                 None => CommitScope::AllBranches,
             };
-            cherry_pick::run(&repository, scope)
+            cherry_pick::run(language, messages, &repository, scope)
         }
         Command::Restore { source, staged } => {
             let target = if *staged {
@@ -103,9 +114,9 @@ pub fn dispatch(command: &Command) -> Result<()> {
             } else {
                 RestoreTarget::Worktree
             };
-            restore::run(&repository, target, source.as_deref())
+            restore::run(language, messages, &repository, target, source.as_deref())
         }
-        Command::Add => add::run(&repository),
+        Command::Add => add::run(language, messages, &repository),
         Command::Stash { command } => match command {
             StashCommand::Push {
                 message,
@@ -116,24 +127,37 @@ pub fn dispatch(command: &Command) -> Result<()> {
                 } else {
                     UntrackedFiles::Exclude
                 };
-                stash::push(&repository, message.as_deref(), untracked)
+                stash::push(
+                    language,
+                    messages,
+                    &repository,
+                    message.as_deref(),
+                    untracked,
+                )
             }
-            StashCommand::Apply => stash::run(&repository, StashAction::Apply),
-            StashCommand::Pop => stash::run(&repository, StashAction::Pop),
-            StashCommand::Drop => stash::run(&repository, StashAction::Drop),
+            StashCommand::Apply => stash::run(language, messages, &repository, StashAction::Apply),
+            StashCommand::Pop => stash::run(language, messages, &repository, StashAction::Pop),
+            StashCommand::Drop => stash::run(language, messages, &repository, StashAction::Drop),
         },
-        Command::Tag { switch, diff } => {
-            tag::run(&repository, TagAction::from_flags(*switch, *diff)?)
+        Command::Tag { switch, diff } => tag::run(
+            language,
+            messages,
+            &repository,
+            TagAction::from_flags(messages, *switch, *diff)?,
+        ),
+        Command::Reflog { restore } => {
+            reflog::run(language, messages, &repository, restore.as_deref())
         }
-        Command::Reflog { restore } => reflog::run(&repository, restore.as_deref()),
-        Command::Commit { message } => commit::run(&repository, message.as_deref()),
+        Command::Commit { message } => {
+            commit::run(language, messages, &repository, message.as_deref())
+        }
         Command::Push { set_upstream } => {
             let upstream = if *set_upstream {
                 UpstreamUpdate::Set
             } else {
                 UpstreamUpdate::Keep
             };
-            push::run(&repository, upstream)
+            push::run(language, messages, &repository, upstream)
         }
         Command::Fixup { squash } => {
             let kind = if *squash {
@@ -141,26 +165,28 @@ pub fn dispatch(command: &Command) -> Result<()> {
             } else {
                 FixupKind::Fixup
             };
-            fixup::run(&repository, kind)
+            fixup::run(language, messages, &repository, kind)
         }
         Command::Merge {
             no_ff,
             squash,
             ff_only,
         } => merge::run(
+            language,
+            messages,
             &repository,
-            MergeMode::from_flags(*no_ff, *squash, *ff_only)?,
+            MergeMode::from_flags(messages, *no_ff, *squash, *ff_only)?,
         ),
-        Command::Rebase => rebase::run(&repository),
+        Command::Rebase => rebase::run(language, messages, &repository),
         Command::Revert { no_edit } => {
             let editing = if *no_edit {
                 MessageEditing::Skip
             } else {
                 MessageEditing::Interactive
             };
-            revert::run(&repository, editing)
+            revert::run(language, messages, &repository, editing)
         }
-        Command::Status => status::run(&repository),
+        Command::Status => status::run(language, messages, &repository),
         Command::Diff {
             staged,
             head,
@@ -168,8 +194,10 @@ pub fn dispatch(command: &Command) -> Result<()> {
             branch,
             commit,
         } => diff::run(
+            language,
+            messages,
             &repository,
-            DiffMode::from_flags(*staged, *head, *upstream, *branch, *commit)?,
+            DiffMode::from_flags(messages, *staged, *head, *upstream, *branch, *commit)?,
         ),
         Command::Fetch { prune, siblings } => {
             let prune = if *prune {
@@ -182,12 +210,17 @@ pub fn dispatch(command: &Command) -> Result<()> {
             } else {
                 FetchScope::Current
             };
-            fetch::run(&repository, scope, prune)
+            fetch::run(language, messages, &repository, scope, prune)
         }
-        Command::Pull => pull::run(&repository),
-        Command::Sync { rebase, merge } => {
-            sync::run(&repository, SyncMode::from_flags(*rebase, *merge)?)
+        Command::Pull => pull::run(language, messages, &repository),
+        Command::Sync { rebase, merge } => sync::run(
+            language,
+            messages,
+            &repository,
+            SyncMode::from_flags(messages, *rebase, *merge)?,
+        ),
+        Command::Worktree { command } => {
+            worktree::run(language, messages, &repository, command.as_ref())
         }
-        Command::Worktree { command } => worktree::run(&repository, command.as_ref()),
     }
 }

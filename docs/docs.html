@@ -56,6 +56,7 @@
           <li><a href="#requirements"><span lang="en">Requirements</span><span lang="ja">前提条件</span></a></li>
           <li><a href="#install"><span lang="en">Installation</span><span lang="ja">インストール</span></a></li>
           <li><a href="#usage"><span lang="en">Usage</span><span lang="ja">使い方</span></a></li>
+          <li><a href="#language"><span lang="en">Language</span><span lang="ja">表示言語</span></a></li>
         </ul>
 
         <h2><span lang="en">Commands</span><span lang="ja">コマンド</span></h2>
@@ -120,9 +121,10 @@
               <li>Command (binary) name: <strong><code>gz</code></strong></li>
             </ul>
             <p class="muted">
-              fuzgit&rsquo;s own messages are currently written in Japanese.
-              Console excerpts on this page are shown verbatim; the English
-              version adds a gloss where the wording matters.
+              fuzgit speaks English and Japanese, English being the default
+              (see <a href="#language">Language</a>). Console excerpts on this
+              page are shown verbatim, so some of them still show the Japanese
+              display (<code>--lang ja</code>) with an English gloss.
             </p>
           </div>
           <div lang="ja">
@@ -450,6 +452,218 @@ cargo install --path .</code></pre>
                 </tr>
               </tbody>
             </table>
+          </div>
+        </section>
+
+        <section id="language">
+          <h2>
+            <span lang="en">Language</span><span lang="ja">表示言語</span>
+            <a class="anchor" href="#language" aria-label="Link to this section">#</a>
+          </h2>
+          <div lang="en">
+            <p>
+              Every piece of text fuzgit produces &mdash; messages, errors,
+              finder headers, confirmation prompts and <code>--help</code>
+              &mdash; is available in <strong>English and Japanese</strong>.
+              <strong>English is the default.</strong> To use Japanese:
+            </p>
+            <pre><code>git config --global fuzgit.lang ja   # persistent (--local sets it per repository)
+gz --lang ja branch                  # one-off, accepted by every subcommand</code></pre>
+          </div>
+          <div lang="ja">
+            <p>
+              fuzgit が表示するすべての文言（メッセージ・エラー・finder のヘッダー・
+              確認プロンプト・<code>--help</code>）が<strong>日本語と英語</strong>に
+              対応しています。<strong>既定は英語</strong>です。日本語にするには次のように
+              指定します。
+            </p>
+            <pre><code>git config --global fuzgit.lang ja   # 永続設定（--local ならリポジトリごと）
+gz --lang ja branch                  # 単発の上書き。全サブコマンドで指定できる</code></pre>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <caption class="table-caption">
+                <span lang="en">The first layer that decides the language wins; the layers below it are not consulted.</span>
+                <span lang="ja">先に決まった層より下は参照しません。</span>
+              </caption>
+              <thead>
+                <tr>
+                  <th scope="col"><span lang="en">Priority</span><span lang="ja">優先</span></th>
+                  <th scope="col"><span lang="en">Source</span><span lang="ja">取得元</span></th>
+                  <th scope="col"><span lang="en">Meant for</span><span lang="ja">用途</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>1</td>
+                  <td><code>--lang &lt;ja|en|auto&gt;</code></td>
+                  <td>
+                    <span lang="en">A one-off override. A global option, accepted by every subcommand; there is no short form.</span>
+                    <span lang="ja">単発の上書き。全サブコマンド共通のグローバルオプションで、短縮形はありません。</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td>2</td>
+                  <td><code>FUZGIT_LANG</code></td>
+                  <td>
+                    <span lang="en">Per shell or session.</span>
+                    <span lang="ja">シェル・セッション単位の上書き。</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td>3</td>
+                  <td><code>git config fuzgit.lang</code></td>
+                  <td>
+                    <span lang="en">The persistent setting. system / global / local / worktree all apply exactly as they do for git itself.</span>
+                    <span lang="ja">永続設定。system / global / local / worktree の階層が git 本体と同じように効きます。</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td>4</td>
+                  <td>
+                    <code>LC_ALL</code> &rarr; <code>LC_MESSAGES</code> &rarr;
+                    <code>LANGUAGE</code> &rarr; <code>LANG</code>
+                  </td>
+                  <td>
+                    <span lang="en">Read from the environment, in the POSIX and gettext order.</span>
+                    <span lang="ja">環境からの自動判定（POSIX / gettext と同じ順）。</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td>5</td>
+                  <td><span lang="en">fallback</span><span lang="ja">フォールバック</span></td>
+                  <td><code>en</code></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div lang="en">
+            <ul>
+              <li>
+                <strong>Layers 1&ndash;3 are strict.</strong> They are explicit
+                instructions to fuzgit, so any value other than <code>ja</code>,
+                <code>en</code> or <code>auto</code> stops with an error instead
+                of quietly falling back. An empty value counts as &ldquo;not
+                set&rdquo; and resolution moves to the next layer. If reading
+                <code>fuzgit.lang</code> fails altogether, fuzgit stops as well.
+              </li>
+              <li>
+                <strong>Layer 4 is lenient.</strong> Locale variables describe
+                the environment rather than instruct fuzgit, so a value it
+                cannot interpret &mdash; <code>C</code> and <code>POSIX</code>
+                included &mdash; is not an error; it simply means &ldquo;not
+                Japanese&rdquo; and the fallback applies.
+              </li>
+              <li>
+                <code>auto</code> means &ldquo;skip the remaining explicit
+                layers and read the environment&rdquo;, wherever it appears in
+                layers 1&ndash;3.
+              </li>
+              <li>
+                <strong>There is no fuzgit configuration file.</strong> The
+                setting lives in git&rsquo;s own <code>fuzgit.lang</code> key,
+                read in-process with gix &mdash; no <code>git</code> process is
+                started to resolve the language.
+              </li>
+              <li>
+                The language resolves <strong>outside a repository</strong> too,
+                so <code>gz --help</code> and the &ldquo;not a git
+                repository&rdquo; error are translated as well; system and
+                global settings still apply there. One exception: a
+                <code>fuzgit.lang</code> written under a conditional include
+                (<code>includeIf</code>) in <code>~/.gitconfig</code> is not
+                read when resolving outside a repository.
+              </li>
+            </ul>
+            <p>
+              Two limits are worth knowing about.
+            </p>
+            <ul>
+              <li>
+                <strong>Messages from git itself are not guaranteed to be
+                translated.</strong> fuzgit tells every git command it runs
+                which language to speak, but whether a catalog exists depends on
+                how git was built (NLS) and on the installed locale data. In
+                particular <strong>git upstream ships no Japanese
+                catalog</strong>, so git&rsquo;s own output stays English even
+                when you pick <code>ja</code>. Forcing <code>en</code> is the
+                safe direction, because it only asks git for its original text.
+              </li>
+              <li>
+                <strong>Text that clap prints on its own stays
+                English</strong> &mdash; <code>Usage:</code>,
+                <code>Options:</code>, <code>Commands:</code> and parser errors
+                such as <code>error: unexpected argument</code>. clap 4 has no
+                localization hook. fuzgit&rsquo;s own descriptions in
+                <code>--help</code>, including the one for <code>--lang</code>,
+                do switch.
+              </li>
+            </ul>
+            <p class="muted">
+              Output that fuzgit parses is a separate matter: those git
+              invocations always run with <code>LC_MESSAGES=C</code>, whatever
+              display language was resolved, so parsing never depends on the
+              environment. See <a href="#debug">Debugging</a> for how the two
+              kinds are told apart in the log.
+            </p>
+          </div>
+          <div lang="ja">
+            <ul>
+              <li>
+                <strong>層 1〜3 は厳格です。</strong>fuzgit への明示的な指定であるため、
+                <code>ja</code> / <code>en</code> / <code>auto</code> 以外の値は
+                黙って既定へ倒さずエラーで停止します。空文字は「未設定」として扱い、
+                次の層へ進みます。<code>fuzgit.lang</code> の読み取り自体に失敗した場合も
+                停止します。
+              </li>
+              <li>
+                <strong>層 4 は寛容です。</strong>ロケール環境変数は fuzgit への指示ではなく
+                環境の記述であるため、解釈できない値（<code>C</code> / <code>POSIX</code> を
+                含む）はエラーにせず「日本語ではない」と判定してフォールバックへ進みます。
+              </li>
+              <li>
+                <code>auto</code> は層 1〜3 のどこに現れても「以降の明示指定を飛ばして
+                環境からの自動判定へ進む」という意味です。
+              </li>
+              <li>
+                <strong>fuzgit 独自の設定ファイルはありません。</strong>設定は git config の
+                <code>fuzgit.lang</code> に置き、gix でプロセス内から読みます
+                （言語の解決で <code>git</code> プロセスは起動しません）。
+              </li>
+              <li>
+                言語は<strong>リポジトリの外でも解決できます</strong>。
+                <code>gz --help</code> や「git リポジトリではありません」のエラーも
+                翻訳対象で、system / global の設定はそのまま効きます。ただし
+                <code>~/.gitconfig</code> の条件付き include（<code>includeIf</code>）配下に
+                書いた <code>fuzgit.lang</code> は、リポジトリ外での解決では読まれません。
+              </li>
+            </ul>
+            <p>以下の 2 点は制約として把握しておいてください。</p>
+            <ul>
+              <li>
+                <strong>git 本体のメッセージが翻訳されることは保証しません。</strong>
+                fuzgit は起動するすべての git へ言語を伝えますが、翻訳が存在するかは
+                git のビルド（NLS の有無）とロケールデータに依存します。とくに
+                <strong>git 本体には日本語カタログがありません</strong>。<code>ja</code> を
+                選んでも git 自身の出力は英語のままです。<code>en</code> への統一は
+                git に原文を出させるだけなので、環境に依存せず成立します。
+              </li>
+              <li>
+                <strong>clap が自前で出す固定文言は英語のままです。</strong>
+                <code>Usage:</code> / <code>Options:</code> / <code>Commands:</code> と
+                <code>error: unexpected argument</code> のようなパーサエラーが該当します
+                （clap 4 に多言語化の機構がないため）。<code>--lang</code> の説明を含め、
+                <code>--help</code> のうち fuzgit 自身の文言は切り替わります。
+              </li>
+            </ul>
+            <p class="muted">
+              fuzgit が<strong>パースする</strong> git の出力は別扱いで、解決された表示言語に
+              関わらず常に <code>LC_MESSAGES=C</code> で実行します（実行環境によって
+              パースが壊れないようにするため）。ログ上での見分け方は
+              <a href="#debug">デバッグ</a>を参照してください。
+            </p>
           </div>
         </section>
 
@@ -3367,8 +3581,11 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
             <a class="anchor" href="#debug" aria-label="Link to this section">#</a>
           </h2>
           <pre><code>$ FUZGIT_DEBUG=1 gz branch
-[fuzgit] git log --color=always --oneline --decorate -n 50 feature --
-[fuzgit] git switch feature</code></pre>
+[fuzgit] (B) git log --color=always --oneline --decorate -n 50 feature -- [LANGUAGE=en]
+[fuzgit] (B) git switch feature [LANGUAGE=en]
+
+$ FUZGIT_DEBUG=1 gz status
+[fuzgit] (A) (cwd: .) git status --porcelain -z --untracked-files=all [LC_MESSAGES=C]</code></pre>
           <div lang="en">
             <p>
               Setting the environment variable <code>FUZGIT_DEBUG=1</code> prints
@@ -3378,7 +3595,17 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
               <li>It is enabled only when the value is exactly <code>1</code>. Unset, empty, <code>0</code>, <code>true</code> and anything else are all disabled.</li>
               <li>The destination is always stderr (stdout is kept free for piping hashes, tag names and paths).</li>
               <li>The log lists the argument array as-is. Because it is printed on every preview generation, it can visibly mix with the drawing while the fuzzy finder is on screen.</li>
-              <li>Commands that target another directory are printed as <code>[fuzgit] (cwd: &lt;directory&gt;) git ...</code>.</li>
+              <li>Commands that target another directory are printed as <code>[fuzgit] (A|B) (cwd: &lt;directory&gt;) git ...</code>.</li>
+              <li>
+                <code>(A)</code> marks a call whose output <b>fuzgit parses</b>: it always
+                runs with <code>LC_MESSAGES=C</code> so parsing cannot depend on the
+                environment. <code>(B)</code> marks a call whose output <b>you read</b>
+                (inherited stdio, previews, reports passed through): the resolved display
+                language is propagated as <code>LANGUAGE=&lt;ja|en&gt;</code>. The variables
+                that were set or removed are listed in brackets at the end of the line, so
+                the log answers &ldquo;which language did this git speak?&rdquo; directly.
+                See <a href="#language">Language</a>.
+              </li>
             </ul>
           </div>
           <div lang="ja">
@@ -3390,7 +3617,16 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
               <li>有効になるのは値が厳密に <code>1</code> の場合だけです。未設定・空文字・<code>0</code>・<code>true</code> などはすべて無効です。</li>
               <li>出力先は必ず標準エラーです（標準出力はハッシュ・タグ名・パスのパイプ用途のために空けてあります）。</li>
               <li>ログにはコマンドの引数配列がそのまま並びます。プレビュー生成のたびに出力されるため、fuzzy finder の表示中は画面の描画と混ざって見えることがあります。</li>
-              <li>別ディレクトリを対象に実行するコマンドは <code>[fuzgit] (cwd: &lt;ディレクトリ&gt;) git ...</code> の形式で出力します。</li>
+              <li>別ディレクトリを対象に実行するコマンドは <code>[fuzgit] (A|B) (cwd: &lt;ディレクトリ&gt;) git ...</code> の形式で出力します。</li>
+              <li>
+                <code>(A)</code> は<b>fuzgit が出力をパースする</b>呼び出しで、実行環境に
+                よってパースが壊れないよう常に <code>LC_MESSAGES=C</code> で実行します。
+                <code>(B)</code> は<b>ユーザーが出力を読む</b>呼び出し（継承 stdio・プレビュー・
+                そのまま提示する報告）で、解決された表示言語を
+                <code>LANGUAGE=&lt;ja|en&gt;</code> として伝播します。設定・削除した環境変数は
+                行末の角括弧に併記されるため、「この git は何語で話したのか」がログから直接
+                分かります。<a href="#language">表示言語</a>も参照してください。
+              </li>
             </ul>
           </div>
         </section>

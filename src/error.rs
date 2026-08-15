@@ -2,14 +2,31 @@
 //!
 //! ライブラリ層（`git` / `finder`）はここで定義した [`Error`] を返し、
 //! アプリ層（`commands` / `main`）は `anyhow` で集約する。
+//!
+//! # 表示の責務は [`Error`] にない（FR-27）
+//!
+//! `#[error("…")]` が与える `Display` は **英語の開発者向け表示**であり、
+//! ユーザーへ見せる文言ではない。`std::error::Error` の `Display` は `anyhow` の
+//! `#[source]` 連鎖と `Debug` 出力に必要である一方、そこへ表示言語の状態を持ち込めないため
+//! （design.md「`error.rs` の日本語をどうするか」）。フォールバック言語が `en` である以上、
+//! ここが英語であることは規定動作と整合する。
+//!
+//! ユーザー向けの表示は [`crate::i18n::messages::ErrorMessages::describe`] が担う。
 
 use thiserror::Error;
 
+use crate::git::read::{MalformedOutput, ReadOperation};
+use crate::git::siblings::FilesystemOperation;
+
 /// fuzgit のライブラリ層で発生するエラー。
+///
+/// バリアントを追加すると [`crate::i18n::ja`] / [`crate::i18n::en`] の網羅的な `match` が
+/// 双方ともコンパイルエラーになる。翻訳漏れを実行時ではなくコンパイル時に検出するための
+/// 設計であり、`describe` 側にワイルドカードの腕を足してはならない。
 #[derive(Debug, Error)]
 pub enum Error {
     /// カレントディレクトリ（および親ディレクトリ）に git リポジトリが見つからない。
-    #[error("git リポジトリではありません。git リポジトリ内で実行してください")]
+    #[error("not a git repository")]
     NotARepository {
         /// `gix` の探索エラー。
         ///
@@ -20,10 +37,14 @@ pub enum Error {
     },
 
     /// `gix` によるリポジトリ情報の読み取りに失敗した。
-    #[error("リポジトリ情報の読み取りに失敗しました（{operation}）")]
+    ///
+    /// `{operation:?}` として `Debug` を用いるのは、[`ReadOperation`] に
+    /// **言語に依存しない `Display` が存在しないから**である。ユーザー向けの表示は
+    /// [`crate::i18n::messages::ErrorMessages::describe`] が言語ごとに組み立てる。
+    #[error("failed to read repository information ({operation:?})")]
     RepositoryReadFailed {
-        /// 失敗した読み取り操作の説明（例: `ローカルブランチの列挙`）。
-        operation: String,
+        /// 失敗した読み取り操作。
+        operation: ReadOperation,
         /// `gix` 側のエラー。
         ///
         /// `gix` の読み取り API はモジュールごとに異なるエラー型を返すため、
@@ -36,7 +57,7 @@ pub enum Error {
     ///
     /// この経路では git のメッセージがユーザーの端末に出ていないため、
     /// 実行した引数とキャプチャした標準エラーを添えて原因を伝える。
-    #[error("git コマンドが失敗しました: git {args}{}", stderr_suffix(.stderr))]
+    #[error("git command failed: git {args}{}", stderr_suffix(.stderr))]
     GitCommandFailed {
         /// 実行した引数（表示用にスペース区切りで連結したもの）。
         args: String,
@@ -49,7 +70,7 @@ pub enum Error {
     /// git 自身のエラーメッセージは既にユーザーの端末へ出力済みであるため、
     /// 引数（パススペックの列を含む）を再掲すると本当の原因がその中に埋もれる。
     /// ここではコマンド名と終了状況だけを示し、詳細は git の出力に委ねる。
-    #[error("{command} が{}", exit_status_text(.code))]
+    #[error("{command} {}", exit_status_text(.code))]
     GitRunFailed {
         /// 表示用のコマンド名（例: `git commit`）。
         command: String,
@@ -58,11 +79,11 @@ pub enum Error {
     },
 
     /// `git` 実行ファイルが PATH 上に存在しない。
-    #[error("git コマンドが見つかりません。git をインストールして PATH を通してください")]
+    #[error("git command not found")]
     GitNotFound,
 
     /// `git` の起動そのものに失敗した（権限不足など、実行ファイル不在以外の理由）。
-    #[error("git コマンドの起動に失敗しました: git {args}")]
+    #[error("failed to start the git command: git {args}")]
     GitSpawnFailed {
         /// 実行しようとした引数（表示用にスペース区切りで連結したもの）。
         args: String,
@@ -75,10 +96,7 @@ pub enum Error {
     ///
     /// 候補が 0 件になる原因のうち、`git init` 直後のように「まだコミットが無い」場合は
     /// [`Error::NoCandidates`] と区別して原因と次の操作を伝える。
-    #[error(
-        "現在のブランチ `{branch}` にはまだコミットがありません。\
-         `git commit` で最初のコミットを作成してから実行してください"
-    )]
+    #[error("the current branch `{branch}` has no commits yet")]
     UnbornHead {
         /// HEAD が指している（まだ実体の無い）ブランチ名。
         branch: String,
@@ -88,14 +106,11 @@ pub enum Error {
     ///
     /// `gz push` は「現在のブランチ」を push 対象として固定するため、
     /// ブランチが定まらない状態では候補を作れない。
-    #[error(
-        "HEAD がブランチを指していません（detached HEAD）。\
-         push するブランチが定まらないため、`git switch <ブランチ>` で切り替えてから実行してください"
-    )]
+    #[error("HEAD is not on a branch (detached HEAD)")]
     DetachedHead,
 
     /// 作業ツリーを持たない（bare）リポジトリで、作業ツリーを前提とする操作を行おうとした。
-    #[error("作業ツリーがありません。bare リポジトリでは実行できない操作です")]
+    #[error("no worktree: this operation is not available in a bare repository")]
     NoWorktree,
 
     /// 兄弟リポジトリの走査範囲（ワークツリー root の親ディレクトリ）を決められない。
@@ -103,8 +118,8 @@ pub enum Error {
     /// リポジトリがファイルシステムの root 直下にある場合に起こる。走査範囲が定まらない状態で
     /// 暗黙に現在のリポジトリだけへ倒すと、指定した `--siblings` が黙って無視されるため停止する。
     #[error(
-        "ワークツリーのルート `{}` の親ディレクトリを取得できないため、\
-         兄弟リポジトリの走査範囲を決められません",
+        "cannot determine the scope for sibling repositories: \
+         the worktree root `{}` has no parent directory",
         .workdir.display()
     )]
     NoSiblingScope {
@@ -113,10 +128,12 @@ pub enum Error {
     },
 
     /// リポジトリ探索に伴うファイルシステムの読み取りに失敗した。
-    #[error("{operation}に失敗しました: {}", .path.display())]
+    ///
+    /// `{operation:?}` を用いる理由は [`Error::RepositoryReadFailed`] と同じ。
+    #[error("filesystem read failed ({operation:?}): {}", .path.display())]
     FilesystemReadFailed {
-        /// 失敗した操作の説明（例: `パスの正規化`）。
-        operation: String,
+        /// 失敗した操作。
+        operation: FilesystemOperation,
         /// 操作の対象パス。
         path: std::path::PathBuf,
         /// 標準ライブラリ側の I/O エラー。
@@ -124,19 +141,33 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    /// `git` の出力が想定した形式と異なる。
+    ///
+    /// [`Error::RepositoryReadFailed`] と分けているのは、**原因となる `source` が存在しない**
+    /// ため。食い違いを見つけたのは外部のライブラリではなく fuzgit 自身であり、
+    /// 何が想定と違ったかは [`MalformedOutput`] が値として保持する
+    /// （表示済みの文字列を `source` へ詰めると、その分だけ表示言語を選べなくなる）。
+    #[error("malformed git output ({operation:?}): {detail:?}")]
+    GitOutputMalformed {
+        /// 出力を読もうとしていた操作。
+        operation: ReadOperation,
+        /// 想定と食い違った内容。
+        detail: MalformedOutput,
+    },
+
     /// ユーザーが fuzzy finder を中断した（Esc / Ctrl-C）。
-    #[error("選択が中断されました")]
+    #[error("the selection was cancelled")]
     Cancelled,
 
     /// fuzzy finder に渡す候補が 1 件も無い。
-    #[error("選択できる候補がありません")]
+    #[error("no candidates to select from")]
     NoCandidates,
 
     /// fuzzy finder の初期化・実行に失敗した。
     ///
     /// skim は `eyre::Report` を返すが `std::error::Error` を実装しないため、
     /// メッセージへ変換して保持する。
-    #[error("fuzzy finder の実行に失敗しました: {message}")]
+    #[error("the fuzzy finder failed: {message}")]
     FinderFailed {
         /// skim から得られたエラーメッセージ。
         message: String,
@@ -147,7 +178,10 @@ pub enum Error {
 ///
 /// 継承 stdio で実行した場合は stderr を保持できず空文字列になるため、
 /// その場合に空行だけが残らないようにする。
-fn stderr_suffix(stderr: &str) -> String {
+///
+/// 整形するのは改行と空白だけであり言語に依存しないため、`Display`（英語）と
+/// [`crate::i18n::messages::ErrorMessages::describe`]（ja / en）の双方から共有する。
+pub(crate) fn stderr_suffix(stderr: &str) -> String {
     let trimmed = stderr.trim_end();
     if trimmed.is_empty() {
         String::new()
@@ -156,13 +190,14 @@ fn stderr_suffix(stderr: &str) -> String {
     }
 }
 
-/// プロセスの終了状況をエラーメッセージ末尾の述部として整形する。
+/// プロセスの終了状況を `Display`（英語）の述部として整形する。
 ///
 /// シグナルで終了した場合は終了コードが得られないため、コードを取り繕わず理由の方を示す。
+/// ユーザー向けの同等の表現は各言語の `describe` が持つ。
 fn exit_status_text(code: &Option<i32>) -> String {
     match code {
-        Some(code) => format!("終了コード {code} で終了しました"),
-        None => "シグナルにより終了しました".to_owned(),
+        Some(code) => format!("exited with code {code}"),
+        None => "was terminated by a signal".to_owned(),
     }
 }
 
@@ -183,6 +218,9 @@ pub fn is_cancelled(error: &anyhow::Error) -> bool {
 mod tests {
     use super::*;
 
+    // `Display` はユーザー向けの表示ではなく英語の開発者向け表示であるため、
+    // 期待値も英語で固定する（ユーザー向けの文言は `i18n::ja` / `i18n::en` のテストで検証する）。
+
     #[test]
     fn git_command_failed_appends_stderr() {
         let err = Error::GitCommandFailed {
@@ -191,7 +229,7 @@ mod tests {
         };
         assert_eq!(
             err.to_string(),
-            "git コマンドが失敗しました: git switch nope\nfatal: invalid reference: nope"
+            "git command failed: git switch nope\nfatal: invalid reference: nope"
         );
     }
 
@@ -201,10 +239,7 @@ mod tests {
             args: "switch nope".to_string(),
             stderr: String::new(),
         };
-        assert_eq!(
-            err.to_string(),
-            "git コマンドが失敗しました: git switch nope"
-        );
+        assert_eq!(err.to_string(), "git command failed: git switch nope");
     }
 
     #[test]
@@ -213,7 +248,7 @@ mod tests {
             command: "git commit".to_string(),
             code: Some(1),
         };
-        assert_eq!(err.to_string(), "git commit が終了コード 1 で終了しました");
+        assert_eq!(err.to_string(), "git commit exited with code 1");
     }
 
     #[test]
@@ -235,12 +270,34 @@ mod tests {
             command: "git push".to_string(),
             code: None,
         };
-        assert_eq!(err.to_string(), "git push がシグナルにより終了しました");
+        assert_eq!(err.to_string(), "git push was terminated by a signal");
     }
 
     #[test]
     fn stderr_suffix_ignores_whitespace_only_input() {
         assert_eq!(stderr_suffix("  \n\n"), "");
+    }
+
+    #[test]
+    fn display_is_english_for_every_variant_that_takes_no_source() {
+        // 表示言語を持ち込めない `Display` が英語で固定されていること（日本語が残っていないこと）を
+        // 代表的なバリアントで確認する。ユーザー向けの日本語は `describe` が担う
+        for error in [
+            Error::GitNotFound,
+            Error::DetachedHead,
+            Error::NoWorktree,
+            Error::Cancelled,
+            Error::NoCandidates,
+            Error::UnbornHead {
+                branch: "main".to_string(),
+            },
+        ] {
+            let message = error.to_string();
+            assert!(
+                message.is_ascii(),
+                "the developer-facing Display must stay in English: {message}"
+            );
+        }
     }
 
     #[test]

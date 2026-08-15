@@ -1,8 +1,24 @@
-//! `clap` derive によるコマンドライン定義。
+//! `clap` derive によるコマンドライン定義と、ヘルプ文言の実行時差し替え。
+//!
+//! # derive のリテラルを英語にする理由（FR-25 / FR-27）
+//!
+//! derive に書くリテラル（`about` / doc comment）は `&'static str` のコンパイル時定数であり、
+//! 実行時に切り替えられない。表示言語ごとの文言は [`localized_command`] が
+//! [`CliMessages`](crate::i18n::messages::CliMessages) の値で差し替えて与え、**リテラルには
+//! 英語を置く**。差し替えが漏れたときに出るのが英語＝フォールバック言語であり、規定動作と
+//! 整合するため（design.md「derive のリテラルを英語にする」）。日本語をリテラルに残すと、
+//! 漏れたときに `en` の利用者へ日本語が出てしまう。
+//!
+//! 設計上の理由づけは doc comment ではなく `//` のコメントで書く。doc comment の 2 段落目
+//! 以降を `clap` が `long_about` / `long_help` として `--help` へ出してしまい、**実行時に
+//! 差し替えない文言がヘルプに増える**ため（この方針により `-h` と `--help` の内容も一致する）。
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Command as ClapCommand, CommandFactory, Parser, Subcommand, ValueEnum};
+
+use crate::i18n::Messages;
+use crate::i18n::messages::CliMessages;
 
 /// コミット候補の既定取得件数。
 ///
@@ -10,15 +26,41 @@ use clap::{Parser, Subcommand};
 /// `gz log --limit` の既定値と `gz cherry-pick` の候補数上限に用いる。
 pub const DEFAULT_COMMIT_LIMIT: usize = 1000;
 
+/// `--lang` が受理する値（FR-25 の層 1）。
+///
+/// 綴りは [`crate::i18n::resolve`] の層 1〜3 が受理する値（`ja` / `en` / `auto`）と
+/// 一致させる。`clap` の `value_enum` は既定でバリアント名を小文字化した綴りを使うため、
+/// ここでの改名は行わない。[`LangOption::Ja`] は日本語、[`LangOption::En`] は英語、
+/// [`LangOption::Auto`] は環境（ロケール環境変数）からの自動判定を表す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LangOption {
+    // バリアントに doc comment を付けない。`clap` はそれを候補値の説明として `--help` へ
+    // 出すが、`PossibleValue` の説明は組み立て済みの `Command` から差し替えられず、
+    // 表示言語に追随できないため（説明は上の enum の doc comment に置いてある）
+    Ja,
+    En,
+    Auto,
+}
+
 /// fuzzy finder で「選ぶ」「探す」「辿る」git 操作 CLI。
 #[derive(Debug, Parser)]
 #[command(
     name = "gz",
     version,
-    about = "fuzzy finder で選んで操作する git CLI",
+    about = "A git CLI that lets you pick, search, and trace with a fuzzy finder",
     arg_required_else_help = true
 )]
 pub struct Cli {
+    /// Display language (falls back to FUZGIT_LANG / git config fuzgit.lang / the locale)
+    //
+    // **この値は権威ではない。**言語は clap のパースより前に
+    // `crate::i18n::resolve::scan_lang_flag` による先読みで決まっており（ヘルプ・
+    // パーサエラーの文言を選ぶために先読みが必要）、ここに現れるのは同じ指定の
+    // パース結果である。両者が一致することは単体テストで固定する。
+    // 短縮形（`-l` 等）は設けない（requirements.md FR-25）。
+    #[arg(long, global = true, value_enum, value_name = "LANG")]
+    pub lang: Option<LangOption>,
+
     /// 実行するサブコマンド。
     #[command(subcommand)]
     pub command: Command,
@@ -27,51 +69,51 @@ pub struct Cli {
 /// `gz` のサブコマンド。
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// ブランチを選択して切り替える（サブコマンドで作成・削除・整理も行う）
-    ///
-    /// 引数なしの `gz branch` と `gz branch --all` は従来どおりの切替（FR-1）。
-    /// `args_conflicts_with_subcommands` により、切替用のフラグと管理サブコマンドの
-    /// 併用は clap の段階で拒否される（どちらの操作なのかが曖昧にならないようにするため）。
+    /// Pick a branch and switch to it (subcommands also create, delete and tidy up)
+    //
+    // 引数なしの `gz branch` と `gz branch --all` は従来どおりの切替（FR-1）。
+    // `args_conflicts_with_subcommands` により、切替用のフラグと管理サブコマンドの
+    // 併用は clap の段階で拒否される（どちらの操作なのかが曖昧にならないようにするため）。
     #[command(args_conflicts_with_subcommands = true)]
     Branch {
-        /// リモート追跡ブランチも候補に含める
+        /// Include remote-tracking branches in the candidates
         #[arg(short, long)]
         all: bool,
 
-        /// 実行するブランチ管理の操作（省略時はブランチの切替）
+        /// 実行するブランチ管理の操作（省略時はブランチの切替）。
         #[command(subcommand)]
         command: Option<BranchCommand>,
     },
 
-    /// コミット履歴を辿り、選択したコミットのフルハッシュを標準出力へ出す
+    /// Trace the commit history and print the full hash of the picked commit
     Log {
-        /// 取得するコミットの最大件数
+        /// Maximum number of commits to read
         #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_COMMIT_LIMIT)]
         limit: usize,
     },
 
-    /// コミットを選択して cherry-pick する
+    /// Pick a commit and cherry-pick it
     CherryPick {
-        /// 対象ブランチ（未指定時は全ブランチのコミットを候補にする）
+        /// Target branch (without it, the commits of every branch are offered)
         #[arg(short, long, value_name = "BRANCH")]
         branch: Option<String>,
     },
 
-    /// ファイルを選択して git restore する
+    /// Pick files and restore them with git restore
     Restore {
-        /// 復元元のリビジョン
+        /// Revision to restore from
         #[arg(short, long, value_name = "REV")]
         source: Option<String>,
 
-        /// ステージ済みの変更をアンステージする
+        /// Unstage the staged changes
         #[arg(long)]
         staged: bool,
     },
 
-    /// 未ステージ・未追跡ファイルを選択して git add する
+    /// Pick unstaged and untracked files and stage them with git add
     Add,
 
-    /// 変更を stash へ退避し、stash を検索して適用・破棄する
+    /// Stash changes away, then search the stashes to apply or drop them
     #[command(subcommand_required = true, arg_required_else_help = true)]
     Stash {
         /// 実行する stash の操作。
@@ -79,137 +121,137 @@ pub enum Command {
         command: StashCommand,
     },
 
-    /// タグを選択する（既定はタグ名を標準出力へ出す）
+    /// Pick a tag (prints the tag name by default)
     Tag {
-        /// 選択したタグへ detached HEAD で切り替える
+        /// Switch to the picked tag as a detached HEAD
         #[arg(long, conflicts_with = "diff")]
         switch: bool,
 
-        /// 選択したタグと HEAD の差分を表示する
+        /// Show the diff between the picked tag and HEAD
         #[arg(long)]
         diff: bool,
     },
 
-    /// HEAD の reflog を辿り、選択したコミットのハッシュを標準出力へ出す
+    /// Trace the reflog of HEAD and print the hash of the picked commit
     Reflog {
-        /// 選択したコミットから指定名の新規ブランチを作成する
+        /// Create a new branch with the given name from the picked commit
         #[arg(long, value_name = "NAME")]
         restore: Option<String>,
     },
 
-    /// コミットするファイルを選択してコミットする
+    /// Pick the files to commit and commit them
     Commit {
-        /// コミットメッセージ（省略時は git がエディタを起動する）
+        /// Commit message (without it, git starts an editor)
         #[arg(short, long, value_name = "MESSAGE")]
         message: Option<String>,
     },
 
-    /// push 先（リモート × 現在ブランチ）を選択して push する
-    ///
-    /// force push（`--force` / `--force-with-lease`）は提供しない。
+    /// Pick where to push (remote × current branch) and push
+    //
+    // force push（`--force` / `--force-with-lease`）は提供しない。
     Push {
-        /// push 先を現在ブランチの upstream として設定する
+        /// Set the push target as the upstream of the current branch
         #[arg(short = 'u', long)]
         set_upstream: bool,
     },
 
-    /// 修正対象のコミットを選択して fixup コミットを作成する
+    /// Pick the commit to amend and create a fixup commit
     Fixup {
-        /// fixup ではなく squash コミット（メッセージを結合する）を作成する
+        /// Create a squash commit (which joins the messages) instead of a fixup one
         #[arg(long)]
         squash: bool,
     },
 
-    /// ブランチを選択して merge する
+    /// Pick a branch and merge it
     Merge {
-        /// fast-forward できる場合でもマージコミットを作成する
+        /// Create a merge commit even when a fast-forward is possible
         #[arg(long, conflicts_with_all = ["squash", "ff_only"])]
         no_ff: bool,
 
-        /// マージ結果を作業ツリー・index へ反映するだけでコミットしない
+        /// Apply the merge result to the working tree and the index without committing
         #[arg(long, conflicts_with_all = ["no_ff", "ff_only"])]
         squash: bool,
 
-        /// fast-forward できる場合のみ merge する
+        /// Merge only when a fast-forward is possible
         #[arg(long, conflicts_with_all = ["no_ff", "squash"])]
         ff_only: bool,
     },
 
-    /// ブランチを選択して rebase する
+    /// Pick a branch and rebase onto it
     Rebase,
 
-    /// コミットを選択して打ち消す（revert コミットを作成する）
+    /// Pick a commit and undo it (creates a revert commit)
     Revert {
-        /// エディタを起動せず、git の既定メッセージのままコミットする
+        /// Commit with the default message of git without starting an editor
         #[arg(long)]
         no_edit: bool,
     },
 
-    /// 変更ファイルの状態を一覧し、選択したファイルに操作を行う
+    /// List the state of the changed files and act on the picked ones
     Status,
 
-    /// 比較対象を選択して差分を表示する
-    ///
-    /// 引数なしは未ステージの変更（`git diff` と同じ）。比較モードは相互排他。
+    /// Pick what to compare and show the diff
+    //
+    // 引数なしは未ステージの変更（`git diff` と同じ）。比較モードは相互排他。
     Diff {
-        /// ステージ済みの変更を対象にする（`git diff --staged` と同じ）
+        /// Target the staged changes (same as `git diff --staged`)
         #[arg(long, conflicts_with_all = ["head", "upstream", "branch", "commit"])]
         staged: bool,
 
-        /// HEAD と作業ツリーを比較する（ステージ済みの変更を含む）
+        /// Compare HEAD with the working tree (including the staged changes)
         #[arg(long, conflicts_with_all = ["staged", "upstream", "branch", "commit"])]
         head: bool,
 
-        /// HEAD と upstream を比較する
+        /// Compare HEAD with the upstream
         #[arg(long, conflicts_with_all = ["staged", "head", "branch", "commit"])]
         upstream: bool,
 
-        /// ブランチを 2 回選択して比較する
+        /// Pick two branches and compare them
         #[arg(long, conflicts_with_all = ["staged", "head", "upstream", "commit"])]
         branch: bool,
 
-        /// コミットを 2 回選択して比較する
+        /// Pick two commits and compare them
         #[arg(long, conflicts_with_all = ["staged", "head", "upstream", "branch"])]
         commit: bool,
     },
 
-    /// fetch の対象を決めて取得する
-    ///
-    /// リモートが 1 つだけの場合は選択の余地が無いため、finder を起動せず即座に取得する。
+    /// Decide what to fetch and fetch it
+    //
+    // リモートが 1 つだけの場合は選択の余地が無いため、finder を起動せず即座に取得する。
     Fetch {
-        /// リモートで削除されたブランチの追跡参照も掃除する
+        /// Also clean up the tracking refs of branches deleted on the remote
         #[arg(long)]
         prune: bool,
 
-        /// 同じ階層に並ぶリポジトリも対象に含めて一括で取得する
+        /// Include the repositories next to this one and fetch them all at once
         #[arg(long, short)]
         siblings: bool,
     },
 
-    /// ブランチを選んで upstream へ追随させる（fast-forward のみ）
-    ///
-    /// 取り込み方式は fast-forward に固定し、`--rebase` / `--merge` は提供しない
-    /// （方式を選んで 1 本だけ同期するのは `gz sync`）。対象は選択で決めるため
-    /// 位置引数を取らず、`--siblings` / `--prune` も持たない。
+    /// Pick branches and make them follow their upstream (fast-forward only)
+    //
+    // 取り込み方式は fast-forward に固定し、`--rebase` / `--merge` は提供しない
+    // （方式を選んで 1 本だけ同期するのは `gz sync`）。対象は選択で決めるため
+    // 位置引数を取らず、`--siblings` / `--prune` も持たない。
     Pull,
 
-    /// 現在のブランチを upstream と同期する
-    ///
-    /// 既定は fast-forward のみ（`--ff-only` 相当）。fast-forward できない場合は
-    /// git のエラーをそのまま表示して停止し、暗黙に merge / rebase へ倒さない。
+    /// Synchronize the current branch with its upstream
+    //
+    // 既定は fast-forward のみ（`--ff-only` 相当）。fast-forward できない場合は
+    // git のエラーをそのまま表示して停止し、暗黙に merge / rebase へ倒さない。
     Sync {
-        /// upstream の上へ rebase して取り込む（履歴改変）
+        /// Integrate by rebasing onto the upstream (rewrites history)
         #[arg(long, conflicts_with_all = ["merge"])]
         rebase: bool,
 
-        /// upstream を merge して取り込む
+        /// Integrate by merging the upstream
         #[arg(long, conflicts_with_all = ["rebase"])]
         merge: bool,
     },
 
-    /// worktree を一覧・管理する（引数なしは一覧からパスを標準出力へ出す）
+    /// List and manage worktrees (without arguments, prints the path picked from the list)
     Worktree {
-        /// 実行する worktree の操作（省略時は一覧からの選択）
+        /// 実行する worktree の操作（省略時は一覧からの選択）。
         #[command(subcommand)]
         command: Option<WorktreeCommand>,
     },
@@ -222,30 +264,30 @@ pub enum Command {
 /// [`StashCommand`]（既定を決められないためサブコマンド必須）との違い。
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum BranchCommand {
-    /// 作成元を選択して新しいブランチを作成する
+    /// Pick a starting point and create a new branch
     Create {
-        /// 作成するブランチ名
+        /// Name of the branch to create
         name: String,
 
-        /// 作成後にそのブランチへ切り替える
+        /// Switch to the branch after creating it
         #[arg(long)]
         switch: bool,
     },
 
-    /// ブランチを選択して削除する
+    /// Pick a branch and delete it
     Delete {
-        /// merged でないブランチも削除する（`git branch -D`）
+        /// Delete a branch even when it is not merged (`git branch -D`)
         #[arg(long)]
         force: bool,
 
-        /// merged 判定の基準ブランチ（既定は HEAD）
+        /// Branch that `merged` is judged against (defaults to HEAD)
         #[arg(long, value_name = "BRANCH")]
         into: Option<String>,
     },
 
-    /// merged なブランチを一括で削除する
+    /// Delete every merged branch at once
     Cleanup {
-        /// merged 判定の基準ブランチ（既定は HEAD）
+        /// Branch that `merged` is judged against (defaults to HEAD)
         #[arg(long, value_name = "BRANCH")]
         into: Option<String>,
     },
@@ -254,16 +296,16 @@ pub enum BranchCommand {
 /// `gz worktree` のサブコマンド（FR-21）。
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum WorktreeCommand {
-    /// ブランチを選択して新しい worktree を作成する
+    /// Pick a branch and create a new worktree for it
     Add {
-        /// 作成する worktree のパス（ディレクトリ名の自動提案は行わない）
+        /// Path of the worktree to create (no directory name is suggested)
         path: PathBuf,
     },
 
-    /// worktree を選択して削除する（main worktree は候補に含めない）
+    /// Pick a worktree and remove it (the main worktree is not offered)
     Remove,
 
-    /// 実体を失った worktree の管理情報を整理する
+    /// Tidy up the bookkeeping of worktrees whose directory is gone
     Prune,
 }
 
@@ -275,35 +317,322 @@ pub enum WorktreeCommand {
 /// 暗黙にどちらかへ倒さない）。
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum StashCommand {
-    /// 変更ファイルを選択して stash へ退避する
+    /// Pick changed files and stash them away
     Push {
-        /// stash に付けるメッセージ
+        /// Message to attach to the stash
         #[arg(short, long, value_name = "MESSAGE")]
         message: Option<String>,
 
-        /// 未追跡ファイルも候補に含める（既定は追跡済みの変更のみ）
+        /// Include untracked files in the candidates (tracked changes only by default)
         #[arg(short = 'u', long)]
         include_untracked: bool,
     },
 
-    /// stash を選択して適用する（stash は残す）
+    /// Pick a stash and apply it (the stash is kept)
     Apply,
 
-    /// stash を選択して適用し、その stash を取り除く
+    /// Pick a stash, apply it and drop that stash
     Pop,
 
-    /// stash を選択して破棄する
+    /// Pick a stash and drop it
     Drop,
+}
+
+/// 表示言語の文言でヘルプを差し替えた `clap` のコマンド定義を組み立てる。
+///
+/// `--lang` は `clap` のパースより前に先読み（`crate::i18n::resolve::scan_lang_flag`）で
+/// 解決されており、`messages` はその解決結果である。この順序があるからこそ、`--help` と
+/// パーサエラーを解決済みの言語で出せる（design.md「起動シーケンス」）。
+///
+/// 差し替えの対象は `about`（`gz` 自身と各サブコマンド）と `help`（各引数）に限る。
+/// derive のリテラルを 1 行に保っているため `long_about` / `long_help` は存在せず、
+/// `-h` と `--help` はどちらも差し替え後の文言を出す。`Usage:` / `Options:` といった
+/// `clap` 自身の見出しとパーサエラーは英語のまま（requirements.md のスコープ外）。
+///
+/// # Panics
+///
+/// `clap` の `mut_arg` / `mut_subcommand` は、指定した ID・名前が定義に無いと panic する。
+/// 起動直後に必ず通る経路であり、綴りの誤りはすべてのテストが即座に落ちて検出されるため、
+/// ここで握りつぶさず `clap` の挙動に委ねる。
+pub fn localized_command(messages: &dyn Messages) -> ClapCommand {
+    let cli = messages.cli();
+
+    // `mut_subcommand` は対象を末尾へ移動するため、**定義順に呼ぶ**ことでヘルプの並び順が
+    // 元のまま保たれる（1 つでも飛ばすとそのサブコマンドだけ先頭へ残り順序が変わる）
+    Cli::command()
+        .about(cli.about())
+        .mut_arg("lang", |argument| argument.help(cli.lang_help()))
+        .mut_subcommand("branch", |command| localize_branch(command, cli))
+        .mut_subcommand("log", |command| {
+            command
+                .about(cli.log_about())
+                .mut_arg("limit", |argument| argument.help(cli.log_limit_help()))
+        })
+        .mut_subcommand("cherry-pick", |command| {
+            command
+                .about(cli.cherry_pick_about())
+                .mut_arg("branch", |argument| {
+                    argument.help(cli.cherry_pick_branch_help())
+                })
+        })
+        .mut_subcommand("restore", |command| {
+            command
+                .about(cli.restore_about())
+                .mut_arg("source", |argument| {
+                    argument.help(cli.restore_source_help())
+                })
+                .mut_arg("staged", |argument| {
+                    argument.help(cli.restore_staged_help())
+                })
+        })
+        .mut_subcommand("add", |command| command.about(cli.add_about()))
+        .mut_subcommand("stash", |command| localize_stash(command, cli))
+        .mut_subcommand("tag", |command| {
+            command
+                .about(cli.tag_about())
+                .mut_arg("switch", |argument| argument.help(cli.tag_switch_help()))
+                .mut_arg("diff", |argument| argument.help(cli.tag_diff_help()))
+        })
+        .mut_subcommand("reflog", |command| {
+            command
+                .about(cli.reflog_about())
+                .mut_arg("restore", |argument| {
+                    argument.help(cli.reflog_restore_help())
+                })
+        })
+        .mut_subcommand("commit", |command| {
+            command
+                .about(cli.commit_about())
+                .mut_arg("message", |argument| {
+                    argument.help(cli.commit_message_help())
+                })
+        })
+        .mut_subcommand("push", |command| {
+            command
+                .about(cli.push_about())
+                .mut_arg("set_upstream", |argument| {
+                    argument.help(cli.push_set_upstream_help())
+                })
+        })
+        .mut_subcommand("fixup", |command| {
+            command
+                .about(cli.fixup_about())
+                .mut_arg("squash", |argument| argument.help(cli.fixup_squash_help()))
+        })
+        .mut_subcommand("merge", |command| {
+            command
+                .about(cli.merge_about())
+                .mut_arg("no_ff", |argument| argument.help(cli.merge_no_ff_help()))
+                .mut_arg("squash", |argument| argument.help(cli.merge_squash_help()))
+                .mut_arg("ff_only", |argument| {
+                    argument.help(cli.merge_ff_only_help())
+                })
+        })
+        .mut_subcommand("rebase", |command| command.about(cli.rebase_about()))
+        .mut_subcommand("revert", |command| {
+            command
+                .about(cli.revert_about())
+                .mut_arg("no_edit", |argument| {
+                    argument.help(cli.revert_no_edit_help())
+                })
+        })
+        .mut_subcommand("status", |command| command.about(cli.status_about()))
+        .mut_subcommand("diff", |command| {
+            command
+                .about(cli.diff_about())
+                .mut_arg("staged", |argument| argument.help(cli.diff_staged_help()))
+                .mut_arg("head", |argument| argument.help(cli.diff_head_help()))
+                .mut_arg("upstream", |argument| {
+                    argument.help(cli.diff_upstream_help())
+                })
+                .mut_arg("branch", |argument| argument.help(cli.diff_branch_help()))
+                .mut_arg("commit", |argument| argument.help(cli.diff_commit_help()))
+        })
+        .mut_subcommand("fetch", |command| {
+            command
+                .about(cli.fetch_about())
+                .mut_arg("prune", |argument| argument.help(cli.fetch_prune_help()))
+                .mut_arg("siblings", |argument| {
+                    argument.help(cli.fetch_siblings_help())
+                })
+        })
+        .mut_subcommand("pull", |command| command.about(cli.pull_about()))
+        .mut_subcommand("sync", |command| {
+            command
+                .about(cli.sync_about())
+                .mut_arg("rebase", |argument| argument.help(cli.sync_rebase_help()))
+                .mut_arg("merge", |argument| argument.help(cli.sync_merge_help()))
+        })
+        .mut_subcommand("worktree", |command| localize_worktree(command, cli))
+}
+
+/// `gz branch` と、その管理サブコマンド（[`BranchCommand`]）のヘルプを差し替える。
+fn localize_branch(command: ClapCommand, cli: &dyn CliMessages) -> ClapCommand {
+    command
+        .about(cli.branch_about())
+        .mut_arg("all", |argument| argument.help(cli.branch_all_help()))
+        .mut_subcommand("create", |create| {
+            create
+                .about(cli.branch_create_about())
+                .mut_arg("name", |argument| {
+                    argument.help(cli.branch_create_name_help())
+                })
+                .mut_arg("switch", |argument| {
+                    argument.help(cli.branch_create_switch_help())
+                })
+        })
+        .mut_subcommand("delete", |delete| {
+            delete
+                .about(cli.branch_delete_about())
+                .mut_arg("force", |argument| {
+                    argument.help(cli.branch_delete_force_help())
+                })
+                .mut_arg("into", |argument| {
+                    argument.help(cli.branch_delete_into_help())
+                })
+        })
+        .mut_subcommand("cleanup", |cleanup| {
+            cleanup
+                .about(cli.branch_cleanup_about())
+                .mut_arg("into", |argument| {
+                    argument.help(cli.branch_cleanup_into_help())
+                })
+        })
+}
+
+/// `gz stash` と、その操作サブコマンド（[`StashCommand`]）のヘルプを差し替える。
+fn localize_stash(command: ClapCommand, cli: &dyn CliMessages) -> ClapCommand {
+    command
+        .about(cli.stash_about())
+        .mut_subcommand("push", |push| {
+            push.about(cli.stash_push_about())
+                .mut_arg("message", |argument| {
+                    argument.help(cli.stash_push_message_help())
+                })
+                .mut_arg("include_untracked", |argument| {
+                    argument.help(cli.stash_push_include_untracked_help())
+                })
+        })
+        .mut_subcommand("apply", |apply| apply.about(cli.stash_apply_about()))
+        .mut_subcommand("pop", |pop| pop.about(cli.stash_pop_about()))
+        .mut_subcommand("drop", |drop| drop.about(cli.stash_drop_about()))
+}
+
+/// `gz worktree` と、その操作サブコマンド（[`WorktreeCommand`]）のヘルプを差し替える。
+fn localize_worktree(command: ClapCommand, cli: &dyn CliMessages) -> ClapCommand {
+    command
+        .about(cli.worktree_about())
+        .mut_subcommand("add", |add| {
+            add.about(cli.worktree_add_about())
+                .mut_arg("path", |argument| {
+                    argument.help(cli.worktree_add_path_help())
+                })
+        })
+        .mut_subcommand("remove", |remove| remove.about(cli.worktree_remove_about()))
+        .mut_subcommand("prune", |prune| prune.about(cli.worktree_prune_about()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
+    use crate::i18n::Language;
+    use crate::i18n::resolve::scan_lang_flag;
+    use crate::test_support::contains_japanese;
+    use std::ffi::OsString;
 
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// [`localized_command`] が組み立てた定義も `clap` の整合性検査を通ることを固定する。
+    ///
+    /// 差し替えは `mut_arg` / `mut_subcommand` で組み立て済みの定義を書き換えるため、
+    /// ID の綴り誤りや構造の破壊はコンパイルエラーにならない。両言語で検査しておくと
+    /// 差し替えが構造を壊した場合にここで落ちる。
+    #[test]
+    fn the_localized_definition_is_valid_in_every_language() {
+        for language in [Language::Japanese, Language::English] {
+            localized_command(language.messages()).debug_assert();
+        }
+    }
+
+    /// `clap` の定義を再帰的に辿り、`about` と各引数の `help` を順に返す。
+    ///
+    /// `clap` が自ら足す `-h` / `--help` / `-V` / `--version` と `help` サブコマンドは
+    /// `clap` 自身の文言であり、fuzgit が差し替える対象ではないため除く。
+    fn descriptions(command: &ClapCommand) -> Vec<String> {
+        let mut collected = Vec::new();
+
+        if let Some(about) = command.get_about() {
+            collected.push(about.to_string());
+        }
+
+        for argument in command.get_arguments() {
+            let id = argument.get_id().as_str();
+            if id == "help" || id == "version" {
+                continue;
+            }
+            if let Some(help) = argument.get_help() {
+                collected.push(help.to_string());
+            }
+        }
+
+        for subcommand in command.get_subcommands() {
+            if subcommand.get_name() == "help" {
+                continue;
+            }
+            collected.extend(descriptions(subcommand));
+        }
+
+        collected
+    }
+
+    /// derive のリテラルが英語のままであることを固定する（フォールバック言語との整合）。
+    ///
+    /// 差し替えが漏れたときに出るのはここに書かれたリテラルであり、日本語が混ざっていると
+    /// `en` を選んだ利用者へ日本語が出てしまう。
+    #[test]
+    fn the_derive_literals_stay_in_english() {
+        for description in descriptions(&Cli::command()) {
+            assert!(
+                !contains_japanese(&description),
+                "the derive literals must stay in english: {description}"
+            );
+        }
+    }
+
+    /// 差し替え後の定義でも、パース結果が derive のパースと一致することを固定する。
+    ///
+    /// `main` は `Cli::parse()` ではなく `localized_command(...).get_matches_from(...)` →
+    /// `Cli::from_arg_matches(...)` を通る。ヘルプの差し替えが引数の解釈まで変えていない
+    /// ことを確かめる。
+    #[test]
+    fn the_localized_command_parses_the_same_arguments() {
+        use clap::FromArgMatches as _;
+
+        for argv in [
+            vec!["gz", "branch", "--all"],
+            vec!["gz", "log", "--limit", "5"],
+            vec!["gz", "stash", "push", "-m", "作業中", "-u"],
+            vec!["gz", "worktree", "add", "../feature"],
+            vec!["gz", "--lang", "en", "diff", "--staged"],
+        ] {
+            let matches = localized_command(Language::Japanese.messages())
+                .try_get_matches_from(&argv)
+                .unwrap_or_else(|err| panic!("{argv:?} should parse: {err}"));
+            let localized = Cli::from_arg_matches(&matches)
+                .unwrap_or_else(|err| panic!("{argv:?} should be extracted: {err}"));
+
+            let derived = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|err| panic!("{argv:?} should parse: {err}"));
+
+            assert_eq!(
+                format!("{localized:?}"),
+                format!("{derived:?}"),
+                "the localized definition must parse {argv:?} the same way"
+            );
+        }
     }
 
     #[test]
@@ -840,5 +1169,60 @@ mod tests {
             err.to_string().contains("branch"),
             "help should list subcommands: {err}"
         );
+    }
+
+    /// `--lang` の値をパース結果と先読み結果で比較するための綴りへ戻す。
+    fn lang_value(option: LangOption) -> &'static str {
+        match option {
+            LangOption::Ja => "ja",
+            LangOption::En => "en",
+            LangOption::Auto => "auto",
+        }
+    }
+
+    #[test]
+    fn the_lang_flag_is_read_alike_by_the_prescan_and_by_clap() {
+        // 先読み（層 1 の権威）と clap のパース結果が食い違うと、ヘルプだけが別の言語で
+        // 出る事故になる。想定する綴りについて両者が一致することを固定する
+        for argv in [
+            vec!["gz", "--lang", "ja", "log"],
+            vec!["gz", "--lang=ja", "log"],
+            vec!["gz", "log", "--lang", "en"],
+            vec!["gz", "log", "--lang=auto"],
+        ] {
+            let scanned = scan_lang_flag(&argv.iter().map(OsString::from).collect::<Vec<_>>());
+            let parsed = Cli::try_parse_from(&argv)
+                .unwrap_or_else(|err| panic!("{argv:?} should parse: {err}"))
+                .lang;
+
+            assert_eq!(
+                scanned.as_deref(),
+                parsed.map(lang_value),
+                "the prescan and clap must agree on {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lang_flag_is_not_read_after_the_argument_terminator() {
+        // `--` より後ろは先読みの対象外。clap も `--lang` をフラグとしては解釈しないため
+        // （`gz log` は位置引数を取らず、この引数列はパーサエラーになる）、
+        // 「先読みだけが拾ってしまう」乖離は生じない。乖離が起きるのは
+        // clap のヘルプ・パーサエラーの言語だけであり、doc comment に明記してある
+        let argv = ["gz", "log", "--", "--lang", "ja"];
+
+        let scanned = scan_lang_flag(&argv.iter().map(OsString::from).collect::<Vec<_>>());
+
+        assert_eq!(scanned, None);
+        Cli::try_parse_from(argv).expect_err("`gz log` takes no operands");
+    }
+
+    #[test]
+    fn the_lang_flag_is_available_on_every_subcommand() {
+        // global = true であることの確認（サブコマンドごとに定義していない）
+        for subcommand in ["branch", "status", "worktree"] {
+            Cli::try_parse_from(["gz", subcommand, "--lang", "en"])
+                .unwrap_or_else(|err| panic!("`gz {subcommand} --lang en` should parse: {err}"));
+        }
     }
 }

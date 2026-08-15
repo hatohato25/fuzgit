@@ -212,3 +212,21 @@ pub fn create_remote_symbolic_ref(path: &Path, name: &str, target: &str) {
         ],
     );
 }
+
+/// 文字列に日本語の文字が含まれるかどうかを判定する。
+///
+/// 表示言語ごとの文言（FR-27）を検査するために用いる。`en` を選んだ文言に日本語が
+/// 混ざっていないことは判定できるが、逆（日本語の文言に英語が混ざらないこと）は
+/// 判定しない。`git commit` のような**翻訳しない語**が日本語の文言にも意図的に
+/// 含まれるためである。
+pub fn contains_japanese(text: &str) -> bool {
+    text.chars().any(|character| {
+        matches!(character,
+            '\u{3000}'..='\u{303F}'   // 全角の記号・句読点
+            | '\u{3040}'..='\u{309F}' // ひらがな
+            | '\u{30A0}'..='\u{30FF}' // カタカナ
+            | '\u{4E00}'..='\u{9FFF}' // 漢字
+            | '\u{FF00}'..='\u{FFEF}' // 全角形
+        )
+    })
+}

@@ -63,19 +63,227 @@ pub struct CommitInfo {
     pub time: String,
 }
 
+/// リポジトリ情報の読み取り操作。
+///
+/// [`Error::RepositoryReadFailed`] / [`Error::GitOutputMalformed`] が「何の読み取りに
+/// 失敗したか」を**表示済みの文字列ではなく値として**保持するための型（design.md
+/// 「`Error` は表示済みの文字列を保持しない」）。表示は
+/// [`crate::i18n::messages::ErrorMessages::describe`] が担う。
+///
+/// バリアントを追加すると [`crate::i18n::ja`] / [`crate::i18n::en`] の網羅的な `match` が
+/// 双方ともコンパイルエラーになる。翻訳漏れを実行時ではなくコンパイル時に検出するための
+/// 設計であり、翻訳側にワイルドカードの腕を足してはならない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadOperation {
+    /// HEAD の読み取り。
+    HeadRead,
+    /// HEAD が指すブランチ名の解釈。
+    HeadBranchNameDecode,
+    /// HEAD が指すコミットの解決。
+    HeadResolve,
+    /// 参照の列挙。
+    ReferenceList,
+    /// ローカルブランチの列挙。
+    LocalBranchList,
+    /// ローカルブランチ 1 件の読み取り。
+    LocalBranchRead,
+    /// ローカルブランチ名の解釈。
+    LocalBranchNameDecode,
+    /// リモート追跡ブランチの列挙。
+    RemoteBranchList,
+    /// リモート追跡ブランチ 1 件の読み取り。
+    RemoteBranchRead,
+    /// リモート追跡ブランチ名の解釈。
+    RemoteBranchNameDecode,
+    /// リモート名の解釈。
+    RemoteNameDecode,
+    /// ブランチ名を参照名として解釈すること。
+    BranchNameParse {
+        /// 対象のブランチ名。
+        branch: String,
+    },
+    /// リモートの URL の解釈。
+    RemoteUrlDecode,
+    /// ブランチの upstream の解決。
+    UpstreamResolve {
+        /// 対象のブランチ名。
+        branch: String,
+    },
+    /// upstream の参照名の解釈。
+    UpstreamRefNameDecode,
+    /// `git rev-list` の出力の解釈。
+    RevListOutputParse,
+    /// ブランチ 1 件の読み取り（ローカル・リモート追跡を区別しない走査）。
+    BranchRead,
+    /// ブランチ先端のコミットの解決。
+    BranchTipResolve,
+    /// ブランチの解決。
+    BranchResolve {
+        /// 対象のブランチ名。
+        branch: String,
+    },
+    /// コミット履歴の走査。
+    CommitHistoryWalk,
+    /// コミットオブジェクトの取得。
+    CommitObjectFetch,
+    /// 短縮ハッシュの算出。
+    ShortIdCompute,
+    /// コミットメッセージの解釈。
+    CommitMessageDecode,
+    /// コミット作者の解釈。
+    CommitAuthorDecode,
+    /// コミット日時の解釈。
+    CommitTimeDecode,
+    /// コミット日時の整形。
+    CommitTimeFormat,
+    /// コミットサマリの解釈。
+    CommitSummaryDecode,
+    /// コミット作者名の解釈。
+    CommitAuthorNameDecode,
+    /// `git status` の出力の解釈。
+    StatusOutputParse,
+    /// パスの解釈。
+    PathDecode,
+    /// リネーム元のパスの解釈。
+    RenameOriginPathDecode,
+    /// リビジョンの解決。
+    RevisionResolve {
+        /// 対象のリビジョン。
+        revision: String,
+    },
+    /// タグの列挙。
+    TagList,
+    /// タグ 1 件の読み取り。
+    TagRead,
+    /// タグ名の解釈。
+    TagNameDecode,
+    /// タグが指すオブジェクトの解決。
+    TagResolve {
+        /// 対象のタグ名。
+        tag: String,
+    },
+    /// タグの対象オブジェクトの取得。
+    TagTargetFetch {
+        /// 対象のタグ名。
+        tag: String,
+    },
+    /// タグオブジェクトとしての解釈。
+    TagParse {
+        /// 対象のタグ名。
+        tag: String,
+    },
+    /// タグオブジェクトの復号。
+    TagDecode {
+        /// 対象のタグ名。
+        tag: String,
+    },
+    /// タグメッセージの解釈。
+    TagMessageDecode,
+    /// HEAD の reflog の読み取り。
+    HeadReflogRead,
+    /// HEAD の reflog の解釈。
+    HeadReflogParse,
+    /// reflog のメッセージの解釈。
+    ReflogMessageDecode,
+    /// `git stash list` の出力の解釈。
+    StashListOutputParse,
+    /// stash の参照（`stash@{n}`）の解釈。
+    StashSelectorDecode,
+    /// stash のメッセージの解釈。
+    StashMessageDecode,
+    /// `git branch --merged` の出力の解釈。
+    MergedBranchOutputParse,
+    /// `git for-each-ref` の出力の解釈。
+    ForEachRefOutputParse,
+    /// `git worktree list` の出力の解釈。
+    WorktreeListOutputParse,
+}
+
+/// `git` の出力が想定した形式と異なる場合の、具体的な食い違いの内容。
+///
+/// [`ReadOperation`] が「何をしていたか」を表すのに対し、こちらは「何が想定と違ったか」を
+/// 表す。読み取れなかった値そのもの（レコード・参照名など）を**整形前の値として**保持し、
+/// 文へ組み立てるのは [`crate::i18n::messages::ErrorMessages::describe`] に委ねる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MalformedOutput {
+    /// `git rev-list --left-right --count` の出力が ahead/behind の 2 フィールドでない。
+    AheadBehind {
+        /// 受け取った出力（UTF-8 でないバイトは置換した表現）。
+        output: String,
+    },
+    /// `git rev-list --count` の出力がコミット数として解釈できない。
+    CommitCount {
+        /// 受け取った出力（UTF-8 でないバイトは置換した表現）。
+        output: String,
+    },
+    /// `git status --porcelain -z` のエントリが `XY <path>` の形式でない。
+    StatusEntry {
+        /// 受け取ったレコード（UTF-8 でないバイトは置換した表現）。
+        record: String,
+    },
+    /// リネーム・コピーのエントリに続くはずの変更元のレコードが無い。
+    StatusRenameOriginMissing {
+        /// 変更元を欠いていた変更後のパス。
+        path: String,
+    },
+    /// `git stash list -z` の出力が参照とメッセージの組になっていない。
+    StashRecordPairing {
+        /// 受け取ったレコード数。
+        records: usize,
+    },
+    /// stash の参照が `stash@{n}` の形式でない。
+    StashSelectorFormat {
+        /// 受け取った参照。
+        selector: String,
+    },
+    /// `git for-each-ref` の出力が参照名と日時の組になっていない。
+    BranchActivityPair {
+        /// 受け取った行。
+        line: String,
+    },
+    /// `git worktree list --porcelain` の属性が値を欠いている。
+    WorktreeAttributeValueMissing {
+        /// 値を欠いていた属性のラベル。
+        label: String,
+    },
+    /// worktree の `branch` 属性が [`BRANCH_REF_PREFIX`] 配下の参照名でない。
+    WorktreeBranchReference {
+        /// 受け取った参照名。
+        reference: String,
+    },
+    /// worktree のレコードが [`WORKTREE_LABEL`] 属性で始まっていない。
+    WorktreeRecordStart {
+        /// 受け取った行。
+        line: String,
+    },
+    /// worktree のレコードが空行で終端されていない。
+    WorktreeRecordUnterminated {
+        /// 終端を欠いていたレコードの worktree のパス。
+        path: String,
+    },
+}
+
 /// `gix` 側のエラーを [`Error::RepositoryReadFailed`] へ変換する。
 fn read_error(
-    operation: &str,
+    operation: ReadOperation,
     source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
 ) -> Error {
     Error::RepositoryReadFailed {
-        operation: operation.to_owned(),
+        operation,
         source: source.into(),
     }
 }
 
+/// `git` の出力の食い違いを [`Error::GitOutputMalformed`] へ変換する。
+///
+/// `gix` のエラーと違い原因となる `source` が存在しない（食い違いを見つけたのは fuzgit 自身で
+/// ある）ため、[`read_error`] とは別のバリアントで表す。
+fn malformed_output(operation: ReadOperation, detail: MalformedOutput) -> Error {
+    Error::GitOutputMalformed { operation, detail }
+}
+
 /// git の参照名・署名は任意のバイト列を取り得るため、UTF-8 でない場合は明示的にエラーとする。
-fn to_utf8(bytes: &BStr, operation: &str) -> Result<String> {
+fn to_utf8(bytes: &BStr, operation: ReadOperation) -> Result<String> {
     bytes
         .to_str()
         .map(str::to_owned)
@@ -86,11 +294,11 @@ fn to_utf8(bytes: &BStr, operation: &str) -> Result<String> {
 fn unborn_branch(repository: &gix::Repository) -> Result<Option<String>> {
     let head = repository
         .head()
-        .map_err(|source| read_error("HEAD の読み取り", source))?;
+        .map_err(|source| read_error(ReadOperation::HeadRead, source))?;
 
     match &head.kind {
         gix::head::Kind::Unborn(name) => {
-            to_utf8(name.shorten(), "HEAD のブランチ名の解釈").map(Some)
+            to_utf8(name.shorten(), ReadOperation::HeadBranchNameDecode).map(Some)
         }
         gix::head::Kind::Symbolic(_) | gix::head::Kind::Detached { .. } => Ok(None),
     }
@@ -118,12 +326,12 @@ fn reject_unborn_head(repository: &gix::Repository) -> Result<()> {
 pub fn current_branch(repository: &gix::Repository) -> Result<Option<String>> {
     let Some(name) = repository
         .head_name()
-        .map_err(|source| read_error("HEAD の読み取り", source))?
+        .map_err(|source| read_error(ReadOperation::HeadRead, source))?
     else {
         return Ok(None);
     };
 
-    to_utf8(name.shorten(), "HEAD のブランチ名の解釈").map(Some)
+    to_utf8(name.shorten(), ReadOperation::HeadBranchNameDecode).map(Some)
 }
 
 /// ブランチ一覧を名前順で取得する。
@@ -139,16 +347,19 @@ pub fn branches(repository: &gix::Repository, scope: BranchScope) -> Result<Vec<
     let current = current_branch(repository)?;
     let platform = repository
         .references()
-        .map_err(|source| read_error("参照の列挙", source))?;
+        .map_err(|source| read_error(ReadOperation::ReferenceList, source))?;
 
     let mut locals = Vec::new();
     for reference in platform
         .local_branches()
-        .map_err(|source| read_error("ローカルブランチの列挙", source))?
+        .map_err(|source| read_error(ReadOperation::LocalBranchList, source))?
     {
         let reference =
-            reference.map_err(|source| read_error("ローカルブランチの読み取り", source))?;
-        let name = to_utf8(reference.name().shorten(), "ローカルブランチ名の解釈")?;
+            reference.map_err(|source| read_error(ReadOperation::LocalBranchRead, source))?;
+        let name = to_utf8(
+            reference.name().shorten(),
+            ReadOperation::LocalBranchNameDecode,
+        )?;
         locals.push(BranchInfo {
             is_current: current.as_deref() == Some(name.as_str()),
             name,
@@ -167,10 +378,10 @@ pub fn branches(repository: &gix::Repository, scope: BranchScope) -> Result<Vec<
     let mut remotes = Vec::new();
     for reference in platform
         .remote_branches()
-        .map_err(|source| read_error("リモート追跡ブランチの列挙", source))?
+        .map_err(|source| read_error(ReadOperation::RemoteBranchList, source))?
     {
         let reference =
-            reference.map_err(|source| read_error("リモート追跡ブランチの読み取り", source))?;
+            reference.map_err(|source| read_error(ReadOperation::RemoteBranchRead, source))?;
 
         // `origin/HEAD` はリモートの既定ブランチへのシンボリック参照であり、
         // 切り替え先としては実体のブランチと重複するため候補から外す
@@ -178,7 +389,10 @@ pub fn branches(repository: &gix::Repository, scope: BranchScope) -> Result<Vec<
             continue;
         }
 
-        let name = to_utf8(reference.name().shorten(), "リモート追跡ブランチ名の解釈")?;
+        let name = to_utf8(
+            reference.name().shorten(),
+            ReadOperation::RemoteBranchNameDecode,
+        )?;
         remotes.push(BranchInfo {
             name,
             is_current: false,
@@ -222,7 +436,7 @@ pub fn remotes(repository: &gix::Repository) -> Result<Vec<String>> {
     repository
         .remote_names()
         .iter()
-        .map(|name| to_utf8(name.as_bstr(), "リモート名の解釈"))
+        .map(|name| to_utf8(name.as_bstr(), ReadOperation::RemoteNameDecode))
         .collect()
 }
 
@@ -331,7 +545,14 @@ impl Upstream {
 pub fn upstream(repository: &gix::Repository, branch: &str) -> Result<Option<Upstream>> {
     let full_name = gix::refs::Category::LocalBranch
         .to_full_name(branch)
-        .map_err(|source| read_error(&format!("ブランチ名 `{branch}` の解釈"), source))?;
+        .map_err(|source| {
+            read_error(
+                ReadOperation::BranchNameParse {
+                    branch: branch.to_owned(),
+                },
+                source,
+            )
+        })?;
 
     // fetch 方向を見る。push 方向は pushRemote / push.default の解決を伴い、
     // 「現在の追跡先」を知りたいここでの用途とは意味が異なる
@@ -342,15 +563,21 @@ pub fn upstream(repository: &gix::Repository, branch: &str) -> Result<Option<Ups
     };
     let remote = match remote {
         gix::remote::Name::Symbol(name) => name.into_owned(),
-        gix::remote::Name::Url(url) => to_utf8(url.as_ref(), "リモート URL の解釈")?,
+        gix::remote::Name::Url(url) => to_utf8(url.as_ref(), ReadOperation::RemoteUrlDecode)?,
     };
 
     let Some(merge_ref) = repository.branch_remote_ref_name(full_name.as_ref(), direction) else {
         return Ok(None);
     };
-    let merge_ref = merge_ref
-        .map_err(|source| read_error(&format!("`{branch}` の upstream の解決"), source))?;
-    let merge_ref = to_utf8(merge_ref.as_bstr(), "upstream の参照名の解釈")?;
+    let merge_ref = merge_ref.map_err(|source| {
+        read_error(
+            ReadOperation::UpstreamResolve {
+                branch: branch.to_owned(),
+            },
+            source,
+        )
+    })?;
+    let merge_ref = to_utf8(merge_ref.as_bstr(), ReadOperation::UpstreamRefNameDecode)?;
 
     Ok(Some(Upstream { remote, merge_ref }))
 }
@@ -364,15 +591,14 @@ pub fn upstream(repository: &gix::Repository, branch: &str) -> Result<Option<Ups
 /// # Errors
 ///
 /// フィールド数が 2 でない場合、数値として解釈できない場合、
-/// UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+/// UTF-8 でない場合は [`Error::GitOutputMalformed`] を返す。
 fn parse_ahead_behind(output: &[u8]) -> Result<(usize, usize)> {
     let malformed = || {
-        read_error(
-            "git rev-list 出力の解釈",
-            format!(
-                "ahead/behind の形式が想定と異なります: {:?}",
-                output.as_bstr().to_str_lossy()
-            ),
+        malformed_output(
+            ReadOperation::RevListOutputParse,
+            MalformedOutput::AheadBehind {
+                output: output.as_bstr().to_str_lossy().into_owned(),
+            },
         )
     };
 
@@ -439,15 +665,14 @@ pub fn ahead_behind(
 ///
 /// # Errors
 ///
-/// 数値として解釈できない場合、UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+/// 数値として解釈できない場合、UTF-8 でない場合は [`Error::GitOutputMalformed`] を返す。
 fn parse_commit_count(output: &[u8]) -> Result<usize> {
     let malformed = || {
-        read_error(
-            "git rev-list 出力の解釈",
-            format!(
-                "コミット数の形式が想定と異なります: {:?}",
-                output.as_bstr().to_str_lossy()
-            ),
+        malformed_output(
+            ReadOperation::RevListOutputParse,
+            MalformedOutput::CommitCount {
+                output: output.as_bstr().to_str_lossy().into_owned(),
+            },
         )
     };
 
@@ -718,39 +943,44 @@ fn commit_tips(repository: &gix::Repository, scope: CommitScope<'_>) -> Result<V
         CommitScope::Head => {
             let mut head = repository
                 .head()
-                .map_err(|source| read_error("HEAD の読み取り", source))?;
+                .map_err(|source| read_error(ReadOperation::HeadRead, source))?;
             let head_id = head
                 .try_peel_to_id()
-                .map_err(|source| read_error("HEAD の解決", source))?;
+                .map_err(|source| read_error(ReadOperation::HeadResolve, source))?;
             Ok(head_id.map(|id| id.detach()).into_iter().collect())
         }
         CommitScope::AllBranches => {
             let platform = repository
                 .references()
-                .map_err(|source| read_error("参照の列挙", source))?;
+                .map_err(|source| read_error(ReadOperation::ReferenceList, source))?;
             let locals = platform
                 .local_branches()
-                .map_err(|source| read_error("ローカルブランチの列挙", source))?;
+                .map_err(|source| read_error(ReadOperation::LocalBranchList, source))?;
             let remotes = platform
                 .remote_branches()
-                .map_err(|source| read_error("リモート追跡ブランチの列挙", source))?;
+                .map_err(|source| read_error(ReadOperation::RemoteBranchList, source))?;
 
             let mut tips = Vec::new();
             for reference in locals.chain(remotes) {
                 let reference =
-                    reference.map_err(|source| read_error("ブランチの読み取り", source))?;
+                    reference.map_err(|source| read_error(ReadOperation::BranchRead, source))?;
                 let id = reference
                     .into_fully_peeled_id()
-                    .map_err(|source| read_error("ブランチ先端の解決", source))?;
+                    .map_err(|source| read_error(ReadOperation::BranchTipResolve, source))?;
                 tips.push(id.detach());
             }
             // 複数ブランチが同じコミットを指していても rev_walk 側で重複は除かれる
             Ok(tips)
         }
         CommitScope::Branch(name) => {
-            let id = repository
-                .rev_parse_single(name)
-                .map_err(|source| read_error(&format!("ブランチ `{name}` の解決"), source))?;
+            let id = repository.rev_parse_single(name).map_err(|source| {
+                read_error(
+                    ReadOperation::BranchResolve {
+                        branch: name.to_owned(),
+                    },
+                    source,
+                )
+            })?;
             Ok(vec![id.detach()])
         }
     }
@@ -786,15 +1016,15 @@ pub fn commits(
         .rev_walk(tips)
         .sorting(sorting(scope))
         .all()
-        .map_err(|source| read_error("コミット履歴の走査", source))?;
+        .map_err(|source| read_error(ReadOperation::CommitHistoryWalk, source))?;
 
     // 大規模リポジトリでも初期表示を保つため、rev_walk は limit 件で打ち切る
     let mut commits = Vec::new();
     for info in walk.take(limit) {
-        let info = info.map_err(|source| read_error("コミット履歴の走査", source))?;
+        let info = info.map_err(|source| read_error(ReadOperation::CommitHistoryWalk, source))?;
         let commit = info
             .object()
-            .map_err(|source| read_error("コミットオブジェクトの取得", source))?;
+            .map_err(|source| read_error(ReadOperation::CommitObjectFetch, source))?;
         commits.push(commit_info(&commit)?);
     }
 
@@ -809,25 +1039,25 @@ pub fn commits(
 fn commit_info(commit: &gix::Commit<'_>) -> Result<CommitInfo> {
     let short_id = commit
         .short_id()
-        .map_err(|source| read_error("短縮ハッシュの算出", source))?;
+        .map_err(|source| read_error(ReadOperation::ShortIdCompute, source))?;
     let message = commit
         .message()
-        .map_err(|source| read_error("コミットメッセージの解釈", source))?;
+        .map_err(|source| read_error(ReadOperation::CommitMessageDecode, source))?;
     let author = commit
         .author()
-        .map_err(|source| read_error("コミット作者の解釈", source))?
+        .map_err(|source| read_error(ReadOperation::CommitAuthorDecode, source))?
         .trim();
     let time = author
         .time()
-        .map_err(|source| read_error("コミット日時の解釈", source))?
+        .map_err(|source| read_error(ReadOperation::CommitTimeDecode, source))?
         .format(gix::date::time::format::SHORT)
-        .map_err(|source| read_error("コミット日時の整形", source))?;
+        .map_err(|source| read_error(ReadOperation::CommitTimeFormat, source))?;
 
     Ok(CommitInfo {
         id: commit.id().to_string(),
         short_id: short_id.to_string(),
-        summary: to_utf8(&message.summary(), "コミットサマリの解釈")?,
-        author: to_utf8(author.name, "コミット作者名の解釈")?,
+        summary: to_utf8(&message.summary(), ReadOperation::CommitSummaryDecode)?,
+        author: to_utf8(author.name, ReadOperation::CommitAuthorNameDecode)?,
         time,
     })
 }
@@ -1039,36 +1269,42 @@ fn nul_records(output: &[u8]) -> impl Iterator<Item = &[u8]> {
 ///
 /// # Errors
 ///
-/// エントリの形式が想定と異なる場合、変更元のレコードが欠けている場合、
-/// パスが UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+/// エントリの形式が想定と異なる場合、変更元のレコードが欠けている場合は
+/// [`Error::GitOutputMalformed`]、パスが UTF-8 でない場合は
+/// [`Error::RepositoryReadFailed`] を返す。
 fn parse_status(output: &[u8]) -> Result<Vec<FileChange>> {
     let mut records = nul_records(output);
     let mut changes = Vec::new();
 
     while let Some(record) = records.next() {
         if record.len() <= STATUS_FIELD_WIDTH || record[2] != b' ' {
-            return Err(read_error(
-                "git status 出力の解釈",
-                format!(
-                    "エントリの形式が想定と異なります: {:?}",
-                    record.as_bstr().to_str_lossy()
-                ),
+            return Err(malformed_output(
+                ReadOperation::StatusOutputParse,
+                MalformedOutput::StatusEntry {
+                    record: record.as_bstr().to_str_lossy().into_owned(),
+                },
             ));
         }
 
         let index_status = char::from(record[0]);
         let worktree_status = char::from(record[1]);
-        let path = to_utf8(record[STATUS_FIELD_WIDTH..].as_bstr(), "パスの解釈")?;
+        let path = to_utf8(
+            record[STATUS_FIELD_WIDTH..].as_bstr(),
+            ReadOperation::PathDecode,
+        )?;
 
         let original_path = if is_rename_or_copy(index_status) || is_rename_or_copy(worktree_status)
         {
             let original = records.next().ok_or_else(|| {
-                read_error(
-                    "git status 出力の解釈",
-                    format!("`{path}` のリネーム元のパスが見つかりません"),
+                malformed_output(
+                    ReadOperation::StatusOutputParse,
+                    MalformedOutput::StatusRenameOriginMissing { path: path.clone() },
                 )
             })?;
-            Some(to_utf8(original.as_bstr(), "リネーム元のパスの解釈")?)
+            Some(to_utf8(
+                original.as_bstr(),
+                ReadOperation::RenameOriginPathDecode,
+            )?)
         } else {
             None
         };
@@ -1095,7 +1331,8 @@ fn is_rename_or_copy(status: char) -> bool {
 ///
 /// - 作業ツリーを持たない bare リポジトリの場合は [`Error::NoWorktree`]
 /// - `git status` の実行に失敗した場合は [`Error::GitCommandFailed`] 等
-/// - 出力のパースに失敗した場合は [`Error::RepositoryReadFailed`]
+/// - 出力の形式が想定と異なる場合は [`Error::GitOutputMalformed`]
+/// - 出力が UTF-8 でない場合は [`Error::RepositoryReadFailed`]
 pub fn changes(repository: &gix::Repository, scope: ChangeScope) -> Result<Vec<FileChange>> {
     let output = capture_git_in(workdir(repository)?, &STATUS_ARGS)?;
 
@@ -1115,7 +1352,7 @@ pub fn changes(repository: &gix::Repository, scope: ChangeScope) -> Result<Vec<F
 /// パスが UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
 fn parse_changed_files(output: &[u8]) -> Result<Vec<String>> {
     nul_records(output)
-        .map(|record| to_utf8(record.as_bstr(), "パスの解釈"))
+        .map(|record| to_utf8(record.as_bstr(), ReadOperation::PathDecode))
         .collect()
 }
 
@@ -1151,7 +1388,14 @@ pub fn changed_files(workdir: &Path, range: &[String]) -> Result<Vec<String>> {
 pub fn revision_files(repository: &gix::Repository, revision: &str) -> Result<RevisionFiles> {
     let id = repository
         .rev_parse_single(revision)
-        .map_err(|source| read_error(&format!("リビジョン `{revision}` の解決"), source))?
+        .map_err(|source| {
+            read_error(
+                ReadOperation::RevisionResolve {
+                    revision: revision.to_owned(),
+                },
+                source,
+            )
+        })?
         .to_string();
 
     // `--full-tree` を付けないと ls-tree はカレントディレクトリ基準のパスを返すため、
@@ -1163,7 +1407,7 @@ pub fn revision_files(repository: &gix::Repository, revision: &str) -> Result<Re
 
     let mut paths = Vec::new();
     for record in nul_records(&output) {
-        paths.push(to_utf8(record.as_bstr(), "パスの解釈")?);
+        paths.push(to_utf8(record.as_bstr(), ReadOperation::PathDecode)?);
     }
 
     Ok(RevisionFiles { id, paths })
@@ -1189,36 +1433,37 @@ fn first_line(message: &BStr) -> &BStr {
 pub fn tags(repository: &gix::Repository) -> Result<Vec<TagInfo>> {
     let platform = repository
         .references()
-        .map_err(|source| read_error("参照の列挙", source))?;
+        .map_err(|source| read_error(ReadOperation::ReferenceList, source))?;
 
     let mut tags = Vec::new();
     for reference in platform
         .tags()
-        .map_err(|source| read_error("タグの列挙", source))?
+        .map_err(|source| read_error(ReadOperation::TagList, source))?
     {
-        let mut reference = reference.map_err(|source| read_error("タグの読み取り", source))?;
-        let name = to_utf8(reference.name().shorten(), "タグ名の解釈")?;
+        let mut reference =
+            reference.map_err(|source| read_error(ReadOperation::TagRead, source))?;
+        let name = to_utf8(reference.name().shorten(), ReadOperation::TagNameDecode)?;
 
         // シンボリック参照は辿るが、annotated tag のタグオブジェクトは peel せずに保持する。
         // タグのメッセージを読むにはタグオブジェクト自体が必要なため
-        let id = reference
-            .follow_to_object()
-            .map_err(|source| read_error(&format!("タグ `{name}` の解決"), source))?;
-        let object = id
-            .object()
-            .map_err(|source| read_error(&format!("タグ `{name}` の対象の取得"), source))?;
+        let id = reference.follow_to_object().map_err(|source| {
+            read_error(ReadOperation::TagResolve { tag: name.clone() }, source)
+        })?;
+        let object = id.object().map_err(|source| {
+            read_error(ReadOperation::TagTargetFetch { tag: name.clone() }, source)
+        })?;
 
         let message = match object.kind {
             gix::object::Kind::Tag => {
-                let tag = object
-                    .try_into_tag()
-                    .map_err(|source| read_error(&format!("タグ `{name}` の解釈"), source))?;
-                let decoded = tag
-                    .decode()
-                    .map_err(|source| read_error(&format!("タグ `{name}` の復号"), source))?;
+                let tag = object.try_into_tag().map_err(|source| {
+                    read_error(ReadOperation::TagParse { tag: name.clone() }, source)
+                })?;
+                let decoded = tag.decode().map_err(|source| {
+                    read_error(ReadOperation::TagDecode { tag: name.clone() }, source)
+                })?;
                 Some(to_utf8(
                     first_line(decoded.message),
-                    "タグメッセージの解釈",
+                    ReadOperation::TagMessageDecode,
                 )?)
             }
             // lightweight tag は参照が直接コミット等を指すためメッセージを持たない
@@ -1248,24 +1493,24 @@ pub fn tags(repository: &gix::Repository) -> Result<Vec<TagInfo>> {
 pub fn head_reflog(repository: &gix::Repository) -> Result<Vec<ReflogEntry>> {
     let reference = repository
         .find_reference("HEAD")
-        .map_err(|source| read_error("HEAD の読み取り", source))?;
+        .map_err(|source| read_error(ReadOperation::HeadRead, source))?;
 
     let mut platform = reference.log_iter();
     // reflog が 1 度も記録されていないリポジトリでは reflog ファイル自体が存在しない
     let Some(lines) = platform
         .rev()
-        .map_err(|source| read_error("HEAD の reflog の読み取り", source))?
+        .map_err(|source| read_error(ReadOperation::HeadReflogRead, source))?
     else {
         return Ok(Vec::new());
     };
 
     let mut entries = Vec::new();
     for (index, line) in lines.enumerate() {
-        let line = line.map_err(|source| read_error("HEAD の reflog の解釈", source))?;
+        let line = line.map_err(|source| read_error(ReadOperation::HeadReflogParse, source))?;
         entries.push(ReflogEntry {
             index,
             id: line.new_oid.to_string(),
-            message: to_utf8(line.message.as_bstr(), "reflog メッセージの解釈")?,
+            message: to_utf8(line.message.as_bstr(), ReadOperation::ReflogMessageDecode)?,
         });
     }
 
@@ -1304,8 +1549,9 @@ fn parse_stash_selector(selector: &str) -> Option<usize> {
 ///
 /// # Errors
 ///
-/// レコード数が奇数の場合、参照が `stash@{n}` 形式でない場合、
-/// メッセージが UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+/// レコード数が奇数の場合、参照が `stash@{n}` 形式でない場合は
+/// [`Error::GitOutputMalformed`]、メッセージが UTF-8 でない場合は
+/// [`Error::RepositoryReadFailed`] を返す。
 fn parse_stash_list(output: &[u8]) -> Result<Vec<StashEntry>> {
     if output.is_empty() {
         return Ok(Vec::new());
@@ -1318,28 +1564,29 @@ fn parse_stash_list(output: &[u8]) -> Result<Vec<StashEntry>> {
     }
 
     if !records.len().is_multiple_of(2) {
-        return Err(read_error(
-            "git stash list 出力の解釈",
-            format!(
-                "参照とメッセージの組になっていません（{} レコード）",
-                records.len()
-            ),
+        return Err(malformed_output(
+            ReadOperation::StashListOutputParse,
+            MalformedOutput::StashRecordPairing {
+                records: records.len(),
+            },
         ));
     }
 
     let mut entries = Vec::with_capacity(records.len() / 2);
     for pair in records.chunks_exact(2) {
-        let selector = to_utf8(pair[0].as_bstr(), "stash の参照の解釈")?;
+        let selector = to_utf8(pair[0].as_bstr(), ReadOperation::StashSelectorDecode)?;
         let index = parse_stash_selector(&selector).ok_or_else(|| {
-            read_error(
-                "git stash list 出力の解釈",
-                format!("`{selector}` は `stash@{{n}}` 形式ではありません"),
+            malformed_output(
+                ReadOperation::StashListOutputParse,
+                MalformedOutput::StashSelectorFormat {
+                    selector: selector.clone(),
+                },
             )
         })?;
 
         entries.push(StashEntry {
             index,
-            message: to_utf8(pair[1].as_bstr(), "stash メッセージの解釈")?,
+            message: to_utf8(pair[1].as_bstr(), ReadOperation::StashMessageDecode)?,
         });
     }
 
@@ -1352,7 +1599,8 @@ fn parse_stash_list(output: &[u8]) -> Result<Vec<StashEntry>> {
 ///
 /// - 作業ツリーを持たない bare リポジトリの場合は [`Error::NoWorktree`]
 /// - `git stash list` の実行に失敗した場合は [`Error::GitCommandFailed`] 等
-/// - 出力のパースに失敗した場合は [`Error::RepositoryReadFailed`]
+/// - 出力の形式が想定と異なる場合は [`Error::GitOutputMalformed`]
+/// - 出力が UTF-8 でない場合は [`Error::RepositoryReadFailed`]
 pub fn stashes(repository: &gix::Repository) -> Result<Vec<StashEntry>> {
     let output = capture_git_in(workdir(repository)?, &STASH_LIST_ARGS)?;
     parse_stash_list(&output)
@@ -1392,7 +1640,7 @@ pub fn merged_branches(workdir: &Path, base: &str) -> Result<HashSet<String>> {
 ///
 /// 出力が UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
 fn parse_merged_branches(output: &[u8]) -> Result<HashSet<String>> {
-    let text = to_utf8(output.as_bstr(), "git branch --merged 出力の解釈")?;
+    let text = to_utf8(output.as_bstr(), ReadOperation::MergedBranchOutputParse)?;
 
     Ok(text
         .lines()
@@ -1420,7 +1668,8 @@ const BRANCH_ACTIVITY_ARGS: [&str; 3] = [
 /// # Errors
 ///
 /// `git for-each-ref` の実行に失敗した場合は [`Error::GitCommandFailed`] 等、
-/// 出力の形式が想定と異なる場合は [`Error::RepositoryReadFailed`] を返す。
+/// 出力の形式が想定と異なる場合は [`Error::GitOutputMalformed`]、
+/// 出力が UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
 pub fn branch_activity(workdir: &Path) -> Result<HashMap<String, String>> {
     let output = capture_git_in(workdir, &BRANCH_ACTIVITY_ARGS)?;
 
@@ -1433,16 +1682,19 @@ pub fn branch_activity(workdir: &Path) -> Result<HashMap<String, String>> {
 ///
 /// # Errors
 ///
-/// フィールドが 2 つでない場合、UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
+/// フィールドが 2 つでない場合は [`Error::GitOutputMalformed`]、
+/// UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
 fn parse_branch_activity(output: &[u8]) -> Result<HashMap<String, String>> {
-    let text = to_utf8(output.as_bstr(), "git for-each-ref 出力の解釈")?;
+    let text = to_utf8(output.as_bstr(), ReadOperation::ForEachRefOutputParse)?;
 
     let mut activity = HashMap::new();
     for line in text.lines().filter(|line| !line.is_empty()) {
         let Some((name, relative_date)) = line.split_once('\0') else {
-            return Err(read_error(
-                "git for-each-ref 出力の解釈",
-                format!("参照名と日時の組になっていません: {line:?}"),
+            return Err(malformed_output(
+                ReadOperation::ForEachRefOutputParse,
+                MalformedOutput::BranchActivityPair {
+                    line: line.to_owned(),
+                },
             ));
         };
 
@@ -1460,7 +1712,10 @@ fn parse_branch_activity(output: &[u8]) -> Result<HashMap<String, String>> {
 const WORKTREE_LIST_ARGS: [&str; 4] = ["worktree", "list", "--porcelain", "-z"];
 
 /// 各レコードの先頭に必ず現れる属性（パス）。
-const WORKTREE_LABEL: &str = "worktree";
+///
+/// [`MalformedOutput::WorktreeRecordStart`] の説明にも現れるため、
+/// 文言側（`i18n`）が値を重複して持たずに済むよう公開する。
+pub(crate) const WORKTREE_LABEL: &str = "worktree";
 
 /// チェックアウト中のコミットを示す属性。
 const WORKTREE_HEAD_LABEL: &str = "HEAD";
@@ -1475,7 +1730,10 @@ const WORKTREE_LOCKED_LABEL: &str = "locked";
 const WORKTREE_PRUNABLE_LABEL: &str = "prunable";
 
 /// worktree の `branch` 属性が持つ参照名の前置き。
-const BRANCH_REF_PREFIX: &str = "refs/heads/";
+///
+/// [`MalformedOutput::WorktreeBranchReference`] の説明にも現れるため、
+/// 文言側（`i18n`）が値を重複して持たずに済むよう公開する。
+pub(crate) const BRANCH_REF_PREFIX: &str = "refs/heads/";
 
 /// worktree 1 件分の情報。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1505,7 +1763,8 @@ pub struct WorktreeInfo {
 /// # Errors
 ///
 /// - `git worktree list` の実行に失敗した場合は [`Error::GitCommandFailed`] 等
-/// - 出力のパースに失敗した場合は [`Error::RepositoryReadFailed`]
+/// - 出力の形式が想定と異なる場合は [`Error::GitOutputMalformed`]
+/// - 出力が UTF-8 でない場合は [`Error::RepositoryReadFailed`]
 pub fn worktrees(workdir: &Path) -> Result<Vec<WorktreeInfo>> {
     let output = capture_git_in(workdir, &WORKTREE_LIST_ARGS)?;
 
@@ -1535,9 +1794,11 @@ pub fn checked_out_branches(worktrees: &[WorktreeInfo]) -> HashSet<String> {
 /// 読み違えているため、推測せずエラーにする。
 fn required_value<'a>(label: &str, value: Option<&'a str>) -> Result<&'a str> {
     value.filter(|value| !value.is_empty()).ok_or_else(|| {
-        read_error(
-            "git worktree list 出力の解釈",
-            format!("`{label}` 属性の値がありません"),
+        malformed_output(
+            ReadOperation::WorktreeListOutputParse,
+            MalformedOutput::WorktreeAttributeValueMissing {
+                label: label.to_owned(),
+            },
         )
     })
 }
@@ -1551,9 +1812,11 @@ fn short_branch_name(reference: &str) -> Result<String> {
         .strip_prefix(BRANCH_REF_PREFIX)
         .map(str::to_owned)
         .ok_or_else(|| {
-            read_error(
-                "git worktree list 出力の解釈",
-                format!("`{reference}` は `{BRANCH_REF_PREFIX}` で始まる参照名ではありません"),
+            malformed_output(
+                ReadOperation::WorktreeListOutputParse,
+                MalformedOutput::WorktreeBranchReference {
+                    reference: reference.to_owned(),
+                },
             )
         })
 }
@@ -1572,8 +1835,8 @@ fn short_branch_name(reference: &str) -> Result<String> {
 /// # Errors
 ///
 /// レコードが `worktree` 属性で始まっていない場合、終端されていない場合、
-/// ブランチの参照名が `refs/heads/` 配下でない場合、UTF-8 でない場合は
-/// [`Error::RepositoryReadFailed`] を返す。
+/// ブランチの参照名が `refs/heads/` 配下でない場合は [`Error::GitOutputMalformed`]、
+/// UTF-8 でない場合は [`Error::RepositoryReadFailed`] を返す。
 fn parse_worktree_list(output: &[u8]) -> Result<Vec<WorktreeInfo>> {
     let mut worktrees: Vec<WorktreeInfo> = Vec::new();
     let mut current: Option<WorktreeInfo> = None;
@@ -1595,7 +1858,7 @@ fn parse_worktree_list(output: &[u8]) -> Result<Vec<WorktreeInfo>> {
             continue;
         }
 
-        let line = to_utf8(record.as_bstr(), "git worktree list 出力の解釈")?;
+        let line = to_utf8(record.as_bstr(), ReadOperation::WorktreeListOutputParse)?;
         let (label, value) = match line.split_once(' ') {
             Some((label, value)) => (label, Some(value)),
             None => (line.as_str(), None),
@@ -1621,9 +1884,9 @@ fn parse_worktree_list(output: &[u8]) -> Result<Vec<WorktreeInfo>> {
         }
 
         let Some(worktree) = current.as_mut() else {
-            return Err(read_error(
-                "git worktree list 出力の解釈",
-                format!("レコードが `{WORKTREE_LABEL}` 属性で始まっていません: {line:?}"),
+            return Err(malformed_output(
+                ReadOperation::WorktreeListOutputParse,
+                MalformedOutput::WorktreeRecordStart { line: line.clone() },
             ));
         };
 
@@ -1657,9 +1920,11 @@ fn parse_worktree_list(output: &[u8]) -> Result<Vec<WorktreeInfo>> {
 /// `git worktree list --porcelain` は最後のレコードの後ろにも空行を置く（man git-worktree
 /// 「Porcelain Format」）。終端が無い出力は途中で切れているため、読めた分だけを返さない。
 fn unterminated_record(path: &str) -> Error {
-    read_error(
-        "git worktree list 出力の解釈",
-        format!("`{path}` のレコードが終端されていません"),
+    malformed_output(
+        ReadOperation::WorktreeListOutputParse,
+        MalformedOutput::WorktreeRecordUnterminated {
+            path: path.to_owned(),
+        },
     )
 }
 
@@ -1667,6 +1932,7 @@ fn unterminated_record(path: &str) -> Error {
 mod tests {
     use super::*;
     use crate::git::repo::discover;
+    use crate::i18n::Language;
     use crate::test_support::{
         COMMIT_DATE_SHORT, TempDir, commit, commit_at, create_annotated_tag, create_branch,
         create_lightweight_tag, create_remote_branch, create_remote_symbolic_ref, git_in,
@@ -1958,14 +2224,26 @@ mod tests {
         let err = commits(&repository, CommitScope::Branch("no-such-branch"), 10)
             .expect_err("an unknown branch must not be silently ignored");
 
-        match err {
+        match &err {
             Error::RepositoryReadFailed { operation, .. } => {
-                assert!(
-                    operation.contains("no-such-branch"),
-                    "the branch should be named: {operation}"
+                assert_eq!(
+                    *operation,
+                    ReadOperation::BranchResolve {
+                        branch: "no-such-branch".to_owned()
+                    }
                 );
             }
             other => panic!("unexpected error: {other:?}"),
+        }
+
+        // 表示は言語ごとの `describe` が組み立てるため、言語を明示して検証する
+        // （enum 化する前はここでエラーの `operation` が持つ日本語を直接アサートしていた）
+        for language in [Language::Japanese, Language::English] {
+            let described = language.messages().errors().describe(&err);
+            assert!(
+                described.contains("no-such-branch"),
+                "{language:?} must name the branch: {described}"
+            );
         }
     }
 
@@ -2156,7 +2434,13 @@ mod tests {
                 parse_status(&output).expect_err("a malformed entry must not be silently ignored");
 
             assert!(
-                matches!(err, Error::RepositoryReadFailed { .. }),
+                matches!(
+                    err,
+                    Error::GitOutputMalformed {
+                        detail: MalformedOutput::StatusEntry { .. },
+                        ..
+                    }
+                ),
                 "unexpected error for {record:?}: {err:?}"
             );
         }
@@ -2168,16 +2452,30 @@ mod tests {
 
         let err = parse_status(&output).expect_err("a truncated rename entry must not be accepted");
 
-        match err {
-            Error::RepositoryReadFailed { operation, source } => {
-                assert_eq!(operation, "git status 出力の解釈");
-                assert!(
-                    source.to_string().contains("new.txt"),
-                    "the affected path should be named: {source}"
+        match &err {
+            Error::GitOutputMalformed { operation, detail } => {
+                assert_eq!(*operation, ReadOperation::StatusOutputParse);
+                assert_eq!(
+                    *detail,
+                    MalformedOutput::StatusRenameOriginMissing {
+                        path: "new.txt".to_owned()
+                    }
                 );
             }
             other => panic!("unexpected error: {other:?}"),
         }
+
+        // ja を明示した表示の検証。enum 化する前にここへ直接書いていた日本語
+        // （`git status 出力の解釈` と対象パス）が `describe` 経由で出ることを確かめる
+        let described = Language::Japanese.messages().errors().describe(&err);
+        assert!(
+            described.contains("git status 出力の解釈"),
+            "the Japanese description must name the operation: {described}"
+        );
+        assert!(
+            described.contains("new.txt"),
+            "the Japanese description must name the affected path: {described}"
+        );
     }
 
     #[test]
@@ -2507,12 +2805,23 @@ mod tests {
         let err = revision_files(&repository, "no-such-revision")
             .expect_err("an unknown revision must not be silently ignored");
 
-        match err {
-            Error::RepositoryReadFailed { operation, .. } => assert!(
-                operation.contains("no-such-revision"),
-                "the revision should be named: {operation}"
+        match &err {
+            Error::RepositoryReadFailed { operation, .. } => assert_eq!(
+                *operation,
+                ReadOperation::RevisionResolve {
+                    revision: "no-such-revision".to_owned()
+                }
             ),
             other => panic!("unexpected error: {other:?}"),
+        }
+
+        // 表示は言語ごとの `describe` が組み立てるため、言語を明示して検証する
+        for language in [Language::Japanese, Language::English] {
+            let described = language.messages().errors().describe(&err);
+            assert!(
+                described.contains("no-such-revision"),
+                "{language:?} must name the revision: {described}"
+            );
         }
     }
 
@@ -2739,7 +3048,13 @@ mod tests {
         let err = parse_stash_list(&output).expect_err("an odd record count must be rejected");
 
         assert!(
-            matches!(err, Error::RepositoryReadFailed { .. }),
+            matches!(
+                err,
+                Error::GitOutputMalformed {
+                    detail: MalformedOutput::StashRecordPairing { .. },
+                    ..
+                }
+            ),
             "unexpected error: {err:?}"
         );
     }
@@ -2752,11 +3067,11 @@ mod tests {
             let err = parse_stash_list(&output)
                 .expect_err("a selector that is not stash@{n} must be rejected");
 
-            match err {
-                Error::RepositoryReadFailed { source, .. } => assert!(
-                    source.to_string().contains(selector),
-                    "the offending selector should be named: {source}"
-                ),
+            match &err {
+                Error::GitOutputMalformed {
+                    detail: MalformedOutput::StashSelectorFormat { selector: reported },
+                    ..
+                } => assert_eq!(reported, selector),
                 other => panic!("unexpected error for {selector:?}: {other:?}"),
             }
         }
@@ -3281,7 +3596,13 @@ mod tests {
                 .expect_err("a malformed output must not be silently accepted");
 
             assert!(
-                matches!(err, Error::RepositoryReadFailed { .. }),
+                matches!(
+                    err,
+                    Error::GitOutputMalformed {
+                        detail: MalformedOutput::AheadBehind { .. },
+                        ..
+                    }
+                ),
                 "unexpected error for {output:?}: {err:?}"
             );
         }
@@ -3361,7 +3682,13 @@ mod tests {
                 .expect_err("a malformed output must not be silently accepted");
 
             assert!(
-                matches!(err, Error::RepositoryReadFailed { .. }),
+                matches!(
+                    err,
+                    Error::GitOutputMalformed {
+                        detail: MalformedOutput::CommitCount { .. },
+                        ..
+                    }
+                ),
                 "unexpected error for {output:?}: {err:?}"
             );
         }
@@ -3985,7 +4312,13 @@ and checked out elsewhere are all counted"
         let err = parse_branch_activity(b"main 3 days ago\n")
             .expect_err("a missing NUL separator must be rejected");
 
-        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+        assert!(matches!(
+            err,
+            Error::GitOutputMalformed {
+                detail: MalformedOutput::BranchActivityPair { .. },
+                ..
+            }
+        ));
     }
 
     /// `git worktree list --porcelain -z` の 1 レコード分の出力を組み立てる。
@@ -4254,7 +4587,13 @@ and checked out elsewhere are all counted"
                 .expect_err("an attribute without its value must be rejected");
 
             assert!(
-                matches!(err, Error::RepositoryReadFailed { .. }),
+                matches!(
+                    err,
+                    Error::GitOutputMalformed {
+                        detail: MalformedOutput::WorktreeAttributeValueMissing { .. },
+                        ..
+                    }
+                ),
                 "unexpected error for {lines:?}: {err:?}"
             );
         }
@@ -4334,7 +4673,13 @@ and checked out elsewhere are all counted"
         let err = parse_worktree_list(&output)
             .expect_err("a record must start with the worktree attribute");
 
-        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+        assert!(matches!(
+            err,
+            Error::GitOutputMalformed {
+                detail: MalformedOutput::WorktreeRecordStart { .. },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -4344,7 +4689,13 @@ and checked out elsewhere are all counted"
 
         let err = parse_worktree_list(output).expect_err("an unterminated record must be rejected");
 
-        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+        assert!(matches!(
+            err,
+            Error::GitOutputMalformed {
+                detail: MalformedOutput::WorktreeRecordUnterminated { .. },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -4353,7 +4704,13 @@ and checked out elsewhere are all counted"
 
         let err = parse_worktree_list(output).expect_err("a truncated output must be rejected");
 
-        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+        assert!(matches!(
+            err,
+            Error::GitOutputMalformed {
+                detail: MalformedOutput::WorktreeRecordUnterminated { .. },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -4362,7 +4719,13 @@ and checked out elsewhere are all counted"
 
         let err = parse_worktree_list(&output).expect_err("the worktree path is required");
 
-        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+        assert!(matches!(
+            err,
+            Error::GitOutputMalformed {
+                detail: MalformedOutput::WorktreeAttributeValueMissing { .. },
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -4375,7 +4738,13 @@ and checked out elsewhere are all counted"
 
         let err = parse_worktree_list(&output).expect_err("only branches can be checked out");
 
-        assert!(matches!(err, Error::RepositoryReadFailed { .. }));
+        assert!(matches!(
+            err,
+            Error::GitOutputMalformed {
+                detail: MalformedOutput::WorktreeBranchReference { .. },
+                ..
+            }
+        ));
     }
 
     #[test]

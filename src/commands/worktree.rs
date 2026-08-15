@@ -24,6 +24,7 @@ use crate::git::read::{
     BranchInfo, BranchScope, WorktreeInfo, branches, checked_out_branches, worktrees,
 };
 use crate::git::repo::workdir;
+use crate::i18n::{Language, Messages};
 
 /// 整理対象を報告させる `git worktree prune` の引数（何も削除しない）。
 ///
@@ -62,29 +63,6 @@ const PRUNABLE_MARK: &str = "prunable";
 /// 実在しないオブジェクトであるため、プレビューの `git log` は必ず失敗する。
 const NULL_OBJECT_ID: &str = "0000000000000000000000000000000000000000";
 
-/// 削除できる worktree が 1 件も無い場合の案内。
-///
-/// 一般の「選択できる候補がありません」では、main worktree を候補から除いた結果である
-/// ことが分からないため、原因を明示する。
-const NO_REMOVABLE_MESSAGE: &str = "削除できる worktree がありません\
-（main worktree は `git worktree remove` の対象になりません）";
-
-/// worktree に割り当てられるローカルブランチが 1 件も無い場合の案内。
-const NO_AVAILABLE_BRANCH_MESSAGE: &str = "worktree に割り当てられるローカルブランチがありません\
-（他の worktree でチェックアウト中のブランチは対象になりません）";
-
-/// 整理対象が 1 件も無い場合に伝えること。
-///
-/// 対象が無いのは正常な状態であり、エラーにはしない（requirements.md FR-21）。
-const NOTHING_TO_PRUNE_MESSAGE: &str = "整理する worktree はありません";
-
-/// worktree 削除の確認プロンプトの見出し。
-const REMOVE_HEADER: &str = "以下の worktree を削除します\
-（作業ツリーのディレクトリと管理情報が削除されます。ブランチは残ります）";
-
-/// worktree 整理の確認プロンプトの見出し。
-const PRUNE_HEADER: &str = "以下の worktree の管理情報を整理します";
-
 /// worktree のサブコマンドを対応する処理へ振り分ける。
 ///
 /// サブコマンドを省略した場合は一覧からの選択（パスの出力）を行う。
@@ -92,12 +70,17 @@ const PRUNE_HEADER: &str = "以下の worktree の管理情報を整理します
 /// # Errors
 ///
 /// 各操作が失敗した場合にエラーを返す。
-pub fn run(repository: &gix::Repository, command: Option<&WorktreeCommand>) -> Result<()> {
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    command: Option<&WorktreeCommand>,
+) -> Result<()> {
     match command {
-        None => list(repository),
-        Some(WorktreeCommand::Add { path }) => add(repository, path),
-        Some(WorktreeCommand::Remove) => remove(repository),
-        Some(WorktreeCommand::Prune) => prune(repository),
+        None => list(language, messages, repository),
+        Some(WorktreeCommand::Add { path }) => add(language, messages, repository, path),
+        Some(WorktreeCommand::Remove) => remove(language, messages, repository),
+        Some(WorktreeCommand::Prune) => prune(language, messages, repository),
     }
 }
 
@@ -106,16 +89,16 @@ pub fn run(repository: &gix::Repository, command: Option<&WorktreeCommand>) -> R
 /// # Errors
 ///
 /// 一覧の取得、選択（中断を含む）、標準出力への書き込みに失敗した場合にエラーを返す。
-fn list(repository: &gix::Repository) -> Result<()> {
-    let worktrees = read_worktrees(repository)?;
+fn list(language: Language, messages: &dyn Messages, repository: &gix::Repository) -> Result<()> {
+    let worktrees = read_worktrees(messages, repository)?;
     let candidates: Vec<&WorktreeInfo> = worktrees.iter().collect();
 
-    let selected = choose(&candidates)?;
+    let selected = choose(language, messages, &candidates)?;
 
     // パイプ利用（`cd "$(gz worktree)"`）を想定し、stdout にはパス以外を混ぜない。
     // パイプ先が先に閉じた場合に panic しないよう、書き込みエラーは明示的に伝播する
     writeln!(std::io::stdout(), "{path}", path = selected.path)
-        .context("標準出力への書き込みに失敗しました")?;
+        .context(messages.common().stdout_write_failed())?;
 
     Ok(())
 }
@@ -130,28 +113,30 @@ fn list(repository: &gix::Repository) -> Result<()> {
 ///
 /// パスが UTF-8 でない場合、候補の取得・選択（中断を含む）、`git worktree add` の実行に
 /// 失敗した場合にエラーを返す。
-fn add(repository: &gix::Repository, path: &Path) -> Result<()> {
+fn add(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    path: &Path,
+) -> Result<()> {
     // `git` へ渡す引数は文字列である必要がある。解釈できないパスを勝手に変換すると
     // 意図と異なる場所に worktree を作ってしまうため、推測せずエラーにする
-    let path = path.to_str().ok_or_else(|| {
-        anyhow!(
-            "worktree のパス `{path}` を UTF-8 として解釈できません",
-            path = path.display()
-        )
-    })?;
+    let path = path
+        .to_str()
+        .ok_or_else(|| anyhow!(messages.worktree().path_not_utf8(path)))?;
 
-    let worktrees = read_worktrees(repository)?;
+    let worktrees = read_worktrees(messages, repository)?;
     let in_use = checked_out_branches(&worktrees);
-    let locals =
-        branches(repository, BranchScope::Local).context("ブランチ一覧の取得に失敗しました")?;
+    let locals = branches(repository, BranchScope::Local)
+        .context(messages.common().branch_list_read_failed())?;
     let candidates = available_branches(&locals, &in_use);
     if candidates.is_empty() {
-        bail!(NO_AVAILABLE_BRANCH_MESSAGE);
+        bail!(messages.worktree().no_available_branch());
     }
 
     let items = candidates
         .iter()
-        .map(|branch| to_branch_item(branch))
+        .map(|branch| to_branch_item(language, branch))
         .collect();
     let selected = select_one(items)?;
 
@@ -160,11 +145,11 @@ fn add(repository: &gix::Repository, path: &Path) -> Result<()> {
     let branch = candidates
         .iter()
         .find(|candidate| candidate.name == selected)
-        .ok_or_else(|| anyhow!("選択されたブランチ `{selected}` が候補に見つかりません"))?;
+        .ok_or_else(|| anyhow!(messages.worktree().branch_selection_not_found(&selected)))?;
 
     let arguments = add_args(path, &branch.name);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(&arguments).with_context(|| format!("worktree `{path}` の作成に失敗しました"))?;
+    run_git(language, &arguments).with_context(|| messages.worktree().creation_failed(path))?;
 
     Ok(())
 }
@@ -179,26 +164,26 @@ fn add(repository: &gix::Repository, path: &Path) -> Result<()> {
 ///
 /// 一覧の取得、選択（中断を含む）、`git worktree remove` の実行に失敗した場合にエラーを返す。
 /// 確認プロンプトで承認が得られなかった場合は [`crate::error::Error::Cancelled`]。
-fn remove(repository: &gix::Repository) -> Result<()> {
-    let worktrees = read_worktrees(repository)?;
+fn remove(language: Language, messages: &dyn Messages, repository: &gix::Repository) -> Result<()> {
+    let worktrees = read_worktrees(messages, repository)?;
     let candidates = removable(&worktrees);
     if candidates.is_empty() {
-        bail!(NO_REMOVABLE_MESSAGE);
+        bail!(messages.worktree().no_removable());
     }
 
-    let selected = choose(&candidates)?;
+    let selected = choose(language, messages, &candidates)?;
 
     // 削除されるのは作業ツリーのディレクトリごとであるため、対象を示して同意を求める
-    confirm(REMOVE_HEADER, &[&display_line(selected)])?;
+    confirm(
+        messages,
+        messages.worktree().remove_confirmation(),
+        &[&display_line(selected)],
+    )?;
 
     let arguments = remove_args(&selected.path);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(&arguments).with_context(|| {
-        format!(
-            "worktree `{path}` の削除に失敗しました",
-            path = selected.path
-        )
-    })?;
+    run_git(language, &arguments)
+        .with_context(|| messages.worktree().removal_failed(&selected.path))?;
 
     Ok(())
 }
@@ -212,21 +197,21 @@ fn remove(repository: &gix::Repository) -> Result<()> {
 ///
 /// ドライランの実行、`git worktree prune` の実行に失敗した場合にエラーを返す。
 /// 確認プロンプトで承認が得られなかった場合は [`crate::error::Error::Cancelled`]。
-fn prune(repository: &gix::Repository) -> Result<()> {
-    let report = capture_git_stderr_in(workdir(repository)?, &PRUNE_DRY_RUN_ARGS)
-        .context("整理対象の確認に失敗しました")?;
+fn prune(language: Language, messages: &dyn Messages, repository: &gix::Repository) -> Result<()> {
+    let report = capture_git_stderr_in(language, workdir(repository)?, &PRUNE_DRY_RUN_ARGS)
+        .context(messages.worktree().prune_targets_read_failed())?;
     let targets = prune_targets(&report);
 
     if targets.is_empty() {
-        return report_nothing_to_prune(&mut std::io::stderr());
+        return report_nothing_to_prune(messages, &mut std::io::stderr());
     }
 
     let lines: Vec<&str> = targets.iter().map(String::as_str).collect();
-    confirm(PRUNE_HEADER, &lines)?;
+    confirm(messages, messages.worktree().prune_confirmation(), &lines)?;
 
     let arguments = prune_args();
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(&arguments).context("worktree の整理に失敗しました")?;
+    run_git(language, &arguments).context(messages.worktree().prune_failed())?;
 
     Ok(())
 }
@@ -236,8 +221,11 @@ fn prune(repository: &gix::Repository) -> Result<()> {
 /// # Errors
 ///
 /// 作業ツリーが無い場合、`git worktree list` の実行・パースに失敗した場合にエラーを返す。
-fn read_worktrees(repository: &gix::Repository) -> Result<Vec<WorktreeInfo>> {
-    worktrees(workdir(repository)?).context("worktree 一覧の取得に失敗しました")
+fn read_worktrees(
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+) -> Result<Vec<WorktreeInfo>> {
+    worktrees(workdir(repository)?).context(messages.common().worktree_list_read_failed())
 }
 
 /// worktree を 1 件選び、候補一覧との照合を経た 1 件を返す。
@@ -245,14 +233,18 @@ fn read_worktrees(repository: &gix::Repository) -> Result<Vec<WorktreeInfo>> {
 /// # Errors
 ///
 /// 選択（中断を含む）に失敗した場合、選択結果が候補一覧に無い場合にエラーを返す。
-fn choose<'a>(candidates: &[&'a WorktreeInfo]) -> Result<&'a WorktreeInfo> {
+fn choose<'a>(
+    language: Language,
+    messages: &dyn Messages,
+    candidates: &[&'a WorktreeInfo],
+) -> Result<&'a WorktreeInfo> {
     let items = candidates
         .iter()
-        .map(|worktree| to_item(worktree))
+        .map(|worktree| to_item(language, worktree))
         .collect();
     let selected = select_one(items)?;
 
-    resolve(candidates, &selected)
+    resolve(messages, candidates, &selected)
 }
 
 /// 選択されたパスを候補一覧の 1 件へ解決する。
@@ -264,12 +256,16 @@ fn choose<'a>(candidates: &[&'a WorktreeInfo]) -> Result<&'a WorktreeInfo> {
 ///
 /// パスが候補一覧に無い場合にエラーを返す（対象を取り違えたまま git を実行しないよう、
 /// 暗黙に読み飛ばさない）。
-fn resolve<'a>(candidates: &[&'a WorktreeInfo], selected: &str) -> Result<&'a WorktreeInfo> {
+fn resolve<'a>(
+    messages: &dyn Messages,
+    candidates: &[&'a WorktreeInfo],
+    selected: &str,
+) -> Result<&'a WorktreeInfo> {
     candidates
         .iter()
         .find(|worktree| worktree.path == selected)
         .copied()
-        .ok_or_else(|| anyhow!("選択された worktree `{selected}` が候補に見つかりません"))
+        .ok_or_else(|| anyhow!(messages.worktree().selection_not_found(selected)))
 }
 
 /// 削除できる worktree（main を除く linked worktree）を候補順のまま抽出する。
@@ -340,11 +336,12 @@ fn state_label(worktree: &WorktreeInfo) -> String {
 }
 
 /// worktree を finder のアイテムへ変換する。
-fn to_item(worktree: &WorktreeInfo) -> FinderItem {
+fn to_item(language: Language, worktree: &WorktreeInfo) -> FinderItem {
     FinderItem::new(
         display_line(worktree),
         worktree.path.clone(),
         preview_source(worktree),
+        language.messages(),
     )
 }
 
@@ -361,11 +358,12 @@ fn preview_source(worktree: &WorktreeInfo) -> PreviewSource {
 }
 
 /// ブランチを finder のアイテムへ変換する（`gz worktree add` の候補）。
-fn to_branch_item(branch: &BranchInfo) -> FinderItem {
+fn to_branch_item(language: Language, branch: &BranchInfo) -> FinderItem {
     FinderItem::new(
         branch.name.clone(),
         branch.name.clone(),
         PreviewSource::Git(log_preview_args(&branch.name)),
+        language.messages(),
     )
 }
 
@@ -439,9 +437,16 @@ fn prune_targets(report: &[u8]) -> Vec<String> {
 /// # Errors
 ///
 /// 書き込みに失敗した場合にエラーを返す。
-fn report_nothing_to_prune(writer: &mut impl std::io::Write) -> Result<()> {
-    writeln!(writer, "{NOTHING_TO_PRUNE_MESSAGE}")
-        .context("標準エラー出力への書き込みに失敗しました")?;
+fn report_nothing_to_prune(
+    messages: &dyn Messages,
+    writer: &mut impl std::io::Write,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "{message}",
+        message = messages.worktree().nothing_to_prune()
+    )
+    .context(messages.common().stderr_write_failed())?;
 
     Ok(())
 }
@@ -608,7 +613,12 @@ Removing worktrees/old: gitdir file points to non-existent location\n";
         ];
         let candidates: Vec<&WorktreeInfo> = worktrees.iter().collect();
 
-        let resolved = resolve(&candidates, "/repo/../feature").expect("a listed path resolves");
+        let resolved = resolve(
+            Language::Japanese.messages(),
+            &candidates,
+            "/repo/../feature",
+        )
+        .expect("a listed path resolves");
 
         assert_eq!(resolved.branch.as_deref(), Some("feature"));
     }
@@ -618,7 +628,8 @@ Removing worktrees/old: gitdir file points to non-existent location\n";
         let worktrees = [worktree("/repo", Some("main"), true)];
         let candidates: Vec<&WorktreeInfo> = worktrees.iter().collect();
 
-        let err = resolve(&candidates, "/elsewhere").expect_err("an unknown path must be rejected");
+        let err = resolve(Language::Japanese.messages(), &candidates, "/elsewhere")
+            .expect_err("an unknown path must be rejected");
 
         assert!(
             err.to_string().contains("/elsewhere"),
@@ -634,8 +645,12 @@ Removing worktrees/old: gitdir file points to non-existent location\n";
             worktree("/repo/../feature", Some("feature"), false),
         ];
 
-        let err =
-            resolve(&removable(&worktrees), "/repo").expect_err("the main worktree is excluded");
+        let err = resolve(
+            Language::Japanese.messages(),
+            &removable(&worktrees),
+            "/repo",
+        )
+        .expect_err("the main worktree is excluded");
 
         assert!(
             err.to_string().contains("/repo"),
@@ -692,7 +707,10 @@ Removing worktrees/old: gitdir file points to non-existent location\n";
     #[test]
     fn an_item_keeps_the_path_as_its_key() {
         // 決定時に標準出力へ出すのは表示行ではなくパスそのもの
-        let item = to_item(&worktree("/repo/../feature", Some("feature"), false));
+        let item = to_item(
+            Language::Japanese,
+            &worktree("/repo/../feature", Some("feature"), false),
+        );
 
         assert_eq!(item.key(), "/repo/../feature");
     }
@@ -742,20 +760,125 @@ Removing worktrees/old: gitdir file points to non-existent location\n";
     #[test]
     fn a_branch_item_keeps_its_name_as_the_key() {
         assert_eq!(
-            to_branch_item(&local("feature/login")).key(),
+            to_branch_item(Language::Japanese, &local("feature/login")).key(),
             "feature/login"
         );
     }
 
     #[test]
     fn nothing_to_prune_is_reported_without_an_error() {
+        let messages = Language::Japanese.messages();
         let mut output = Vec::new();
 
-        report_nothing_to_prune(&mut output).expect("writing to a buffer cannot fail");
+        report_nothing_to_prune(messages, &mut output).expect("writing to a buffer cannot fail");
 
         assert_eq!(
             String::from_utf8(output).expect("the message should be utf-8"),
-            format!("{NOTHING_TO_PRUNE_MESSAGE}\n")
+            format!(
+                "{message}\n",
+                message = messages.worktree().nothing_to_prune()
+            )
+        );
+    }
+
+    #[test]
+    fn every_worktree_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let worktree = language.messages().worktree();
+
+            for text in [
+                worktree.no_available_branch(),
+                worktree.no_removable(),
+                worktree.remove_confirmation(),
+                worktree.prune_targets_read_failed(),
+                worktree.prune_confirmation(),
+                worktree.prune_failed(),
+                worktree.nothing_to_prune(),
+            ] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+
+            assert!(
+                worktree.selection_not_found("/repo").contains("/repo"),
+                "{language:?} must name the selection"
+            );
+            assert!(
+                worktree
+                    .path_not_utf8(std::path::Path::new("/repo/../feature"))
+                    .contains("feature"),
+                "{language:?} must name the path"
+            );
+            assert!(
+                worktree
+                    .branch_selection_not_found("feature")
+                    .contains("feature"),
+                "{language:?} must name the selection"
+            );
+            assert!(
+                worktree
+                    .creation_failed("/repo/../feature")
+                    .contains("/repo"),
+                "{language:?} must name the worktree"
+            );
+            assert!(
+                worktree
+                    .removal_failed("/repo/../feature")
+                    .contains("/repo"),
+                "{language:?} must name the worktree"
+            );
+        }
+    }
+
+    #[test]
+    fn the_worktree_wording_is_translated() {
+        let japanese = Language::Japanese.messages().worktree();
+        let english = Language::English.messages().worktree();
+        let path = std::path::Path::new("/repo/../feature");
+
+        assert_ne!(
+            japanese.selection_not_found("/repo"),
+            english.selection_not_found("/repo")
+        );
+        assert_ne!(japanese.path_not_utf8(path), english.path_not_utf8(path));
+        assert_ne!(
+            japanese.no_available_branch(),
+            english.no_available_branch()
+        );
+        assert_ne!(
+            japanese.branch_selection_not_found("feature"),
+            english.branch_selection_not_found("feature")
+        );
+        assert_ne!(
+            japanese.creation_failed("/repo"),
+            english.creation_failed("/repo")
+        );
+        assert_ne!(japanese.no_removable(), english.no_removable());
+        assert_ne!(
+            japanese.remove_confirmation(),
+            english.remove_confirmation()
+        );
+        assert_ne!(
+            japanese.removal_failed("/repo"),
+            english.removal_failed("/repo")
+        );
+        assert_ne!(
+            japanese.prune_targets_read_failed(),
+            english.prune_targets_read_failed()
+        );
+        assert_ne!(japanese.prune_confirmation(), english.prune_confirmation());
+        assert_ne!(japanese.prune_failed(), english.prune_failed());
+        assert_ne!(japanese.nothing_to_prune(), english.nothing_to_prune());
+    }
+
+    #[test]
+    fn the_report_of_the_dry_run_is_never_translated() {
+        // 報告は git の出力そのものであり、fuzgit は行に分割するだけで解釈も翻訳もしない
+        // （design.md「`capture_git_stderr_in` を (B) とする根拠」）
+        let report = b"Removing worktrees/gone: gitdir file points to non-existent location\n";
+
+        assert_eq!(
+            prune_targets(report),
+            ["Removing worktrees/gone: gitdir file points to non-existent location"]
         );
     }
 }

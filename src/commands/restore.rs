@@ -7,6 +7,10 @@ use crate::commands::file_selection::{FileCandidate, RenameOrigin, resolve, targ
 use crate::finder::{FinderItem, PreviewSource, select_many};
 use crate::git::exec::{pathspec, run_git};
 use crate::git::read::{ChangeScope, FileChange, RevisionFiles, changes, revision_files};
+use crate::i18n::{Language, Messages};
+
+/// 失敗を伝える文言に用いる、実行する git のサブコマンド名。
+const RESTORE_COMMAND: &str = "git restore";
 
 /// `--source <rev>` で指定された復元元。
 ///
@@ -59,6 +63,8 @@ impl RestoreTarget {
 ///
 /// 候補の取得、選択（中断を含む）、確認の否認、`git restore` の実行に失敗した場合にエラーを返す。
 pub fn run(
+    language: Language,
+    messages: &dyn Messages,
     repository: &gix::Repository,
     target: RestoreTarget,
     source: Option<&str>,
@@ -66,22 +72,22 @@ pub fn run(
     let files = match source {
         Some(revision) => Some(
             revision_files(repository, revision)
-                .with_context(|| format!("`{revision}` のファイル一覧の取得に失敗しました"))?,
+                .with_context(|| messages.restore().revision_files_read_failed(revision))?,
         ),
         None => None,
     };
 
-    let candidates = candidates(repository, target, files.as_ref())?;
+    let candidates = candidates(messages, repository, target, files.as_ref())?;
     // git へは解決済みのハッシュを渡す。ユーザーの指定した文字列（`HEAD~1` 等）が
     // オプションとして解釈される余地を排除するため
     let revision = files.as_ref().map(|files| files.id.as_str());
 
     let items = candidates
         .iter()
-        .map(|candidate| to_item(candidate, target, revision))
+        .map(|candidate| to_item(language, candidate, target, revision))
         .collect();
     let selected = select_many(items)?;
-    let selected = resolve(&candidates, &selected)?;
+    let selected = resolve(messages, &candidates, &selected)?;
 
     let source = source
         .zip(files.as_ref())
@@ -90,7 +96,7 @@ pub fn run(
             id: files.id.as_str(),
         });
 
-    execute(target, source, &selected)
+    execute(language, messages, target, source, &selected)
 }
 
 /// 選択済みの変更ファイルを `git restore` で復元・アンステージする。
@@ -101,13 +107,20 @@ pub fn run(
 /// # Errors
 ///
 /// 確認の否認、`git restore` の実行に失敗した場合にエラーを返す。
-pub fn run_on_changes(target: RestoreTarget, selected: &[&FileChange]) -> Result<()> {
+pub fn run_on_changes(
+    language: Language,
+    messages: &dyn Messages,
+    target: RestoreTarget,
+    selected: &[&FileChange],
+) -> Result<()> {
     let candidates: Vec<FileCandidate> = selected
         .iter()
         .map(|change| FileCandidate::from_change(change, target.rename_origin()))
         .collect();
 
     execute(
+        language,
+        messages,
         target,
         None,
         &candidates.iter().collect::<Vec<&FileCandidate>>(),
@@ -121,6 +134,8 @@ pub fn run_on_changes(target: RestoreTarget, selected: &[&FileChange]) -> Result
 /// 確認の否認（[`crate::error::Error::Cancelled`]）、`git restore` の実行に失敗した場合に
 /// エラーを返す。
 fn execute(
+    language: Language,
+    messages: &dyn Messages,
     target: RestoreTarget,
     source: Option<Source<'_>>,
     selected: &[&FileCandidate],
@@ -132,19 +147,24 @@ fn execute(
             .map(|candidate| candidate.key.as_str())
             .collect();
         let specification = source.map(|source| source.specification);
-        confirm(&confirmation_header(targets.len(), specification), &targets)?;
+        confirm(
+            messages,
+            &confirmation_header(messages, targets.len(), specification),
+            &targets,
+        )?;
     }
 
     let paths = target_paths(selected);
     let arguments = restore_args(target, source.map(|source| source.id), &paths);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(&arguments).context("git restore の実行に失敗しました")?;
+    run_git(language, &arguments).context(messages.common().command_run_failed(RESTORE_COMMAND))?;
 
     Ok(())
 }
 
 /// 選択候補を組み立てる。
 fn candidates(
+    messages: &dyn Messages,
     repository: &gix::Repository,
     target: RestoreTarget,
     source: Option<&RevisionFiles>,
@@ -157,7 +177,7 @@ fn candidates(
             .map(|path| FileCandidate::from_path(path))
             .collect()),
         None => Ok(changes(repository, target.change_scope())
-            .context("変更ファイル一覧の取得に失敗しました")?
+            .context(messages.common().changed_files_read_failed())?
             .iter()
             .map(|change| FileCandidate::from_change(change, target.rename_origin()))
             .collect()),
@@ -165,11 +185,17 @@ fn candidates(
 }
 
 /// 候補を finder のアイテムへ変換する。
-fn to_item(candidate: &FileCandidate, target: RestoreTarget, revision: Option<&str>) -> FinderItem {
+fn to_item(
+    language: Language,
+    candidate: &FileCandidate,
+    target: RestoreTarget,
+    revision: Option<&str>,
+) -> FinderItem {
     FinderItem::new(
         candidate.display.clone(),
         candidate.key.clone(),
         PreviewSource::Git(preview_args(target, revision, &candidate.paths)),
+        language.messages(),
     )
 }
 
@@ -209,12 +235,10 @@ fn restore_args(target: RestoreTarget, revision: Option<&str>, paths: &[String])
 /// 確認プロンプトの見出しを組み立てる。
 ///
 /// 何が失われるのかを実行前に明示するため、件数と上書き元を必ず含める。
-fn confirmation_header(count: usize, revision: Option<&str>) -> String {
+fn confirmation_header(messages: &dyn Messages, count: usize, revision: Option<&str>) -> String {
     match revision {
-        Some(revision) => format!(
-            "以下 {count} 件のファイルを `{revision}` の内容で上書きします（作業ツリーの変更は失われます）:"
-        ),
-        None => format!("以下 {count} 件のファイルの変更を破棄します（元に戻せません）:"),
+        Some(revision) => messages.restore().overwrite_confirmation(count, revision),
+        None => messages.restore().discard_confirmation(count),
     }
 }
 
@@ -396,14 +420,14 @@ mod tests {
     #[test]
     fn the_confirmation_states_how_many_files_lose_their_changes() {
         assert_eq!(
-            confirmation_header(3, None),
+            confirmation_header(Language::Japanese.messages(), 3, None),
             "以下 3 件のファイルの変更を破棄します（元に戻せません）:"
         );
     }
 
     #[test]
     fn the_confirmation_names_the_revision_that_overwrites_the_work_tree() {
-        let header = confirmation_header(1, Some("abc123"));
+        let header = confirmation_header(Language::Japanese.messages(), 1, Some("abc123"));
 
         assert!(
             header.contains("abc123") && header.contains("1 件"),
@@ -415,8 +439,77 @@ mod tests {
     fn an_item_keeps_the_path_as_its_key() {
         let candidate = FileCandidate::from_path("dir/with space.txt");
 
-        let item = to_item(&candidate, RestoreTarget::Worktree, Some("abc123"));
+        let item = to_item(
+            Language::Japanese,
+            &candidate,
+            RestoreTarget::Worktree,
+            Some("abc123"),
+        );
 
         assert_eq!(item.key(), "dir/with space.txt");
+    }
+
+    #[test]
+    fn every_restore_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let restore = language.messages().restore();
+
+            assert!(
+                restore
+                    .revision_files_read_failed("HEAD~1")
+                    .contains("HEAD~1"),
+                "{language:?} must mention the revision"
+            );
+
+            let discard = restore.discard_confirmation(3);
+            assert!(
+                discard.contains('3'),
+                "{language:?} must state how many files lose their changes: {discard}"
+            );
+
+            let overwrite = restore.overwrite_confirmation(2, "abc123");
+            assert!(
+                overwrite.contains('2') && overwrite.contains("abc123"),
+                "{language:?} must state the count and the source: {overwrite}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_restore_wording_is_translated() {
+        let japanese = Language::Japanese.messages().restore();
+        let english = Language::English.messages().restore();
+
+        assert_ne!(
+            japanese.revision_files_read_failed("HEAD~1"),
+            english.revision_files_read_failed("HEAD~1")
+        );
+        assert_ne!(
+            japanese.discard_confirmation(1),
+            english.discard_confirmation(1)
+        );
+        assert_ne!(
+            japanese.overwrite_confirmation(1, "abc123"),
+            english.overwrite_confirmation(1, "abc123")
+        );
+    }
+
+    #[test]
+    fn the_english_confirmation_agrees_with_the_number_of_files() {
+        // 日本語は単複を区別しないが、英語で `1 files` と出すと機械翻訳のように読める
+        let english = Language::English.messages().restore();
+
+        assert!(english.discard_confirmation(1).contains("1 file "));
+        assert!(english.discard_confirmation(2).contains("2 files "));
+        assert!(
+            english
+                .overwrite_confirmation(1, "abc123")
+                .contains("1 file ")
+        );
+        assert!(
+            english
+                .overwrite_confirmation(2, "abc123")
+                .contains("2 files ")
+        );
     }
 }

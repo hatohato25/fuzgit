@@ -18,6 +18,7 @@ use crate::finder::{FinderItem, PreviewSource, select_one};
 use crate::git::exec::{MergeTreeOutcome, capture_git_with_status_in, run_git};
 use crate::git::read::{BranchInfo, commit_count, operation_in_progress, other_branches};
 use crate::git::repo::workdir;
+use crate::i18n::{Language, Messages};
 
 /// merge 先（現在の位置）を指すリビジョン。
 ///
@@ -28,28 +29,6 @@ const CURRENT_REVISION: &str = "HEAD";
 
 /// プレビューに表示する最大コミット数。
 const PREVIEW_COMMIT_COUNT: &str = "50";
-
-/// merge 対象になるブランチが 1 件も無い場合の案内。
-///
-/// 一般の「選択できる候補がありません」では、候補から現在のブランチを除いた結果である
-/// ことが分からないため、原因を明示する。
-const NO_CANDIDATES_MESSAGE: &str = "merge 対象になるブランチがありません。\
-現在のブランチ以外のローカルブランチ・リモート追跡ブランチが必要です";
-
-/// コンフリクト予測が得られなかった場合の注記。
-///
-/// 予測は補助情報であり、得られなくても merge 自体は実行できる。原因を断定せず、
-/// 必要な git のバージョンだけを伝える（Git 2.38 未満では `--write-tree` が未知の
-/// オプションとして拒否される）。
-const PREDICTION_UNAVAILABLE_NOTE: &str = "コンフリクト予測: 省略しました\
-（`git merge-tree --write-tree` を実行できませんでした。予測には Git 2.38 以降が必要です）";
-
-/// コンフリクトなく merge できる見込みであることを示す注記。
-const PREDICTION_CLEAN_NOTE: &str = "コンフリクト予測: コンフリクトなく merge できる見込みです";
-
-/// コンフリクトは予測されたが、対象のファイル名が得られなかった場合の注記。
-const PREDICTION_UNNAMED_NOTE: &str = "コンフリクト予測: コンフリクトが発生する見込みです\
-（対象のファイル名は取得できませんでした）";
 
 /// merge の方式。
 ///
@@ -77,13 +56,18 @@ impl MergeMode {
     /// # Errors
     ///
     /// 2 つ以上が同時に指定された場合にエラーを返す。
-    pub fn from_flags(no_ff: bool, squash: bool, ff_only: bool) -> Result<Self> {
+    pub fn from_flags(
+        messages: &dyn Messages,
+        no_ff: bool,
+        squash: bool,
+        ff_only: bool,
+    ) -> Result<Self> {
         match (no_ff, squash, ff_only) {
             (false, false, false) => Ok(Self::Default),
             (true, false, false) => Ok(Self::NoFf),
             (false, true, false) => Ok(Self::Squash),
             (false, false, true) => Ok(Self::FfOnly),
-            _ => bail!("`--no-ff` / `--squash` / `--ff-only` は同時に指定できません"),
+            _ => bail!(messages.merge().conflicting_modes()),
         }
     }
 
@@ -131,19 +115,28 @@ impl ConflictPrediction {
 /// ブランチ一覧の取得、選択（中断を含む）、コミット数の取得、`git merge` の実行に
 /// 失敗した場合にエラーを返す。確認プロンプトで承認が得られなかった場合は
 /// [`crate::error::Error::Cancelled`]。
-pub fn run(repository: &gix::Repository, mode: MergeMode) -> Result<()> {
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    mode: MergeMode,
+) -> Result<()> {
     // 進行中の merge / rebase を残したまま新しい merge は開始できないため、
     // 選択させる前に復帰メニューへ委譲する
     if let Some(operation) = operation_in_progress(repository) {
-        return in_progress::run(repository, operation);
+        return in_progress::run(language, messages, repository, operation);
     }
 
-    let candidates = other_branches(repository).context("ブランチ一覧の取得に失敗しました")?;
+    let candidates =
+        other_branches(repository).context(messages.common().branch_list_read_failed())?;
     if candidates.is_empty() {
-        bail!("{NO_CANDIDATES_MESSAGE}");
+        bail!(messages.merge().no_candidates());
     }
 
-    let items = candidates.iter().map(to_item).collect();
+    let items = candidates
+        .iter()
+        .map(|branch| to_item(language, branch))
+        .collect();
     let selected = select_one(items)?;
 
     // `git merge` はブランチ名を位置引数に取り `--` で保護できないため、
@@ -151,15 +144,11 @@ pub fn run(repository: &gix::Repository, mode: MergeMode) -> Result<()> {
     let branch = candidates
         .iter()
         .find(|candidate| candidate.name == selected)
-        .ok_or_else(|| anyhow!("選択されたブランチ `{selected}` が候補に見つかりません"))?;
+        .ok_or_else(|| anyhow!(messages.merge().selection_not_found(&selected)))?;
 
     let workdir = workdir(repository)?;
-    let count = commit_count(workdir, &merge_range(&branch.name)).with_context(|| {
-        format!(
-            "`{name}` から取り込まれるコミット数の取得に失敗しました",
-            name = branch.name
-        )
-    })?;
+    let count = commit_count(workdir, &merge_range(&branch.name))
+        .with_context(|| messages.merge().merged_commit_count_failed(&branch.name))?;
     let prediction = predict_conflicts(workdir, &branch.name);
 
     let arguments = merge_args(mode, &branch.name);
@@ -170,12 +159,12 @@ pub fn run(repository: &gix::Repository, mode: MergeMode) -> Result<()> {
         .map(String::as_str)
         .collect();
     confirm(
-        &confirmation_header(&branch.name, count, &arguments, &prediction),
+        messages,
+        &confirmation_header(messages, &branch.name, count, &arguments, &prediction),
         &targets,
     )?;
 
-    run_git(&arguments)
-        .with_context(|| format!("`{name}` の merge に失敗しました", name = branch.name))?;
+    run_git(language, &arguments).with_context(|| messages.merge().merge_failed(&branch.name))?;
 
     Ok(())
 }
@@ -212,11 +201,12 @@ fn preview_args(branch: &BranchInfo) -> Vec<String> {
 /// 表示は名前だけとし、ahead/behind・diffstat 等を一覧へ事前表示しない
 /// （全候補分の事前計算は初期表示の応答性を損なうため。requirements.md「スコープ外」。
 /// 判断材料は選択中候補のプレビューで示す）。
-fn to_item(branch: &BranchInfo) -> FinderItem {
+fn to_item(language: Language, branch: &BranchInfo) -> FinderItem {
     FinderItem::new(
         branch.name.clone(),
         branch.name.clone(),
         PreviewSource::Git(preview_args(branch)),
+        language.messages(),
     )
 }
 
@@ -311,34 +301,34 @@ fn parse_conflicted_files(output: &[u8]) -> Option<Vec<String>> {
 /// 取り込まれるコミット数・実際に実行するコマンド・コンフリクト予測を示す。
 /// コマンドは実行する引数配列そのものから作るため、説明と実際の操作が食い違わない。
 fn confirmation_header(
+    messages: &dyn Messages,
     branch: &str,
     count: usize,
     arguments: &[&str],
     prediction: &ConflictPrediction,
 ) -> String {
+    // 行を区切る改行は装飾であるため、文言ではなくここで付ける
     format!(
-        "`{branch}` を merge します（取り込まれるコミット: {count} 件）\n\
-         実行するコマンド: {command}\n\
-         {note}",
-        command = command_display(arguments),
-        note = prediction_note(prediction)
+        "{headline}\n{command}\n{note}",
+        headline = messages.merge().confirmation(branch, count),
+        command = messages.merge().command_line(&command_display(arguments)),
+        note = prediction_note(messages, prediction)
     )
 }
 
 /// コンフリクト予測の結果を 1 行の注記にする。
-fn prediction_note(prediction: &ConflictPrediction) -> String {
+fn prediction_note(messages: &dyn Messages, prediction: &ConflictPrediction) -> String {
     match prediction {
-        ConflictPrediction::Clean => PREDICTION_CLEAN_NOTE.to_owned(),
+        ConflictPrediction::Clean => messages.merge().prediction_clean().to_owned(),
         // 終了コードはコンフリクトを示したが名前が 1 件も得られなかった場合、
         // 「コンフリクトしない」と誤読させないよう、発生の見込みだけは伝える
         ConflictPrediction::Conflicted(paths) if paths.is_empty() => {
-            PREDICTION_UNNAMED_NOTE.to_owned()
+            messages.merge().prediction_unnamed().to_owned()
         }
-        ConflictPrediction::Conflicted(paths) => format!(
-            "コンフリクト予測: 次の {count} 件のファイルで発生する見込みです",
-            count = paths.len()
-        ),
-        ConflictPrediction::Unavailable => PREDICTION_UNAVAILABLE_NOTE.to_owned(),
+        ConflictPrediction::Conflicted(paths) => {
+            messages.merge().prediction_conflicted(paths.len())
+        }
+        ConflictPrediction::Unavailable => messages.merge().prediction_unavailable().to_owned(),
     }
 }
 
@@ -385,7 +375,8 @@ mod tests {
     #[test]
     fn no_flag_merges_the_usual_way() {
         assert_eq!(
-            MergeMode::from_flags(false, false, false).expect("no flag is always valid"),
+            MergeMode::from_flags(Language::Japanese.messages(), false, false, false)
+                .expect("no flag is always valid"),
             MergeMode::Default
         );
         assert_eq!(MergeMode::Default.option(), None);
@@ -403,7 +394,8 @@ mod tests {
             (false, false, true, MergeMode::FfOnly, "--ff-only"),
         ] {
             assert_eq!(
-                MergeMode::from_flags(no_ff, squash, ff_only).expect("a single flag is valid"),
+                MergeMode::from_flags(Language::Japanese.messages(), no_ff, squash, ff_only)
+                    .expect("a single flag is valid"),
                 mode
             );
             assert_eq!(mode.option(), Some(option));
@@ -423,7 +415,7 @@ mod tests {
             (false, true, true),
             (true, true, true),
         ] {
-            let err = MergeMode::from_flags(no_ff, squash, ff_only)
+            let err = MergeMode::from_flags(Language::Japanese.messages(), no_ff, squash, ff_only)
                 .expect_err("the strategies are mutually exclusive");
 
             assert!(
@@ -461,7 +453,7 @@ mod tests {
 
     #[test]
     fn an_item_keeps_the_branch_name_as_its_key() {
-        let item = to_item(&local("origin/main"));
+        let item = to_item(Language::Japanese, &local("origin/main"));
 
         assert_eq!(item.key(), "origin/main");
     }
@@ -581,6 +573,7 @@ mod tests {
     #[test]
     fn the_confirmation_names_the_branch_the_count_and_the_command() {
         let header = confirmation_header(
+            Language::Japanese.messages(),
             "feature",
             3,
             &["merge", "--no-ff", "feature"],
@@ -597,23 +590,31 @@ mod tests {
 
     #[test]
     fn the_confirmation_reports_a_clean_prediction() {
+        let messages = Language::Japanese.messages();
+
         assert_eq!(
-            prediction_note(&ConflictPrediction::Clean),
-            PREDICTION_CLEAN_NOTE
+            prediction_note(messages, &ConflictPrediction::Clean),
+            messages.merge().prediction_clean()
         );
     }
 
     #[test]
     fn the_confirmation_counts_the_files_that_are_expected_to_conflict() {
         assert_eq!(
-            prediction_note(&conflicted(&["a.txt", "b.txt"])),
+            prediction_note(
+                Language::Japanese.messages(),
+                &conflicted(&["a.txt", "b.txt"])
+            ),
             "コンフリクト予測: 次の 2 件のファイルで発生する見込みです"
         );
     }
 
     #[test]
     fn the_confirmation_says_when_the_prediction_could_not_be_made() {
-        let note = prediction_note(&ConflictPrediction::Unavailable);
+        let note = prediction_note(
+            Language::Japanese.messages(),
+            &ConflictPrediction::Unavailable,
+        );
 
         assert!(note.contains("2.38"), "unexpected note: {note}");
         assert!(
@@ -624,7 +625,12 @@ mod tests {
 
     #[test]
     fn the_confirmation_still_warns_when_no_file_name_was_reported() {
-        assert_eq!(prediction_note(&conflicted(&[])), PREDICTION_UNNAMED_NOTE);
+        let messages = Language::Japanese.messages();
+
+        assert_eq!(
+            prediction_note(messages, &conflicted(&[])),
+            messages.merge().prediction_unnamed()
+        );
     }
 
     #[test]
@@ -636,13 +642,144 @@ mod tests {
         git_in(dir.path(), &["commit", "--quiet", "-m", "first"]);
         let repository = discover(dir.path()).expect("test repository should be discoverable");
 
-        let err =
-            run(&repository, MergeMode::Default).expect_err("the only branch is the current one");
+        let err = run(
+            Language::Japanese,
+            Language::Japanese.messages(),
+            &repository,
+            MergeMode::Default,
+        )
+        .expect_err("the only branch is the current one");
 
         assert!(
             err.to_string()
                 .contains("merge 対象になるブランチがありません"),
             "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn every_merge_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let merge = language.messages().merge();
+
+            for text in [
+                merge.conflicting_modes(),
+                merge.no_candidates(),
+                merge.prediction_clean(),
+                merge.prediction_unnamed(),
+            ] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+
+            assert!(
+                merge.selection_not_found("feature").contains("feature"),
+                "{language:?} must name the selection"
+            );
+            assert!(
+                merge
+                    .merged_commit_count_failed("feature")
+                    .contains("feature"),
+                "{language:?} must name the branch"
+            );
+            assert!(
+                merge.merge_failed("feature").contains("feature"),
+                "{language:?} must name the branch"
+            );
+            assert!(
+                merge.confirmation("feature", 3).contains('3'),
+                "{language:?} must state how many commits are brought in"
+            );
+            assert!(
+                merge.prediction_conflicted(2).contains('2'),
+                "{language:?} must state how many files are expected to conflict"
+            );
+            // 予測が得られない理由に辿り着けるよう、必要な git のバージョンは両言語で示す
+            assert!(
+                merge.prediction_unavailable().contains("2.38"),
+                "{language:?} must name the git version the prediction needs"
+            );
+        }
+    }
+
+    #[test]
+    fn the_command_that_runs_is_shown_as_it_is_in_every_language() {
+        // コマンド列は翻訳しない（design.md「翻訳しないもの」）
+        for language in [Language::Japanese, Language::English] {
+            assert!(
+                language
+                    .messages()
+                    .merge()
+                    .command_line("git merge --no-ff feature")
+                    .contains("git merge --no-ff feature"),
+                "{language:?} must show the command as it is"
+            );
+        }
+    }
+
+    #[test]
+    fn the_merge_wording_is_translated() {
+        let japanese = Language::Japanese.messages().merge();
+        let english = Language::English.messages().merge();
+
+        assert_ne!(japanese.conflicting_modes(), english.conflicting_modes());
+        assert_ne!(japanese.no_candidates(), english.no_candidates());
+        assert_ne!(
+            japanese.selection_not_found("feature"),
+            english.selection_not_found("feature")
+        );
+        assert_ne!(
+            japanese.merged_commit_count_failed("feature"),
+            english.merged_commit_count_failed("feature")
+        );
+        assert_ne!(
+            japanese.merge_failed("feature"),
+            english.merge_failed("feature")
+        );
+        assert_ne!(
+            japanese.confirmation("feature", 3),
+            english.confirmation("feature", 3)
+        );
+        assert_ne!(
+            japanese.command_line("git merge feature"),
+            english.command_line("git merge feature")
+        );
+        assert_ne!(japanese.prediction_clean(), english.prediction_clean());
+        assert_ne!(
+            japanese.prediction_conflicted(2),
+            english.prediction_conflicted(2)
+        );
+        assert_ne!(japanese.prediction_unnamed(), english.prediction_unnamed());
+        assert_ne!(
+            japanese.prediction_unavailable(),
+            english.prediction_unavailable()
+        );
+    }
+
+    #[test]
+    fn the_english_counts_agree_with_the_nouns_they_qualify() {
+        let english = Language::English.messages().merge();
+
+        assert!(
+            english.confirmation("feature", 1).contains("1 commit will"),
+            "unexpected wording: {header}",
+            header = english.confirmation("feature", 1)
+        );
+        assert!(
+            english
+                .confirmation("feature", 2)
+                .contains("2 commits will"),
+            "unexpected wording: {header}",
+            header = english.confirmation("feature", 2)
+        );
+        assert!(
+            english.prediction_conflicted(1).ends_with("1 file"),
+            "unexpected wording: {note}",
+            note = english.prediction_conflicted(1)
+        );
+        assert!(
+            english.prediction_conflicted(2).ends_with("2 files"),
+            "unexpected wording: {note}",
+            note = english.prediction_conflicted(2)
         );
     }
 }

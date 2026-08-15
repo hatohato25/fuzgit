@@ -23,14 +23,7 @@ use crate::git::read::{
     ahead_behind, current_branch, operation_in_progress, remotes, upstream as read_upstream,
 };
 use crate::git::repo::workdir;
-
-/// detached HEAD で実行した場合の案内（`gz diff --upstream` と同じ扱い）。
-const DETACHED_MESSAGE: &str = "detached HEAD には upstream がありません。\
-`gz branch` でブランチへ切り替えてから実行してください";
-
-/// `--rebase` の確認プロンプトに添える履歴改変の注記（`gz rebase` と同じ内容）。
-const HISTORY_REWRITE_NOTE: &str = "rebase は replay したコミットを作り直すため、\
-コミットハッシュが変わります（push 済みのコミットを含む場合は特に注意してください）";
+use crate::i18n::{Language, Messages};
 
 /// 取り込み方式（FR-19）。
 ///
@@ -59,20 +52,23 @@ impl SyncMode {
     /// # Errors
     ///
     /// 両方が同時に指定された場合にエラーを返す。
-    pub fn from_flags(rebase: bool, merge: bool) -> Result<Self> {
+    pub fn from_flags(messages: &dyn Messages, rebase: bool, merge: bool) -> Result<Self> {
         match (rebase, merge) {
             (false, false) => Ok(Self::FfOnly),
             (true, false) => Ok(Self::Rebase),
             (false, true) => Ok(Self::Merge),
-            (true, true) => bail!("`--rebase` / `--merge` は同時に指定できません"),
+            (true, true) => bail!(messages.sync().conflicting_modes()),
         }
     }
 
     /// 確認プロンプトに添える注記。履歴を書き換える方式の場合のみ返す。
-    fn note(self) -> Option<&'static str> {
+    ///
+    /// 注記は `gz rebase` と同じ内容であるため共有語彙から引く
+    /// （[`crate::i18n::messages::CommonMessages::history_rewrite_note`]）。
+    fn note(self, messages: &dyn Messages) -> Option<&'static str> {
         match self {
             SyncMode::FfOnly | SyncMode::Merge => None,
-            SyncMode::Rebase => Some(HISTORY_REWRITE_NOTE),
+            SyncMode::Rebase => Some(messages.common().history_rewrite_note()),
         }
     }
 }
@@ -103,53 +99,45 @@ struct SyncTarget {
 /// 設定・リモートが未登録）、`git fetch` の実行、ahead/behind の算出、取り込みの実行に
 /// 失敗した場合にエラーを返す。確認プロンプトで承認が得られなかった場合は
 /// [`crate::error::Error::Cancelled`]。
-pub fn run(repository: &gix::Repository, mode: SyncMode) -> Result<()> {
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    mode: SyncMode,
+) -> Result<()> {
     // 進行中の merge / rebase を残したまま新しい取り込みは開始できないため、
     // fetch する前に復帰メニューへ委譲する（`gz merge` / `gz rebase` と同じ）
     if let Some(operation) = operation_in_progress(repository) {
-        return in_progress::run(repository, operation);
+        return in_progress::run(language, messages, repository, operation);
     }
 
-    let target = resolve_target(repository)?;
+    let target = resolve_target(messages, repository)?;
 
     let arguments = fetch_args(&target.remote);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(&arguments).with_context(|| {
-        format!(
-            "リモート `{remote}` からの取得に失敗しました",
-            remote = target.remote
-        )
-    })?;
+    run_git(language, &arguments).with_context(|| messages.sync().fetch_failed(&target.remote))?;
 
     // fetch で追跡参照が更新されているため、取り込む量はここで初めて確定する
     let position = ahead_behind(workdir(repository)?, &target.branch, &target.reference)
-        .with_context(|| {
-            format!(
-                "`{reference}` との差の算出に失敗しました",
-                reference = target.reference
-            )
-        })?;
+        .with_context(|| messages.common().ahead_behind_failed(&target.reference))?;
     let Some((ahead, behind)) = position else {
-        bail!(missing_tracking_message(&target));
+        bail!(missing_tracking_message(messages, &target));
     };
 
     if behind == 0 {
-        return report_up_to_date(&mut std::io::stderr(), &target, ahead);
+        return report_up_to_date(messages, &mut std::io::stderr(), &target, ahead);
     }
 
     let arguments = integrate_args(mode, &target.reference);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     confirm(
-        &confirmation_header(&target, behind, mode),
+        messages,
+        &confirmation_header(messages, &target, behind, mode),
         &[&command_display(&arguments)],
     )?;
 
-    run_git(&arguments).with_context(|| {
-        format!(
-            "`{reference}` の取り込みに失敗しました",
-            reference = target.reference
-        )
-    })?;
+    run_git(language, &arguments)
+        .with_context(|| messages.sync().integration_failed(&target.reference))?;
 
     Ok(())
 }
@@ -161,41 +149,33 @@ pub fn run(repository: &gix::Repository, mode: SyncMode) -> Result<()> {
 /// detached HEAD の場合、upstream が設定されていない場合、追跡参照を組み立てられない
 /// 設定の場合、upstream のリモートが登録されていない場合に、それぞれの原因を示す
 /// エラーを返す（対象を推測して別のリモート・ブランチへ倒さない）。
-fn resolve_target(repository: &gix::Repository) -> Result<SyncTarget> {
-    let Some(branch) = current_branch(repository).context("現在のブランチの取得に失敗しました")?
+fn resolve_target(messages: &dyn Messages, repository: &gix::Repository) -> Result<SyncTarget> {
+    let Some(branch) =
+        current_branch(repository).context(messages.common().current_branch_read_failed())?
     else {
-        bail!("{DETACHED_MESSAGE}");
+        bail!(messages.common().detached_head_without_upstream());
     };
 
     let Some(upstream) = read_upstream(repository, &branch)
-        .with_context(|| format!("`{branch}` の upstream の取得に失敗しました"))?
+        .with_context(|| messages.common().upstream_read_failed(&branch))?
     else {
-        bail!(
-            "`{branch}` に upstream が設定されていません。\
-`gz push -u` で push するか、`git branch --set-upstream-to=<remote>/<branch>` で設定してください"
-        );
+        bail!(messages.common().upstream_not_configured(&branch));
     };
 
     let Some(reference) = upstream.tracking_ref() else {
-        bail!(
-            "`{branch}` の upstream（{remote} / {merge_ref}）からリモート追跡参照を組み立てられません。\
-`git branch --set-upstream-to=<remote>/<branch>` で設定し直してください",
-            remote = upstream.remote,
-            merge_ref = upstream.merge_ref
-        );
+        bail!(messages.sync().tracking_ref_unavailable(
+            &branch,
+            &upstream.remote,
+            &upstream.merge_ref
+        ));
     };
 
     // `branch.<name>.remote` には URL を直接書くこともできる。その値をそのまま
     // `git fetch` へ渡すと、fuzgit が列挙していない対象へネットワーク接続することになるため、
     // 登録済みのリモート名であることを確かめてから使う（design.md セキュリティ設計）
-    let remotes = remotes(repository).context("リモート一覧の取得に失敗しました")?;
+    let remotes = remotes(repository).context(messages.common().remote_list_read_failed())?;
     if !remotes.contains(&upstream.remote) {
-        bail!(
-            "`{branch}` の upstream に設定された `{remote}` は登録済みのリモートではありません。\
-`git remote add <名前> <URL>` で登録するか、\
-`git branch --set-upstream-to=<remote>/<branch>` で設定し直してください",
-            remote = upstream.remote
-        );
+        bail!(messages.sync().unknown_remote(&branch, &upstream.remote));
     }
 
     Ok(SyncTarget {
@@ -233,32 +213,25 @@ pub(crate) fn integrate_args(mode: SyncMode, reference: &str) -> Vec<String> {
 ///
 /// upstream の設定はあるがリモート側にブランチが無い（削除された・まだ push していない）
 /// 場合に起きる。取り込む対象が無い以上、別の参照へ倒さず原因を示して停止する。
-fn missing_tracking_message(target: &SyncTarget) -> String {
-    format!(
-        "リモート追跡参照 `{reference}` が見つかりません。\
-`{remote}` に `{branch}` の upstream が存在しない可能性があります\
-（`gz push -u` で作成するか、`git branch --set-upstream-to=<remote>/<branch>` で設定し直してください）",
-        reference = target.reference,
-        remote = target.remote,
-        branch = target.branch
-    )
+fn missing_tracking_message(messages: &dyn Messages, target: &SyncTarget) -> String {
+    messages
+        .sync()
+        .missing_tracking_ref(&target.reference, &target.remote, &target.branch)
 }
 
 /// 取り込むコミットが無いことを伝える文言を組み立てる。
 ///
 /// ahead が残っている場合はその件数も添える。「最新である」だけでは、まだ push していない
 /// コミットを抱えていることに気付けないため。
-fn up_to_date_message(target: &SyncTarget, ahead: usize) -> String {
-    let mut message = format!(
-        "`{branch}` は最新です（`{reference}` から取り込むコミットはありません）",
-        branch = target.branch,
-        reference = target.reference
-    );
+fn up_to_date_message(messages: &dyn Messages, target: &SyncTarget, ahead: usize) -> String {
+    let mut message = messages
+        .sync()
+        .up_to_date(&target.branch, &target.reference);
 
     if ahead > 0 {
-        message.push_str(&format!(
-            "\npush していないコミットが {ahead} 件あります（`gz push` で push できます）"
-        ));
+        // 本文と注記を区切る改行は装飾であるため、文言ではなくここで付ける
+        message.push('\n');
+        message.push_str(&messages.sync().unpushed_commits(ahead));
     }
 
     message
@@ -273,6 +246,7 @@ fn up_to_date_message(target: &SyncTarget, ahead: usize) -> String {
 ///
 /// 書き込みに失敗した場合にエラーを返す。
 fn report_up_to_date(
+    messages: &dyn Messages,
     writer: &mut impl std::io::Write,
     target: &SyncTarget,
     ahead: usize,
@@ -280,9 +254,9 @@ fn report_up_to_date(
     writeln!(
         writer,
         "{message}",
-        message = up_to_date_message(target, ahead)
+        message = up_to_date_message(messages, target, ahead)
     )
-    .context("標準エラー出力への書き込みに失敗しました")?;
+    .context(messages.common().stderr_write_failed())?;
 
     Ok(())
 }
@@ -291,14 +265,17 @@ fn report_up_to_date(
 ///
 /// 取り込まれるコミット数を示し、`--rebase` の場合は履歴改変であることを添える
 /// （実行するコマンドは対象行として別に提示する）。
-fn confirmation_header(target: &SyncTarget, count: usize, mode: SyncMode) -> String {
-    let mut header = format!(
-        "`{reference}` から {count} 件のコミットを `{branch}` へ取り込みます",
-        reference = target.reference,
-        branch = target.branch
-    );
+fn confirmation_header(
+    messages: &dyn Messages,
+    target: &SyncTarget,
+    count: usize,
+    mode: SyncMode,
+) -> String {
+    let mut header = messages
+        .sync()
+        .confirmation(&target.reference, count, &target.branch);
 
-    if let Some(note) = mode.note() {
+    if let Some(note) = mode.note(messages) {
         header.push('\n');
         header.push_str(note);
     }
@@ -309,6 +286,11 @@ fn confirmation_header(target: &SyncTarget, count: usize, mode: SyncMode) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 既定（日本語）の文言一式。文言そのものを固定するテスト以外はこれを使う。
+    fn messages() -> &'static dyn Messages {
+        Language::Japanese.messages()
+    }
 
     fn target() -> SyncTarget {
         SyncTarget {
@@ -321,7 +303,7 @@ mod tests {
     #[test]
     fn no_flag_integrates_by_fast_forward_only() {
         assert_eq!(
-            SyncMode::from_flags(false, false).expect("no flag is a valid combination"),
+            SyncMode::from_flags(messages(), false, false).expect("no flag is a valid combination"),
             SyncMode::FfOnly
         );
     }
@@ -329,18 +311,19 @@ mod tests {
     #[test]
     fn each_integration_flag_selects_its_own_mode() {
         assert_eq!(
-            SyncMode::from_flags(true, false).expect("--rebase is valid on its own"),
+            SyncMode::from_flags(messages(), true, false).expect("--rebase is valid on its own"),
             SyncMode::Rebase
         );
         assert_eq!(
-            SyncMode::from_flags(false, true).expect("--merge is valid on its own"),
+            SyncMode::from_flags(messages(), false, true).expect("--merge is valid on its own"),
             SyncMode::Merge
         );
     }
 
     #[test]
     fn combining_the_integration_flags_is_rejected() {
-        let err = SyncMode::from_flags(true, true).expect_err("the modes are mutually exclusive");
+        let err = SyncMode::from_flags(messages(), true, true)
+            .expect_err("the modes are mutually exclusive");
 
         assert!(
             err.to_string().contains("同時に指定できません"),
@@ -383,7 +366,7 @@ mod tests {
 
     #[test]
     fn the_confirmation_names_the_upstream_the_count_and_the_branch() {
-        let header = confirmation_header(&target(), 3, SyncMode::FfOnly);
+        let header = confirmation_header(messages(), &target(), 3, SyncMode::FfOnly);
 
         assert!(
             header.contains("`refs/remotes/origin/main`"),
@@ -395,14 +378,14 @@ mod tests {
 
     #[test]
     fn only_the_rebase_confirmation_warns_about_the_rewritten_history() {
-        let rebase = confirmation_header(&target(), 2, SyncMode::Rebase);
+        let rebase = confirmation_header(messages(), &target(), 2, SyncMode::Rebase);
         assert!(
             rebase.contains("コミットハッシュが変わります"),
             "a history rewrite must be spelled out: {rebase}"
         );
 
         for mode in [SyncMode::FfOnly, SyncMode::Merge] {
-            let header = confirmation_header(&target(), 2, mode);
+            let header = confirmation_header(messages(), &target(), 2, mode);
             assert!(
                 !header.contains("コミットハッシュが変わります"),
                 "{mode:?} does not rewrite history: {header}"
@@ -412,9 +395,14 @@ mod tests {
 
     #[test]
     fn the_history_note_belongs_to_the_rebase_mode_only() {
-        assert_eq!(SyncMode::Rebase.note(), Some(HISTORY_REWRITE_NOTE));
-        assert_eq!(SyncMode::FfOnly.note(), None);
-        assert_eq!(SyncMode::Merge.note(), None);
+        let messages = messages();
+
+        assert_eq!(
+            SyncMode::Rebase.note(messages),
+            Some(messages.common().history_rewrite_note())
+        );
+        assert_eq!(SyncMode::FfOnly.note(messages), None);
+        assert_eq!(SyncMode::Merge.note(messages), None);
     }
 
     #[test]
@@ -432,7 +420,8 @@ mod tests {
     fn being_up_to_date_is_reported_without_an_error() {
         let mut output = Vec::new();
 
-        report_up_to_date(&mut output, &target(), 0).expect("writing to a buffer cannot fail");
+        report_up_to_date(messages(), &mut output, &target(), 0)
+            .expect("writing to a buffer cannot fail");
 
         let text = String::from_utf8(output).expect("the message should be utf-8");
         assert!(text.contains("最新です"), "unexpected message: {text}");
@@ -444,7 +433,7 @@ mod tests {
 
     #[test]
     fn the_commits_that_are_not_pushed_yet_are_mentioned() {
-        let message = up_to_date_message(&target(), 2);
+        let message = up_to_date_message(messages(), &target(), 2);
 
         assert!(
             message.contains("最新です"),
@@ -457,8 +446,121 @@ mod tests {
     }
 
     #[test]
+    fn every_sync_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let sync = language.messages().sync();
+
+            assert!(
+                !sync.conflicting_modes().trim().is_empty(),
+                "{language:?} left a message empty"
+            );
+
+            for (text, argument) in [
+                (sync.fetch_failed("origin"), "origin"),
+                (
+                    sync.tracking_ref_unavailable("main", "origin", "refs/heads/main"),
+                    "refs/heads/main",
+                ),
+                (
+                    sync.unknown_remote("main", "https://example.com/x.git"),
+                    "https://example.com/x.git",
+                ),
+                (
+                    sync.missing_tracking_ref("refs/remotes/origin/main", "origin", "main"),
+                    "refs/remotes/origin/main",
+                ),
+                (
+                    sync.up_to_date("main", "refs/remotes/origin/main"),
+                    "refs/remotes/origin/main",
+                ),
+                (sync.unpushed_commits(2), "2"),
+                (
+                    sync.integration_failed("refs/remotes/origin/main"),
+                    "refs/remotes/origin/main",
+                ),
+                (
+                    sync.confirmation("refs/remotes/origin/main", 3, "main"),
+                    "3",
+                ),
+            ] {
+                assert!(
+                    text.contains(argument),
+                    "{language:?} must mention `{argument}`: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_sync_wording_is_translated() {
+        let japanese = Language::Japanese.messages().sync();
+        let english = Language::English.messages().sync();
+
+        assert_ne!(japanese.conflicting_modes(), english.conflicting_modes());
+        assert_ne!(
+            japanese.fetch_failed("origin"),
+            english.fetch_failed("origin")
+        );
+        assert_ne!(
+            japanese.tracking_ref_unavailable("main", "origin", "refs/heads/main"),
+            english.tracking_ref_unavailable("main", "origin", "refs/heads/main")
+        );
+        assert_ne!(
+            japanese.unknown_remote("main", "origin"),
+            english.unknown_remote("main", "origin")
+        );
+        assert_ne!(
+            japanese.missing_tracking_ref("refs/remotes/origin/main", "origin", "main"),
+            english.missing_tracking_ref("refs/remotes/origin/main", "origin", "main")
+        );
+        assert_ne!(
+            japanese.up_to_date("main", "refs/remotes/origin/main"),
+            english.up_to_date("main", "refs/remotes/origin/main")
+        );
+        assert_ne!(japanese.unpushed_commits(2), english.unpushed_commits(2));
+        assert_ne!(
+            japanese.integration_failed("refs/remotes/origin/main"),
+            english.integration_failed("refs/remotes/origin/main")
+        );
+        assert_ne!(
+            japanese.confirmation("refs/remotes/origin/main", 3, "main"),
+            english.confirmation("refs/remotes/origin/main", 3, "main")
+        );
+    }
+
+    #[test]
+    fn the_english_count_agrees_with_the_noun_it_qualifies() {
+        let english = Language::English.messages().sync();
+
+        assert!(
+            english
+                .confirmation("refs/remotes/origin/main", 1, "main")
+                .contains("1 commit "),
+            "a single commit must not be pluralised: {text}",
+            text = english.confirmation("refs/remotes/origin/main", 1, "main")
+        );
+        assert!(
+            english
+                .confirmation("refs/remotes/origin/main", 2, "main")
+                .contains("2 commits "),
+            "several commits must be pluralised: {text}",
+            text = english.confirmation("refs/remotes/origin/main", 2, "main")
+        );
+        assert!(
+            english.unpushed_commits(1).contains("1 commit has"),
+            "the verb must agree as well: {text}",
+            text = english.unpushed_commits(1)
+        );
+        assert!(
+            english.unpushed_commits(3).contains("3 commits have"),
+            "the verb must agree as well: {text}",
+            text = english.unpushed_commits(3)
+        );
+    }
+
+    #[test]
     fn a_missing_tracking_reference_names_the_remote_and_the_branch() {
-        let message = missing_tracking_message(&target());
+        let message = missing_tracking_message(messages(), &target());
 
         assert!(
             message.contains("refs/remotes/origin/main"),

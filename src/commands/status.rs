@@ -20,12 +20,7 @@ use crate::git::read::{
     ChangeScope, FileChange, ahead_behind, changes, current_branch, stashes, upstream,
 };
 use crate::git::repo::workdir;
-
-/// 変更が 1 件も無い場合に伝えること。
-///
-/// クリーンな状態の確認も `gz status` の用途であるため、候補ゼロをエラーにしない
-/// （requirements.md FR-16）。
-const CLEAN_MESSAGE: &str = "変更はありません（作業ツリーはクリーンです）";
+use crate::i18n::{Language, Messages};
 
 /// detached HEAD（ブランチを指していない状態）のヘッダー表示。
 const DETACHED_LABEL: &str = "detached HEAD";
@@ -104,30 +99,37 @@ struct MenuEntry {
 /// # Errors
 ///
 /// 状態の取得、選択（中断を含む）、実行したアクションの失敗時にエラーを返す。
-pub fn run(repository: &gix::Repository) -> Result<()> {
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+) -> Result<()> {
     let changes = changes(repository, ChangeScope::TrackedOrUntracked)
-        .context("変更ファイル一覧の取得に失敗しました")?;
-    let summary = summarize(repository, &changes)?;
+        .context(messages.common().changed_files_read_failed())?;
+    let summary = summarize(messages, repository, &changes)?;
 
     if changes.is_empty() {
-        return report_clean(&mut std::io::stderr(), &summary);
+        return report_clean(messages, &mut std::io::stderr(), &summary);
     }
 
     let mut items = Vec::with_capacity(changes.len());
     for change in &changes {
-        items.push(to_item(repository, change)?);
+        items.push(to_item(language, repository, change)?);
     }
 
     let options = FinderOptions::new(SelectionMode::Multi).with_header(header_line(&summary));
     let selected = select_many_with(items, &options)?;
-    let selected = resolve_changes(&changes, &selected)?;
+    let selected = resolve_changes(messages, &changes, &selected)?;
 
-    let entries = menu();
-    let items = entries.iter().map(to_menu_item).collect();
+    let entries = menu(messages);
+    let items = entries
+        .iter()
+        .map(|entry| to_menu_item(language, entry))
+        .collect();
     let chosen = select_one(items)?;
-    let action = resolve_action(&entries, &chosen)?;
+    let action = resolve_action(messages, &entries, &chosen)?;
 
-    run_action(action, &selected)
+    run_action(language, messages, action, &selected)
 }
 
 /// ヘッダーに表示する現在の状態を集める。
@@ -135,14 +137,19 @@ pub fn run(repository: &gix::Repository) -> Result<()> {
 /// # Errors
 ///
 /// ブランチ・upstream・ahead/behind・stash 一覧の取得に失敗した場合にエラーを返す。
-fn summarize(repository: &gix::Repository, changes: &[FileChange]) -> Result<Summary> {
-    let branch = current_branch(repository).context("現在のブランチの取得に失敗しました")?;
+fn summarize(
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    changes: &[FileChange],
+) -> Result<Summary> {
+    let branch =
+        current_branch(repository).context(messages.common().current_branch_read_failed())?;
     let ahead_behind = match &branch {
-        Some(branch) => tracking_position(repository, branch)?,
+        Some(branch) => tracking_position(messages, repository, branch)?,
         // detached HEAD には upstream の設定が無く、比較対象を決められない
         None => None,
     };
-    let stashes = stashes(repository).context("stash 一覧の取得に失敗しました")?;
+    let stashes = stashes(repository).context(messages.common().stash_list_read_failed())?;
 
     Ok(Summary {
         branch,
@@ -167,9 +174,13 @@ fn count(changes: &[FileChange], predicate: fn(&FileChange) -> bool) -> usize {
 /// # Errors
 ///
 /// upstream の取得、ahead/behind の算出に失敗した場合にエラーを返す。
-fn tracking_position(repository: &gix::Repository, branch: &str) -> Result<Option<(usize, usize)>> {
+fn tracking_position(
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    branch: &str,
+) -> Result<Option<(usize, usize)>> {
     let Some(upstream) = upstream(repository, branch)
-        .with_context(|| format!("`{branch}` の upstream の取得に失敗しました"))?
+        .with_context(|| messages.common().upstream_read_failed(branch))?
     else {
         return Ok(None);
     };
@@ -178,7 +189,7 @@ fn tracking_position(repository: &gix::Repository, branch: &str) -> Result<Optio
     };
 
     ahead_behind(workdir(repository)?, branch, &reference)
-        .with_context(|| format!("`{reference}` との差の算出に失敗しました"))
+        .with_context(|| messages.common().ahead_behind_failed(&reference))
 }
 
 /// ヘッダーの 1 行を組み立てる。
@@ -212,10 +223,17 @@ fn header_line(summary: &Summary) -> String {
 /// # Errors
 ///
 /// 書き込みに失敗した場合にエラーを返す。
-fn report_clean(writer: &mut impl std::io::Write, summary: &Summary) -> Result<()> {
-    writeln!(writer, "{CLEAN_MESSAGE}").context("標準エラー出力への書き込みに失敗しました")?;
+fn report_clean(
+    messages: &dyn Messages,
+    writer: &mut impl std::io::Write,
+    summary: &Summary,
+) -> Result<()> {
+    // クリーンな状態の確認も `gz status` の用途であるため、候補ゼロをエラーにしない
+    // （requirements.md FR-16）
+    writeln!(writer, "{clean}", clean = messages.status().clean())
+        .context(messages.common().stderr_write_failed())?;
     writeln!(writer, "{header}", header = header_line(summary))
-        .context("標準エラー出力への書き込みに失敗しました")?;
+        .context(messages.common().stderr_write_failed())?;
 
     Ok(())
 }
@@ -225,7 +243,11 @@ fn report_clean(writer: &mut impl std::io::Write, summary: &Summary) -> Result<(
 /// # Errors
 ///
 /// 未追跡ファイルの絶対パスを解決できない（作業ツリーを持たない）場合にエラーを返す。
-fn to_item(repository: &gix::Repository, change: &FileChange) -> Result<FinderItem> {
+fn to_item(
+    language: Language,
+    repository: &gix::Repository,
+    change: &FileChange,
+) -> Result<FinderItem> {
     // ここで作る候補は表示とプレビューのためのもの。git へ渡すパスの決め方は
     // アクションごとに異なるため、実行時に各コマンドの公開関数が組み立て直す。
     // プレビューはリネームの変更元も含めて表示する（変更前後を並べて見せるため）
@@ -235,6 +257,7 @@ fn to_item(repository: &gix::Repository, change: &FileChange) -> Result<FinderIt
         candidate.display.clone(),
         candidate.key.clone(),
         preview(repository, change, &candidate.paths)?,
+        language.messages(),
     ))
 }
 
@@ -306,42 +329,43 @@ fn unstaged_args(paths: &[String]) -> Vec<String> {
 ///
 /// 項目は固定であり、選択済みファイルの内容によって増減させない
 /// （毎回同じ並びであることが、選び間違いを防ぐうえで重要なため）。
-fn menu() -> Vec<MenuEntry> {
+fn menu(messages: &dyn Messages) -> Vec<MenuEntry> {
     vec![
         MenuEntry {
             key: ADD_KEY,
-            display: "選択したファイルをステージする (git add)",
+            display: messages.status().add_action(),
             action: MenuAction::Add,
         },
         MenuEntry {
             key: RESTORE_KEY,
-            display: "選択したファイルの変更を破棄する (git restore)",
+            display: messages.status().restore_action(),
             action: MenuAction::Restore,
         },
         MenuEntry {
             key: STASH_KEY,
-            display: "選択したファイルを stash へ退避する (git stash push)",
+            display: messages.status().stash_action(),
             action: MenuAction::StashPush,
         },
         MenuEntry {
             key: COMMIT_KEY,
-            display: "選択したファイルをコミットする (git commit)",
+            display: messages.status().commit_action(),
             action: MenuAction::Commit,
         },
         MenuEntry {
             key: PRINT_KEY,
-            display: "選択したファイルのパスを標準出力へ出力する",
+            display: messages.status().print_action(),
             action: MenuAction::PrintPaths,
         },
     ]
 }
 
 /// メニュー項目を finder のアイテムへ変換する。
-fn to_menu_item(entry: &MenuEntry) -> FinderItem {
+fn to_menu_item(language: Language, entry: &MenuEntry) -> FinderItem {
     FinderItem::new(
         entry.display.to_owned(),
         entry.key.to_owned(),
         PreviewSource::Git(status_preview_args()),
+        language.messages(),
     )
 }
 
@@ -351,12 +375,16 @@ fn to_menu_item(entry: &MenuEntry) -> FinderItem {
 ///
 /// 選択されたキーがメニューに含まれない場合にエラーを返す（対象を取り違えたまま
 /// git 操作を実行しないよう、暗黙に読み飛ばさない）。
-fn resolve_action(entries: &[MenuEntry], selected: &str) -> Result<MenuAction> {
+fn resolve_action(
+    messages: &dyn Messages,
+    entries: &[MenuEntry],
+    selected: &str,
+) -> Result<MenuAction> {
     entries
         .iter()
         .find(|entry| entry.key == selected)
         .map(|entry| entry.action)
-        .ok_or_else(|| anyhow!("選択されたメニュー項目 `{selected}` が見つかりません"))
+        .ok_or_else(|| anyhow!(messages.status().menu_selection_not_found(selected)))
 }
 
 /// 選択されたファイルに対して操作を実行する。
@@ -368,15 +396,28 @@ fn resolve_action(entries: &[MenuEntry], selected: &str) -> Result<MenuAction> {
 /// # Errors
 ///
 /// 呼び出した操作が失敗した場合にエラーを返す。
-fn run_action(action: MenuAction, selected: &[&FileChange]) -> Result<()> {
+fn run_action(
+    language: Language,
+    messages: &dyn Messages,
+    action: MenuAction,
+    selected: &[&FileChange],
+) -> Result<()> {
     match action {
-        MenuAction::Add => add::run_on_changes(selected),
+        MenuAction::Add => add::run_on_changes(language, messages, selected),
         // 破棄できるのは作業ツリーの変更であり、実行前に確認プロンプトが表示される
-        MenuAction::Restore => restore::run_on_changes(RestoreTarget::Worktree, selected),
-        MenuAction::StashPush => stash::push_on_changes(None, untracked_files(selected), selected),
+        MenuAction::Restore => {
+            restore::run_on_changes(language, messages, RestoreTarget::Worktree, selected)
+        }
+        MenuAction::StashPush => stash::push_on_changes(
+            language,
+            messages,
+            None,
+            untracked_files(selected),
+            selected,
+        ),
         // メッセージの入力は `gz commit` と同じくエディタ（git）に委ねる
-        MenuAction::Commit => commit::run_on_changes(None, selected),
-        MenuAction::PrintPaths => print_paths(&mut std::io::stdout(), selected),
+        MenuAction::Commit => commit::run_on_changes(language, messages, None, selected),
+        MenuAction::PrintPaths => print_paths(messages, &mut std::io::stdout(), selected),
     }
 }
 
@@ -399,11 +440,15 @@ fn untracked_files(selected: &[&FileChange]) -> UntrackedFiles {
 /// # Errors
 ///
 /// 書き込みに失敗した場合にエラーを返す。
-fn print_paths(writer: &mut impl std::io::Write, selected: &[&FileChange]) -> Result<()> {
+fn print_paths(
+    messages: &dyn Messages,
+    writer: &mut impl std::io::Write,
+    selected: &[&FileChange],
+) -> Result<()> {
     for change in selected {
         // パイプ先が先に閉じた場合に panic しないよう、書き込みエラーは明示的に伝播する
         writeln!(writer, "{path}", path = change.path)
-            .context("標準出力への書き込みに失敗しました")?;
+            .context(messages.common().stdout_write_failed())?;
     }
 
     Ok(())
@@ -623,14 +668,15 @@ mod tests {
         write_file(dir.path(), "a.txt", "modified\n");
         let repository = discover(dir.path()).expect("test repository should be discoverable");
 
-        let item = to_item(&repository, &change("a.txt", " M")).expect("the item should build");
+        let item = to_item(Language::Japanese, &repository, &change("a.txt", " M"))
+            .expect("the item should build");
 
         assert_eq!(item.key(), "a.txt");
     }
 
     #[test]
     fn the_menu_offers_every_action_in_a_fixed_order() {
-        let entries = menu();
+        let entries = menu(Language::Japanese.messages());
 
         assert_eq!(
             entries.iter().map(|entry| entry.key).collect::<Vec<_>>(),
@@ -640,7 +686,7 @@ mod tests {
 
     #[test]
     fn each_entry_resolves_to_its_own_action() {
-        let entries = menu();
+        let entries = menu(Language::Japanese.messages());
 
         for (key, expected) in [
             (ADD_KEY, MenuAction::Add),
@@ -650,7 +696,8 @@ mod tests {
             (PRINT_KEY, MenuAction::PrintPaths),
         ] {
             assert_eq!(
-                resolve_action(&entries, key).expect("the key belongs to the menu"),
+                resolve_action(Language::Japanese.messages(), &entries, key)
+                    .expect("the key belongs to the menu"),
                 expected
             );
         }
@@ -658,7 +705,9 @@ mod tests {
 
     #[test]
     fn a_key_outside_of_the_menu_is_rejected() {
-        let err = resolve_action(&menu(), "drop").expect_err("an unknown key must be rejected");
+        let messages = Language::Japanese.messages();
+        let err = resolve_action(messages, &menu(messages), "drop")
+            .expect_err("an unknown key must be rejected");
 
         assert!(
             err.to_string().contains("drop"),
@@ -668,36 +717,96 @@ mod tests {
 
     #[test]
     fn every_entry_names_the_command_it_runs() {
-        let entries = menu();
+        // 括弧内の git コマンド名は、実際に何が実行されるのかを示すため訳さない
+        for language in [Language::Japanese, Language::English] {
+            let entries = menu(language.messages());
 
-        for (key, command) in [
-            (ADD_KEY, "git add"),
-            (RESTORE_KEY, "git restore"),
-            (STASH_KEY, "git stash push"),
-            (COMMIT_KEY, "git commit"),
-        ] {
-            let entry = entries
-                .iter()
-                .find(|entry| entry.key == key)
-                .expect("the key belongs to the menu");
+            for (key, command) in [
+                (ADD_KEY, "git add"),
+                (RESTORE_KEY, "git restore"),
+                (STASH_KEY, "git stash push"),
+                (COMMIT_KEY, "git commit"),
+            ] {
+                let entry = entries
+                    .iter()
+                    .find(|entry| entry.key == key)
+                    .expect("the key belongs to the menu");
 
-            assert!(
-                entry.display.contains(command),
-                "the entry should name {command}: {display}",
-                display = entry.display
-            );
+                assert!(
+                    entry.display.contains(command),
+                    "the {language:?} entry should name {command}: {display}",
+                    display = entry.display
+                );
+            }
         }
     }
 
     #[test]
     fn an_item_is_identified_by_its_key_not_by_its_display() {
-        let entries = menu();
-        let items: Vec<FinderItem> = entries.iter().map(to_menu_item).collect();
+        let entries = menu(Language::Japanese.messages());
+        let items: Vec<FinderItem> = entries
+            .iter()
+            .map(|entry| to_menu_item(Language::Japanese, entry))
+            .collect();
 
         assert_eq!(
             items.iter().map(FinderItem::key).collect::<Vec<_>>(),
             [ADD_KEY, RESTORE_KEY, STASH_KEY, COMMIT_KEY, PRINT_KEY]
         );
+    }
+
+    #[test]
+    fn every_status_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let status = language.messages().status();
+
+            for text in [
+                status.clean(),
+                status.add_action(),
+                status.restore_action(),
+                status.stash_action(),
+                status.commit_action(),
+                status.print_action(),
+            ] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+
+            assert!(
+                status.menu_selection_not_found("drop").contains("drop"),
+                "{language:?} must name the selection"
+            );
+        }
+    }
+
+    #[test]
+    fn the_status_wording_is_translated() {
+        let japanese = Language::Japanese.messages().status();
+        let english = Language::English.messages().status();
+
+        assert_ne!(japanese.clean(), english.clean());
+        assert_ne!(japanese.add_action(), english.add_action());
+        assert_ne!(japanese.restore_action(), english.restore_action());
+        assert_ne!(japanese.stash_action(), english.stash_action());
+        assert_ne!(japanese.commit_action(), english.commit_action());
+        assert_ne!(japanese.print_action(), english.print_action());
+        assert_ne!(
+            japanese.menu_selection_not_found("drop"),
+            english.menu_selection_not_found("drop")
+        );
+    }
+
+    #[test]
+    fn a_menu_entry_is_matched_by_its_key_in_every_language() {
+        // 照合に使うキーは表示と分かれているため、表示言語を変えても解決結果は変わらない
+        for language in [Language::Japanese, Language::English] {
+            let messages = language.messages();
+
+            assert_eq!(
+                resolve_action(messages, &menu(messages), ADD_KEY)
+                    .expect("the key belongs to the menu"),
+                MenuAction::Add
+            );
+        }
     }
 
     #[test]
@@ -730,7 +839,12 @@ mod tests {
         ];
         let mut output = Vec::new();
 
-        print_paths(&mut output, &selected(&changes)).expect("writing to a buffer cannot fail");
+        print_paths(
+            Language::Japanese.messages(),
+            &mut output,
+            &selected(&changes),
+        )
+        .expect("writing to a buffer cannot fail");
 
         assert_eq!(
             String::from_utf8(output).expect("the output should be utf-8"),
@@ -741,12 +855,16 @@ mod tests {
 
     #[test]
     fn the_clean_report_states_the_cause_and_the_current_state() {
+        let messages = Language::Japanese.messages();
         let mut output = Vec::new();
 
-        report_clean(&mut output, &summary()).expect("writing to a buffer cannot fail");
+        report_clean(messages, &mut output, &summary()).expect("writing to a buffer cannot fail");
 
         let text = String::from_utf8(output).expect("the output should be utf-8");
-        assert!(text.contains(CLEAN_MESSAGE), "unexpected report: {text}");
+        assert!(
+            text.contains(messages.status().clean()),
+            "unexpected report: {text}"
+        );
         assert!(
             text.contains(&header_line(&summary())),
             "the header information should be repeated: {text}"
@@ -762,7 +880,8 @@ mod tests {
 
         let changes =
             changes(&repository, ChangeScope::TrackedOrUntracked).expect("status should be read");
-        let summary = summarize(&repository, &changes).expect("the summary should be built");
+        let summary = summarize(Language::Japanese.messages(), &repository, &changes)
+            .expect("the summary should be built");
 
         assert!(changes.is_empty(), "unexpected changes: {changes:?}");
         assert_eq!(summary.branch.as_deref(), Some("main"));
@@ -789,7 +908,8 @@ mod tests {
 
         let changes =
             changes(&repository, ChangeScope::TrackedOrUntracked).expect("status should be read");
-        let summary = summarize(&repository, &changes).expect("the summary should be built");
+        let summary = summarize(Language::Japanese.messages(), &repository, &changes)
+            .expect("the summary should be built");
 
         assert_eq!(summary.staged, 1);
         assert_eq!(summary.unstaged, 1);

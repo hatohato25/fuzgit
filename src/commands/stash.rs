@@ -11,11 +11,10 @@ use crate::error::Error;
 use crate::finder::{FinderItem, PreviewSource, select_many, select_one};
 use crate::git::exec::{pathspec, run_git};
 use crate::git::read::{ChangeScope, FileChange, StashEntry, changes, stashes};
+use crate::i18n::{Language, Messages};
 
-/// `drop` の確認プロンプトの見出し。
-///
-/// 破棄した stash は元に戻せないため、対象を示したうえで同意を求める。
-const DROP_CONFIRMATION_HEADER: &str = "以下の stash を破棄します（元に戻せません）:";
+/// 失敗を伝える文言に用いる、実行する git のサブコマンド名。
+const PUSH_COMMAND: &str = "git stash push";
 
 /// `git stash push` に未追跡ファイルも含めさせるオプション（`-u` の長い綴り）。
 const INCLUDE_UNTRACKED_OPTION: &str = "--include-untracked";
@@ -91,23 +90,25 @@ impl UntrackedFiles {
 /// 変更ファイル一覧の取得、選択（中断を含む）、`git stash push` の実行に失敗した場合に
 /// エラーを返す。
 pub fn push(
+    language: Language,
+    messages: &dyn Messages,
     repository: &gix::Repository,
     message: Option<&str>,
     untracked: UntrackedFiles,
 ) -> Result<()> {
     let changes = changes(repository, untracked.change_scope())
-        .context("変更ファイル一覧の取得に失敗しました")?;
+        .context(messages.common().changed_files_read_failed())?;
 
     let mut items = Vec::with_capacity(changes.len());
     for change in &changes {
         let candidate = to_candidate(change);
-        items.push(to_file_item(repository, change, &candidate)?);
+        items.push(to_file_item(language, repository, change, &candidate)?);
     }
 
     let selected = select_many(items)?;
-    let selected = resolve_changes(&changes, &selected)?;
+    let selected = resolve_changes(messages, &changes, &selected)?;
 
-    push_on_changes(message, untracked, &selected)
+    push_on_changes(language, messages, message, untracked, &selected)
 }
 
 /// 選択済みの変更ファイルを `git stash push` で退避する。
@@ -120,6 +121,8 @@ pub fn push(
 ///
 /// `git stash push` の実行に失敗した場合にエラーを返す。
 pub fn push_on_changes(
+    language: Language,
+    messages: &dyn Messages,
     message: Option<&str>,
     untracked: UntrackedFiles,
     selected: &[&FileChange],
@@ -130,7 +133,7 @@ pub fn push_on_changes(
 
     let arguments = push_args(message, untracked, &paths);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(&arguments).context("git stash push の実行に失敗しました")?;
+    run_git(language, &arguments).context(messages.common().command_run_failed(PUSH_COMMAND))?;
 
     Ok(())
 }
@@ -149,27 +152,39 @@ fn to_candidate(change: &FileChange) -> FileCandidate {
 ///
 /// stash 一覧の取得、選択（中断を含む）、確認の否認、`git stash` の実行に失敗した場合に
 /// エラーを返す。
-pub fn run(repository: &gix::Repository, action: StashAction) -> Result<()> {
-    let candidates = stashes(repository).context("stash 一覧の取得に失敗しました")?;
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    action: StashAction,
+) -> Result<()> {
+    let candidates = stashes(repository).context(messages.common().stash_list_read_failed())?;
 
-    let items = candidates.iter().map(to_stash_item).collect();
+    let items = candidates
+        .iter()
+        .map(|entry| to_stash_item(language, entry))
+        .collect();
     let selected = select_one(items)?;
 
     let entry = candidates
         .iter()
         .find(|candidate| candidate.selector() == selected)
-        .ok_or_else(|| anyhow!("選択された stash `{selected}` が候補に見つかりません"))?;
+        .ok_or_else(|| anyhow!(messages.stash().selection_not_found(&selected)))?;
 
     if action.needs_confirmation() {
-        confirm(DROP_CONFIRMATION_HEADER, &[&display_line(entry)])?;
+        confirm(
+            messages,
+            messages.stash().drop_confirmation(),
+            &[&display_line(entry)],
+        )?;
     }
 
     let selector = entry.selector();
-    run_git(&["stash", action.subcommand(), &selector]).with_context(|| {
-        format!(
-            "git stash {subcommand} {selector} の実行に失敗しました",
+    run_git(language, &["stash", action.subcommand(), &selector]).with_context(|| {
+        messages.common().command_run_failed(&format!(
+            "git stash {subcommand} {selector}",
             subcommand = action.subcommand()
-        )
+        ))
     })?;
 
     Ok(())
@@ -198,6 +213,7 @@ fn push_args(message: Option<&str>, untracked: UntrackedFiles, paths: &[String])
 ///
 /// 未追跡ファイルの絶対パスを解決できない（作業ツリーを持たない）場合にエラーを返す。
 fn to_file_item(
+    language: Language,
     repository: &gix::Repository,
     change: &FileChange,
     candidate: &FileCandidate,
@@ -206,6 +222,7 @@ fn to_file_item(
         candidate.display.clone(),
         candidate.key.clone(),
         file_preview(repository, change)?,
+        language.messages(),
     ))
 }
 
@@ -266,11 +283,12 @@ fn stash_preview_args(entry: &StashEntry) -> Vec<String> {
 }
 
 /// stash を finder の候補へ変換する。
-fn to_stash_item(entry: &StashEntry) -> FinderItem {
+fn to_stash_item(language: Language, entry: &StashEntry) -> FinderItem {
     FinderItem::new(
         display_line(entry),
         entry.selector(),
         PreviewSource::Git(stash_preview_args(entry)),
+        language.messages(),
     )
 }
 
@@ -343,7 +361,7 @@ mod tests {
 
     #[test]
     fn an_item_keeps_the_selector_as_its_key() {
-        let item = to_stash_item(&entry(10, "On main: 作業中"));
+        let item = to_stash_item(Language::Japanese, &entry(10, "On main: 作業中"));
 
         assert_eq!(item.key(), "stash@{10}");
     }
@@ -492,10 +510,39 @@ mod tests {
         let change = change("new.txt", "??");
         let candidate = to_candidate(&change);
 
-        let item = to_file_item(&repository, &change, &candidate).expect("the item should build");
+        let item = to_file_item(Language::Japanese, &repository, &change, &candidate)
+            .expect("the item should build");
 
         assert_eq!(item.key(), "new.txt");
         assert_eq!(candidate.display, "?? new.txt");
+    }
+
+    #[test]
+    fn every_stash_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let stash = language.messages().stash();
+
+            assert!(
+                !stash.drop_confirmation().trim().is_empty(),
+                "{language:?} left a message empty"
+            );
+            assert!(
+                stash.selection_not_found("stash@{2}").contains("stash@{2}"),
+                "{language:?} must name the selection"
+            );
+        }
+    }
+
+    #[test]
+    fn the_stash_wording_is_translated() {
+        let japanese = Language::Japanese.messages().stash();
+        let english = Language::English.messages().stash();
+
+        assert_ne!(japanese.drop_confirmation(), english.drop_confirmation());
+        assert_ne!(
+            japanese.selection_not_found("stash@{2}"),
+            english.selection_not_found("stash@{2}")
+        );
     }
 
     #[test]

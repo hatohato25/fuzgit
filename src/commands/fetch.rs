@@ -28,6 +28,7 @@ use crate::finder::{
 use crate::git::exec::{run_git, run_git_in};
 use crate::git::read::{branch_tracking_args, remote_tracking_refs_args, remote_url_args, remotes};
 use crate::git::siblings::{self, SiblingRepository, SiblingScan};
+use crate::i18n::{Language, Messages};
 
 /// 「すべてのリモート」を表す固定候補のキー。
 ///
@@ -37,43 +38,14 @@ use crate::git::siblings::{self, SiblingRepository, SiblingScan};
 /// （FR-14 の復帰メニューと同じ固定キー方式）。
 const ALL_REMOTES_KEY: &str = "*all*";
 
-/// 「すべてのリモート」候補の表示。
-const ALL_REMOTES_LABEL: &str = "すべてのリモート";
-
 /// すべてのリモートから取得する `git fetch` のオプション。
 const ALL_REMOTES_OPTION: &str = "--all";
 
 /// リモートで削除されたブランチの追跡参照を掃除する `git fetch` のオプション。
 const PRUNE_OPTION: &str = "--prune";
 
-/// リモートが 1 つも登録されていない場合の案内（`gz push` と同じ扱い）。
-const NO_REMOTE_MESSAGE: &str =
-    "fetch 元のリモートが登録されていません。`git remote add <名前> <URL>` で追加してください";
-
-/// finder を省略して対象を確定したことを伝える 1 行の後半（省略した理由）。
-///
-/// finder が出ない理由をその場で示すために添える。
-const SINGLE_REMOTE_REASON: &str = "登録されているリモートが 1 つのため、選択を省略しました";
-
-/// 兄弟リポジトリの候補が 1 件も無い場合の案内。
-///
-/// 現在のリポジトリも候補（[`siblings::discover`] は現在のリポジトリを含める）に
-/// 現れないため、リモートが 1 つも登録されていない状況を指す。
-const NO_SIBLING_CANDIDATE_MESSAGE: &str = "fetch できるリポジトリがありません\
-（リモートが登録されていないリポジトリと bare リポジトリは対象になりません）";
-
-/// 兄弟リポジトリの選択で finder を省略したことを伝える 1 行。
-const SINGLE_SIBLING_REASON: &str = "対象が現在のリポジトリ 1 件のため、選択を省略しました";
-
-/// 兄弟リポジトリ一覧の上部に固定表示する操作説明。
-const SIBLINGS_HEADER: &str =
-    "現在のリポジトリを選択済みにしています。Tab: 選択の切替 / Enter: 取得";
-
 /// ヘッダー内の区切り（`gz status` と同じ体裁）。
 const HEADER_SEPARATOR: &str = "  |  ";
-
-/// `--prune` の適用範囲をヘッダーに示す文言。
-const PRUNE_SCOPE_NOTE: &str = "--prune: 選択したすべてのリポジトリに適用";
 
 /// HEAD がブランチを指していない兄弟リポジトリの表示。
 const DETACHED_LABEL: &str = "detached HEAD";
@@ -81,26 +53,11 @@ const DETACHED_LABEL: &str = "detached HEAD";
 /// 候補行の要素の区切り。
 const FIELD_SEPARATOR: &str = "  ";
 
-/// 兄弟リポジトリのプレビューでブランチの追跡状況を示すセクションの見出し。
-const TRACKING_STATE_SECTION: &str = "ブランチの追跡状況";
-
 /// 任意のロックを取らずに git を実行するオプション。
 ///
 /// プレビューは他人のリポジトリに対して選択項目ごとに実行されるため、
 /// 他のプロセスが動作中でも干渉しないよう、ロックを要する操作を行わせない（man git）。
 const NO_OPTIONAL_LOCKS: &str = "--no-optional-locks";
-
-/// 1 件でも取得に失敗した場合にアプリ層へ返すメッセージ。
-///
-/// 失敗の内訳は直前に stderr へ集計表示済みであり、失敗理由は git 自身が
-/// その場で表示しているため、ここで再掲しない。
-const PARTIAL_FAILURE_MESSAGE: &str = "一部のリポジトリで取得に失敗しました";
-
-/// プレビューでリモートの URL を示すセクションの見出し。
-const URL_SECTION: &str = "リモート URL";
-
-/// プレビューで既知のリモート追跡ブランチを示すセクションの見出し。
-const TRACKING_SECTION: &str = "既知のリモート追跡ブランチ";
 
 /// リモートで削除されたブランチの追跡参照を掃除するかどうか。
 ///
@@ -152,10 +109,10 @@ enum FetchTarget {
 
 impl FetchTarget {
     /// 実行前の案内・エラーメッセージに示す対象の呼称。
-    fn description(&self) -> String {
+    fn description(&self, messages: &dyn Messages) -> String {
         match self {
-            FetchTarget::Remote(name) => format!("リモート `{name}`"),
-            FetchTarget::All => ALL_REMOTES_LABEL.to_owned(),
+            FetchTarget::Remote(name) => messages.fetch().remote_description(name),
+            FetchTarget::All => messages.fetch().all_remotes_label().to_owned(),
         }
     }
 }
@@ -196,43 +153,50 @@ impl FetchDecision {
 ///
 /// リモート一覧の取得、選択（中断を含む）、`git fetch` の実行に失敗した場合にエラーを返す。
 /// リモートが 1 つも登録されていない場合は、追加方法を示して失敗する。
-pub fn run(repository: &gix::Repository, scope: FetchScope, prune: PruneMode) -> Result<()> {
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    scope: FetchScope,
+    prune: PruneMode,
+) -> Result<()> {
     match scope {
-        FetchScope::Current => run_current(repository, prune),
-        FetchScope::Siblings => run_siblings(repository, prune),
+        FetchScope::Current => run_current(language, messages, repository, prune),
+        FetchScope::Siblings => run_siblings(language, messages, repository, prune),
     }
 }
 
 /// 現在のリポジトリのリモートを対象に `git fetch` を実行する。
-fn run_current(repository: &gix::Repository, prune: PruneMode) -> Result<()> {
-    let remotes = remotes(repository).context("リモート一覧の取得に失敗しました")?;
+fn run_current(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    prune: PruneMode,
+) -> Result<()> {
+    let remotes = remotes(repository).context(messages.common().remote_list_read_failed())?;
 
     let target = match FetchDecision::from_remotes(&remotes) {
-        FetchDecision::NoRemote => bail!(NO_REMOTE_MESSAGE),
+        FetchDecision::NoRemote => bail!(messages.fetch().no_remotes()),
         FetchDecision::Fixed(target) => {
             // finder を出さない以上、何に対して通信したのかはここでしか示せない
             // （`git fetch` は更新が無ければ何も出力しないことがある）
-            report_target(&mut std::io::stderr(), &target)?;
+            report_target(messages, &mut std::io::stderr(), &target)?;
             target
         }
         FetchDecision::Choose => {
-            let selected = select_one(items(&remotes))?;
+            let selected = select_one(items(language, messages, &remotes))?;
 
             // `git fetch` はパス以外の位置引数を取り `--` で保護できないため、
             // 選択結果が候補一覧に含まれることを確かめてから引数に渡す
             // （design.md セキュリティ設計）
-            resolve(&remotes, &selected)?
+            resolve(messages, &remotes, &selected)?
         }
     };
 
     let arguments = fetch_args(&target, prune);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(&arguments).with_context(|| {
-        format!(
-            "{target} からの取得に失敗しました",
-            target = target.description()
-        )
-    })?;
+    run_git(language, &arguments)
+        .with_context(|| messages.fetch().fetch_failed(&target.description(messages)))?;
 
     Ok(())
 }
@@ -241,34 +205,56 @@ fn run_current(repository: &gix::Repository, prune: PruneMode) -> Result<()> {
 ///
 /// 通信先が複数になるため、対象は必ずユーザーの選択（または「現在のリポジトリ 1 件のみ」という
 /// 選択の余地が無い状況）で決まる。
-fn run_siblings(repository: &gix::Repository, prune: PruneMode) -> Result<()> {
-    let scan = siblings::discover(repository).context("兄弟リポジトリの探索に失敗しました")?;
+fn run_siblings(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    prune: PruneMode,
+) -> Result<()> {
+    let scan = siblings::discover(repository).context(messages.fetch().sibling_scan_failed())?;
 
     let targets = match SiblingsDecision::from_candidates(&scan.candidates) {
-        SiblingsDecision::NoCandidate => bail!(NO_SIBLING_CANDIDATE_MESSAGE),
+        SiblingsDecision::NoCandidate => bail!(messages.fetch().no_sibling_candidates()),
         SiblingsDecision::Fixed => {
             // finder が出ない理由を示す。対象そのものは進捗表示に出る
-            report_line(&mut std::io::stderr(), SINGLE_SIBLING_REASON)?;
+            report_line(
+                messages,
+                &mut std::io::stderr(),
+                messages.fetch().single_sibling_reason(),
+            )?;
             scan.candidates.iter().collect()
         }
         SiblingsDecision::Choose => {
             let options = FinderOptions::new(SelectionMode::Multi)
-                .with_header(sibling_header(&scan, prune))
+                .with_header(sibling_header(messages, &scan, prune))
                 // 事前選択は表示文字列の完全一致で判定される（`crate::finder::FinderOptions`）
                 .with_preselect(preselect(&scan.candidates));
-            let selected = select_many_with(sibling_items(&scan.candidates)?, &options)?;
+            let selected = select_many_with(
+                sibling_items(language, messages, &scan.candidates)?,
+                &options,
+            )?;
 
             // skim は選択した順に返すため、候補一覧の順序（現在のリポジトリが先頭、
             // 以降は名前順）へ揃え直したうえで、キーが候補に含まれることを検証する
-            in_candidate_order(&scan.candidates, &selected)?
+            in_candidate_order(messages, &scan.candidates, &selected)?
         }
     };
 
-    let summary = fetch_each(&targets, prune, &mut std::io::stderr(), run_git_in)?;
-    report_line(&mut std::io::stderr(), &summary_line(&summary))?;
+    let summary = fetch_each(
+        messages,
+        &targets,
+        prune,
+        &mut std::io::stderr(),
+        |directory, arguments| run_git_in(language, directory, arguments),
+    )?;
+    report_line(
+        messages,
+        &mut std::io::stderr(),
+        &summary_line(messages, &summary),
+    )?;
 
     if summary.has_failure() {
-        bail!(PARTIAL_FAILURE_MESSAGE);
+        bail!(messages.fetch().partial_failure());
     }
 
     Ok(())
@@ -307,18 +293,15 @@ impl SiblingsDecision {
 ///
 /// 除外件数は「黙って消さない」ために示し、`--prune` は適用範囲（選択したすべての
 /// リポジトリ）が現在のリポジトリだけと誤解されないよう明示する。
-fn sibling_header(scan: &SiblingScan, prune: PruneMode) -> String {
-    let mut sections = vec![SIBLINGS_HEADER.to_owned()];
+fn sibling_header(messages: &dyn Messages, scan: &SiblingScan, prune: PruneMode) -> String {
+    let mut sections = vec![messages.fetch().siblings_header().to_owned()];
 
     if scan.excluded > 0 {
-        sections.push(format!(
-            "除外 {excluded} 件（リモート未登録 / bare）",
-            excluded = scan.excluded
-        ));
+        sections.push(messages.fetch().excluded_count(scan.excluded));
     }
 
     if prune == PruneMode::Prune {
-        sections.push(PRUNE_SCOPE_NOTE.to_owned());
+        sections.push(messages.fetch().prune_scope_note().to_owned());
     }
 
     sections.join(HEADER_SEPARATOR)
@@ -352,14 +335,19 @@ fn preselect(candidates: &[SiblingRepository]) -> Vec<String> {
 ///
 /// ワークツリーのパスを文字列として扱えない場合にエラーを返す
 /// （選択結果の照合キーに使うため、表示できないパスのまま進めない）。
-fn sibling_items(candidates: &[SiblingRepository]) -> Result<Vec<FinderItem>> {
+fn sibling_items(
+    language: Language,
+    messages: &dyn Messages,
+    candidates: &[SiblingRepository],
+) -> Result<Vec<FinderItem>> {
     candidates
         .iter()
         .map(|candidate| {
             Ok(FinderItem::new(
                 sibling_display_line(candidate),
-                sibling_key(candidate)?.to_owned(),
-                sibling_preview_source(candidate),
+                sibling_key(messages, candidate)?.to_owned(),
+                sibling_preview_source(messages, candidate),
+                language.messages(),
             ))
         })
         .collect()
@@ -370,13 +358,11 @@ fn sibling_items(candidates: &[SiblingRepository]) -> Result<Vec<FinderItem>> {
 /// # Errors
 ///
 /// パスが UTF-8 でない場合にエラーを返す。
-fn sibling_key(candidate: &SiblingRepository) -> Result<&str> {
-    candidate.workdir.to_str().ok_or_else(|| {
-        anyhow!(
-            "ワークツリーのパスを文字列として扱えません: {path}",
-            path = candidate.workdir.display()
-        )
-    })
+fn sibling_key<'a>(messages: &dyn Messages, candidate: &'a SiblingRepository) -> Result<&'a str> {
+    candidate
+        .workdir
+        .to_str()
+        .ok_or_else(|| anyhow!(messages.fetch().path_not_utf8(&candidate.workdir)))
 }
 
 /// 兄弟リポジトリ 1 件のプレビュー内容を組み立てる。
@@ -385,7 +371,7 @@ fn sibling_key(candidate: &SiblingRepository) -> Result<&str> {
 /// 伴わない（design.md「候補生成・プレビューでネットワークアクセスを行わない」）。
 /// **作業ツリーを走査する情報は載せない**（[`sibling_tracking_args`] を参照）。
 /// 実行するディレクトリはプロセスの cwd として渡し、引数配列にパスを載せない。
-fn sibling_preview_source(candidate: &SiblingRepository) -> PreviewSource {
+fn sibling_preview_source(messages: &dyn Messages, candidate: &SiblingRepository) -> PreviewSource {
     let mut sections: Vec<(String, PreviewSource)> = candidate
         .remotes
         .iter()
@@ -401,7 +387,7 @@ fn sibling_preview_source(candidate: &SiblingRepository) -> PreviewSource {
         .collect();
 
     sections.push((
-        TRACKING_STATE_SECTION.to_owned(),
+        messages.fetch().tracking_state_section().to_owned(),
         PreviewSource::GitIn {
             directory: candidate.workdir.clone(),
             args: sibling_tracking_args(),
@@ -435,6 +421,7 @@ fn sibling_tracking_args() -> Vec<String> {
 /// 候補一覧に無いキーが含まれていた場合にエラーを返す（対象を取り違えたまま
 /// 他人のリポジトリへ通信しないよう、暗黙に読み飛ばさない）。
 fn in_candidate_order<'a>(
+    messages: &dyn Messages,
     candidates: &'a [SiblingRepository],
     selected: &[String],
 ) -> Result<Vec<&'a SiblingRepository>> {
@@ -445,8 +432,9 @@ fn in_candidate_order<'a>(
         .collect();
     if !missing.is_empty() {
         bail!(
-            "選択されたリポジトリ {paths} が候補に見つかりません",
-            paths = missing.join(", ")
+            messages
+                .fetch()
+                .sibling_selection_not_found(&missing.join(", "))
         );
     }
 
@@ -486,7 +474,7 @@ impl FetchSummary {
 /// 認証プロンプトが出た場合にどのリポジトリのものか分かるよう、実行前に進捗を書き出す。
 ///
 /// 実行そのものを引数で受け取るのは、ネットワークや git の有無に依存せず
-/// 集計と中断の判断を単体テストできるようにするため（本番は [`run_git_in`] を渡す）。
+/// 集計と中断の判断を単体テストできるようにするため（本番は表示言語を束ねた [`run_git_in`] を渡す）。
 ///
 /// # Errors
 ///
@@ -494,6 +482,7 @@ impl FetchSummary {
 /// 環境の問題でありリポジトリごとの失敗ではないため、残りを実行せずその場で返す。
 /// 進捗の書き込みに失敗した場合も同様。
 fn fetch_each(
+    messages: &dyn Messages,
     targets: &[&SiblingRepository],
     prune: PruneMode,
     writer: &mut impl std::io::Write,
@@ -506,7 +495,11 @@ fn fetch_each(
     for (index, target) in targets.iter().enumerate() {
         // git fetch の更新表も stderr に出るため、この区切りが無いとどのリポジトリの
         // 出力なのか読み取れない（man git-fetch OUTPUT 節）
-        report_line(writer, &progress_line(index, targets.len(), target))?;
+        report_line(
+            messages,
+            writer,
+            &progress_line(index, targets.len(), target),
+        )?;
 
         match fetch(&target.workdir, &arguments) {
             Ok(()) => summary.succeeded += 1,
@@ -514,10 +507,8 @@ fn fetch_each(
             // git 自身が理由をその場で表示済みであり、ここでは再掲しない
             Err(Error::GitRunFailed { .. }) => summary.failed.push(target.name.clone()),
             Err(error) => {
-                return Err(anyhow::Error::from(error).context(format!(
-                    "`{name}` の取得を開始できませんでした",
-                    name = target.name
-                )));
+                return Err(anyhow::Error::from(error)
+                    .context(messages.fetch().sibling_start_failed(&target.name)));
             }
         }
     }
@@ -548,18 +539,13 @@ fn progress_line(index: usize, total: usize, target: &SiblingRepository) -> Stri
 }
 
 /// 実行結果の集計を 1 行に組み立てる。
-fn summary_line(summary: &FetchSummary) -> String {
-    let mut line = format!(
-        "成功 {succeeded} 件 / 失敗 {failed} 件",
-        succeeded = summary.succeeded,
-        failed = summary.failed.len()
-    );
+fn summary_line(messages: &dyn Messages, summary: &FetchSummary) -> String {
+    let mut line = messages
+        .common()
+        .run_summary(summary.succeeded, summary.failed.len());
 
     if summary.has_failure() {
-        line.push_str(&format!(
-            "（失敗: {names}）",
-            names = summary.failed.join(", ")
-        ));
+        line.push_str(&messages.common().failed_targets(&summary.failed.join(", ")));
     }
 
     line
@@ -572,18 +558,19 @@ fn summary_line(summary: &FetchSummary) -> String {
 /// # Errors
 ///
 /// 書き込みに失敗した場合にエラーを返す。
-fn report_line(writer: &mut impl std::io::Write, line: &str) -> Result<()> {
-    writeln!(writer, "{line}").context("標準エラー出力への書き込みに失敗しました")?;
+fn report_line(
+    messages: &dyn Messages,
+    writer: &mut impl std::io::Write,
+    line: &str,
+) -> Result<()> {
+    writeln!(writer, "{line}").context(messages.common().stderr_write_failed())?;
 
     Ok(())
 }
 
 /// finder を省略して確定した対象を伝える 1 行を組み立てる。
-fn fixed_target_message(target: &FetchTarget) -> String {
-    format!(
-        "{target} から取得します（{SINGLE_REMOTE_REASON}）",
-        target = target.description()
-    )
+fn fixed_target_message(messages: &dyn Messages, target: &FetchTarget) -> String {
+    messages.fetch().fixed_target(&target.description(messages))
 }
 
 /// finder を省略して確定した対象を書き出す。
@@ -593,9 +580,17 @@ fn fixed_target_message(target: &FetchTarget) -> String {
 /// # Errors
 ///
 /// 書き込みに失敗した場合にエラーを返す。
-fn report_target(writer: &mut impl std::io::Write, target: &FetchTarget) -> Result<()> {
-    writeln!(writer, "{message}", message = fixed_target_message(target))
-        .context("標準エラー出力への書き込みに失敗しました")?;
+fn report_target(
+    messages: &dyn Messages,
+    writer: &mut impl std::io::Write,
+    target: &FetchTarget,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "{message}",
+        message = fixed_target_message(messages, target)
+    )
+    .context(messages.common().stderr_write_failed())?;
 
     Ok(())
 }
@@ -606,15 +601,23 @@ fn report_target(writer: &mut impl std::io::Write, target: &FetchTarget) -> Resu
 /// （1 つの場合は [`FetchDecision::from_remotes`] が finder を経ずに対象を確定する）。
 /// 固定候補は「個々のリモート」と「すべてのリモート」で `git fetch` の引数が
 /// 変わるために必要であり、リモートの後ろに置いて位置を一定に保つ。
-fn items(remotes: &[String]) -> Vec<FinderItem> {
-    let mut items: Vec<FinderItem> = remotes.iter().map(|remote| to_item(remote)).collect();
-    items.push(all_remotes_item(remotes));
+fn items(language: Language, messages: &dyn Messages, remotes: &[String]) -> Vec<FinderItem> {
+    let mut items: Vec<FinderItem> = remotes
+        .iter()
+        .map(|remote| to_item(language, messages, remote))
+        .collect();
+    items.push(all_remotes_item(language, messages, remotes));
     items
 }
 
 /// リモート 1 件を finder の候補へ変換する。
-fn to_item(remote: &str) -> FinderItem {
-    FinderItem::new(remote.to_owned(), remote.to_owned(), preview_source(remote))
+fn to_item(language: Language, messages: &dyn Messages, remote: &str) -> FinderItem {
+    FinderItem::new(
+        remote.to_owned(),
+        remote.to_owned(),
+        preview_source(messages, remote),
+        language.messages(),
+    )
 }
 
 /// リモート 1 件のプレビュー内容を組み立てる。
@@ -622,25 +625,26 @@ fn to_item(remote: &str) -> FinderItem {
 /// 参照するのは `.git/config` の URL と、前回までの fetch で保存済みのリモート追跡参照だけで、
 /// いずれもネットワークを伴わない。生成は他コマンドと同じく選択項目ごとの遅延実行であり、
 /// カーソルが当たっていない候補の分は実行されない。
-fn preview_source(remote: &str) -> PreviewSource {
+fn preview_source(messages: &dyn Messages, remote: &str) -> PreviewSource {
     PreviewSource::Composite(vec![
         (
-            URL_SECTION.to_owned(),
+            messages.fetch().url_section().to_owned(),
             PreviewSource::Git(remote_url_args(remote)),
         ),
         (
-            TRACKING_SECTION.to_owned(),
+            messages.fetch().tracking_section().to_owned(),
             PreviewSource::Git(remote_tracking_refs_args(remote)),
         ),
     ])
 }
 
 /// 「すべてのリモート」の固定候補を組み立てる。
-fn all_remotes_item(remotes: &[String]) -> FinderItem {
+fn all_remotes_item(language: Language, messages: &dyn Messages, remotes: &[String]) -> FinderItem {
     FinderItem::new(
-        ALL_REMOTES_LABEL.to_owned(),
+        messages.fetch().all_remotes_label().to_owned(),
         ALL_REMOTES_KEY.to_owned(),
         all_remotes_preview(remotes),
+        language.messages(),
     )
 }
 
@@ -664,7 +668,7 @@ fn all_remotes_preview(remotes: &[String]) -> PreviewSource {
 ///
 /// キーが固定候補でも候補一覧のリモートでもない場合にエラーを返す
 /// （対象を取り違えたまま git を実行しないよう、暗黙に読み飛ばさない）。
-fn resolve(remotes: &[String], selected: &str) -> Result<FetchTarget> {
+fn resolve(messages: &dyn Messages, remotes: &[String], selected: &str) -> Result<FetchTarget> {
     if selected == ALL_REMOTES_KEY {
         return Ok(FetchTarget::All);
     }
@@ -673,7 +677,7 @@ fn resolve(remotes: &[String], selected: &str) -> Result<FetchTarget> {
         .iter()
         .find(|remote| *remote == selected)
         .map(|remote| FetchTarget::Remote(remote.clone()))
-        .ok_or_else(|| anyhow!("選択されたリモート `{selected}` が候補に見つかりません"))
+        .ok_or_else(|| anyhow!(messages.fetch().selection_not_found(selected)))
 }
 
 /// `git fetch [--prune] <remote>` / `git fetch [--prune] --all` の引数を組み立てる。
@@ -696,6 +700,11 @@ fn fetch_args(target: &FetchTarget, prune: PruneMode) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 既定（日本語）の文言一式。文言そのものを固定するテスト以外はこれを使う。
+    fn messages() -> &'static dyn Messages {
+        Language::Japanese.messages()
+    }
 
     fn remotes() -> Vec<String> {
         ["origin", "upstream"]
@@ -744,7 +753,7 @@ mod tests {
     #[test]
     fn a_remote_name_resolves_to_that_remote() {
         assert_eq!(
-            resolve(&remotes(), "upstream").expect("a listed remote should resolve"),
+            resolve(messages(), &remotes(), "upstream").expect("a listed remote should resolve"),
             FetchTarget::Remote("upstream".to_owned())
         );
     }
@@ -752,14 +761,15 @@ mod tests {
     #[test]
     fn the_fixed_key_resolves_to_every_remote() {
         assert_eq!(
-            resolve(&remotes(), ALL_REMOTES_KEY).expect("the fixed key should resolve"),
+            resolve(messages(), &remotes(), ALL_REMOTES_KEY).expect("the fixed key should resolve"),
             FetchTarget::All
         );
     }
 
     #[test]
     fn a_name_outside_of_the_candidates_is_rejected() {
-        let err = resolve(&remotes(), "elsewhere").expect_err("an unknown remote must be rejected");
+        let err = resolve(messages(), &remotes(), "elsewhere")
+            .expect_err("an unknown remote must be rejected");
 
         assert!(
             err.to_string().contains("elsewhere"),
@@ -770,21 +780,22 @@ mod tests {
     #[test]
     fn the_label_of_the_fixed_candidate_is_not_mistaken_for_a_remote() {
         // 表示文字列と同じ名前のリモートがあっても、解決に使うのはキーだけ
-        let remotes = vec![ALL_REMOTES_LABEL.to_owned()];
+        let label = messages().fetch().all_remotes_label();
+        let remotes = vec![label.to_owned()];
 
         assert_eq!(
-            resolve(&remotes, ALL_REMOTES_LABEL).expect("the remote should resolve"),
-            FetchTarget::Remote(ALL_REMOTES_LABEL.to_owned())
+            resolve(messages(), &remotes, label).expect("the remote should resolve"),
+            FetchTarget::Remote(label.to_owned())
         );
         assert_eq!(
-            resolve(&remotes, ALL_REMOTES_KEY).expect("the fixed key should resolve"),
+            resolve(messages(), &remotes, ALL_REMOTES_KEY).expect("the fixed key should resolve"),
             FetchTarget::All
         );
     }
 
     #[test]
     fn the_fixed_candidate_comes_after_the_remotes() {
-        let items = items(&remotes());
+        let items = items(Language::Japanese, messages(), &remotes());
 
         assert_eq!(
             items.iter().map(FinderItem::key).collect::<Vec<_>>(),
@@ -824,14 +835,14 @@ mod tests {
     #[test]
     fn the_fixed_target_is_named_in_the_line_that_replaces_the_finder() {
         // fetch は更新が無ければ何も出力しないことがあるため、通信先をここで示す
-        let message = fixed_target_message(&FetchTarget::Remote("origin".to_owned()));
+        let message = fixed_target_message(messages(), &FetchTarget::Remote("origin".to_owned()));
 
         assert!(
             message.contains("origin"),
             "the remote should be named: {message}"
         );
         assert!(
-            message.contains(SINGLE_REMOTE_REASON),
+            message.contains("選択を省略しました"),
             "the reason the finder was skipped should be given: {message}"
         );
         assert_eq!(message.lines().count(), 1, "1 行に収める: {message}");
@@ -841,15 +852,20 @@ mod tests {
     fn the_fixed_target_is_reported_to_the_given_writer() {
         let mut written = Vec::new();
 
-        report_target(&mut written, &FetchTarget::Remote("origin".to_owned()))
-            .expect("writing to a buffer should succeed");
+        report_target(
+            messages(),
+            &mut written,
+            &FetchTarget::Remote("origin".to_owned()),
+        )
+        .expect("writing to a buffer should succeed");
 
         let text = String::from_utf8(written).expect("the message should be utf-8");
         assert_eq!(
             text,
             format!(
                 "{message}\n",
-                message = fixed_target_message(&FetchTarget::Remote("origin".to_owned()))
+                message =
+                    fixed_target_message(messages(), &FetchTarget::Remote("origin".to_owned()))
             )
         );
     }
@@ -889,14 +905,17 @@ mod tests {
     #[test]
     fn a_preview_reads_local_information_only() {
         // ネットワークへ出るのは決定後の `git fetch` だけ（design.md の設計原則）
-        let sections = sections(&preview_source("origin"));
+        let sections = sections(&preview_source(messages(), "origin"));
 
         assert_eq!(
             sections
                 .iter()
                 .map(|(label, _)| label.as_str())
                 .collect::<Vec<_>>(),
-            [URL_SECTION, TRACKING_SECTION]
+            [
+                messages().fetch().url_section(),
+                messages().fetch().tracking_section()
+            ]
         );
         assert_eq!(sections[0].1, remote_url_args("origin"));
         assert_eq!(sections[1].1, remote_tracking_refs_args("origin"));
@@ -904,7 +923,10 @@ mod tests {
 
     #[test]
     fn no_preview_reaches_the_network() {
-        let previews = [preview_source("origin"), all_remotes_preview(&remotes())];
+        let previews = [
+            preview_source(messages(), "origin"),
+            all_remotes_preview(&remotes()),
+        ];
 
         for preview in &previews {
             for (label, arguments) in sections(preview) {
@@ -940,10 +962,13 @@ mod tests {
     #[test]
     fn the_target_is_named_in_the_failure_message() {
         assert_eq!(
-            FetchTarget::Remote("origin".to_owned()).description(),
+            FetchTarget::Remote("origin".to_owned()).description(messages()),
             "リモート `origin`"
         );
-        assert_eq!(FetchTarget::All.description(), ALL_REMOTES_LABEL);
+        assert_eq!(
+            FetchTarget::All.description(messages()),
+            messages().fetch().all_remotes_label()
+        );
     }
 
     // --- 兄弟リポジトリ（FR-23） ---
@@ -1035,7 +1060,7 @@ mod tests {
 
     #[test]
     fn the_header_states_how_many_repositories_were_left_out() {
-        let header = sibling_header(&scan(siblings(), 2), PruneMode::Keep);
+        let header = sibling_header(messages(), &scan(siblings(), 2), PruneMode::Keep);
 
         assert!(header.contains('2'), "the count should be shown: {header}");
         assert!(
@@ -1047,7 +1072,7 @@ mod tests {
 
     #[test]
     fn nothing_is_said_about_exclusions_when_there_were_none() {
-        let header = sibling_header(&scan(siblings(), 0), PruneMode::Keep);
+        let header = sibling_header(messages(), &scan(siblings(), 0), PruneMode::Keep);
 
         assert!(
             !header.contains("除外"),
@@ -1057,11 +1082,11 @@ mod tests {
 
     #[test]
     fn the_header_states_that_pruning_applies_to_every_selected_repository() {
-        let pruning = sibling_header(&scan(siblings(), 0), PruneMode::Prune);
-        let keeping = sibling_header(&scan(siblings(), 0), PruneMode::Keep);
+        let pruning = sibling_header(messages(), &scan(siblings(), 0), PruneMode::Prune);
+        let keeping = sibling_header(messages(), &scan(siblings(), 0), PruneMode::Keep);
 
         assert!(
-            pruning.contains(PRUNE_SCOPE_NOTE),
+            pruning.contains(messages().fetch().prune_scope_note()),
             "the scope of --prune should be shown: {pruning}"
         );
         assert!(
@@ -1115,7 +1140,8 @@ mod tests {
     fn a_candidate_is_keyed_by_its_normalized_path() {
         let candidates = siblings();
 
-        let items = sibling_items(&candidates).expect("a utf-8 path should be usable as a key");
+        let items = sibling_items(Language::Japanese, messages(), &candidates)
+            .expect("a utf-8 path should be usable as a key");
 
         assert_eq!(
             items.iter().map(FinderItem::key).collect::<Vec<_>>(),
@@ -1140,7 +1166,10 @@ mod tests {
         // `git status` は追跡状況を出す前に index を refresh する（全ファイルを stat し、
         // 食い違えば内容を読み直す）ため、規模の大きい兄弟でプレビューが秒単位になる。
         // プレビューはカーソル移動のたびに同期実行されるので、走査を伴う経路を持たせない
-        let sections = git_in_sections(&sibling_preview_source(&sibling("alpha", false)));
+        let sections = git_in_sections(&sibling_preview_source(
+            messages(),
+            &sibling("alpha", false),
+        ));
 
         for (label, _, arguments) in sections {
             assert!(
@@ -1154,7 +1183,7 @@ mod tests {
     fn the_preview_runs_in_the_repository_of_the_candidate() {
         let candidate = sibling("alpha", false);
 
-        let sections = git_in_sections(&sibling_preview_source(&candidate));
+        let sections = git_in_sections(&sibling_preview_source(messages(), &candidate));
 
         for (label, directory, arguments) in &sections {
             assert_eq!(
@@ -1174,13 +1203,16 @@ mod tests {
                 .iter()
                 .map(|(label, _, _)| label.as_str())
                 .collect::<Vec<_>>(),
-            ["origin", TRACKING_STATE_SECTION]
+            ["origin", messages().fetch().tracking_state_section()]
         );
     }
 
     #[test]
     fn no_sibling_preview_reaches_the_network() {
-        let sections = git_in_sections(&sibling_preview_source(&sibling("alpha", false)));
+        let sections = git_in_sections(&sibling_preview_source(
+            messages(),
+            &sibling("alpha", false),
+        ));
 
         for (label, _, arguments) in sections {
             assert!(
@@ -1198,7 +1230,7 @@ mod tests {
         // skim は選択した順に返す
         let selected = ["/repos/zulu", "/repos/mike"].map(str::to_owned);
 
-        let targets = in_candidate_order(&candidates, &selected)
+        let targets = in_candidate_order(messages(), &candidates, &selected)
             .expect("keys taken from the candidates should resolve");
 
         assert_eq!(keys(&targets), ["mike", "zulu"]);
@@ -1209,7 +1241,7 @@ mod tests {
         let candidates = siblings();
         let selected = ["/repos/mike".to_owned(), "/elsewhere/evil".to_owned()];
 
-        let err = in_candidate_order(&candidates, &selected)
+        let err = in_candidate_order(messages(), &candidates, &selected)
             .expect_err("an unknown repository must be rejected");
 
         assert!(
@@ -1224,7 +1256,7 @@ mod tests {
         let selected = ["/repos/mik".to_owned()];
 
         assert!(
-            in_candidate_order(&candidates, &selected).is_err(),
+            in_candidate_order(messages(), &candidates, &selected).is_err(),
             "the key must match a candidate exactly"
         );
     }
@@ -1298,7 +1330,7 @@ mod tests {
         let (calls, runner) = recording(Vec::new());
         let mut written = Vec::new();
 
-        let summary = fetch_each(&targets, PruneMode::Prune, &mut written, runner)
+        let summary = fetch_each(messages(), &targets, PruneMode::Prune, &mut written, runner)
             .expect("a successful run should not fail");
 
         assert_eq!(summary.succeeded, 3);
@@ -1325,7 +1357,7 @@ mod tests {
         let targets: Vec<&SiblingRepository> = candidates.iter().collect();
         let mut written = Vec::new();
 
-        fetch_each(&targets, PruneMode::Keep, &mut written, succeed)
+        fetch_each(messages(), &targets, PruneMode::Keep, &mut written, succeed)
             .expect("the run should succeed");
 
         let text = String::from_utf8(written).expect("the progress should be utf-8");
@@ -1342,7 +1374,7 @@ mod tests {
         let (calls, runner) = recording(vec![Ok(()), run_failure(), Ok(())]);
         let mut written = Vec::new();
 
-        let summary = fetch_each(&targets, PruneMode::Keep, &mut written, runner)
+        let summary = fetch_each(messages(), &targets, PruneMode::Keep, &mut written, runner)
             .expect("a repository failure is recorded, not propagated");
 
         assert_eq!(summary.succeeded, 2);
@@ -1357,7 +1389,7 @@ mod tests {
         let (calls, runner) = recording(vec![Ok(()), Err(Error::GitNotFound), Ok(())]);
         let mut written = Vec::new();
 
-        let err = fetch_each(&targets, PruneMode::Keep, &mut written, runner)
+        let err = fetch_each(messages(), &targets, PruneMode::Keep, &mut written, runner)
             .expect_err("a broken environment must stop the run");
 
         assert!(
@@ -1382,7 +1414,7 @@ mod tests {
         })]);
         let mut written = Vec::new();
 
-        let err = fetch_each(&targets, PruneMode::Keep, &mut written, runner)
+        let err = fetch_each(messages(), &targets, PruneMode::Keep, &mut written, runner)
             .expect_err("a broken environment must stop the run");
 
         assert!(
@@ -1400,7 +1432,7 @@ mod tests {
         };
 
         assert!(!summary.has_failure());
-        assert_eq!(summary_line(&summary), "成功 3 件 / 失敗 0 件");
+        assert_eq!(summary_line(messages(), &summary), "成功 3 件 / 失敗 0 件");
     }
 
     #[test]
@@ -1411,7 +1443,7 @@ mod tests {
         };
 
         assert!(summary.has_failure());
-        let line = summary_line(&summary);
+        let line = summary_line(messages(), &summary);
         assert!(
             line.contains("成功 1 件 / 失敗 2 件"),
             "both counts should be shown: {line}"
@@ -1427,12 +1459,132 @@ mod tests {
     fn a_line_is_written_to_the_given_writer() {
         let mut written = Vec::new();
 
-        report_line(&mut written, SINGLE_SIBLING_REASON)
-            .expect("writing to a buffer should succeed");
+        let reason = messages().fetch().single_sibling_reason();
+
+        report_line(messages(), &mut written, reason).expect("writing to a buffer should succeed");
 
         assert_eq!(
             String::from_utf8(written).expect("the message should be utf-8"),
-            format!("{SINGLE_SIBLING_REASON}\n")
+            format!("{reason}\n")
+        );
+    }
+
+    // --- 文言（FR-27） ---
+
+    /// 引数を取らない文言をまとめて取り出す。
+    fn plain_texts(language: Language) -> Vec<&'static str> {
+        let fetch = language.messages().fetch();
+
+        vec![
+            fetch.all_remotes_label(),
+            fetch.no_remotes(),
+            fetch.url_section(),
+            fetch.tracking_section(),
+            fetch.sibling_scan_failed(),
+            fetch.no_sibling_candidates(),
+            fetch.single_sibling_reason(),
+            fetch.siblings_header(),
+            fetch.prune_scope_note(),
+            fetch.tracking_state_section(),
+            fetch.partial_failure(),
+        ]
+    }
+
+    /// 引数を取る文言と、そこへ展開されるべき引数。
+    fn texts_with_arguments(language: Language) -> Vec<(String, &'static str)> {
+        let fetch = language.messages().fetch();
+
+        vec![
+            (fetch.remote_description("origin"), "origin"),
+            (fetch.fixed_target("the remote `origin`"), "origin"),
+            (fetch.fetch_failed("the remote `origin`"), "origin"),
+            (fetch.selection_not_found("elsewhere"), "elsewhere"),
+            (fetch.excluded_count(2), "2"),
+            (
+                fetch.path_not_utf8(Path::new("/repos/alpha")),
+                "/repos/alpha",
+            ),
+            (
+                fetch.sibling_selection_not_found("/repos/alpha, /repos/zulu"),
+                "/repos/zulu",
+            ),
+            (fetch.sibling_start_failed("alpha"), "alpha"),
+        ]
+    }
+
+    #[test]
+    fn every_fetch_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            for text in plain_texts(language) {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+        }
+    }
+
+    #[test]
+    fn every_fetch_message_expands_its_arguments() {
+        for language in [Language::Japanese, Language::English] {
+            for (text, argument) in texts_with_arguments(language) {
+                assert!(
+                    text.contains(argument),
+                    "{language:?} must mention `{argument}`: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_fetch_wording_is_translated() {
+        for (japanese, english) in plain_texts(Language::Japanese)
+            .into_iter()
+            .zip(plain_texts(Language::English))
+        {
+            assert_ne!(japanese, english, "the wording must be translated");
+        }
+
+        for ((japanese, _), (english, _)) in texts_with_arguments(Language::Japanese)
+            .into_iter()
+            .zip(texts_with_arguments(Language::English))
+        {
+            assert_ne!(japanese, english, "the wording must be translated");
+        }
+    }
+
+    #[test]
+    fn the_english_summary_of_a_sibling_run_is_translated_as_well() {
+        // 集計は `gz pull` と共有する語彙から引く（[`CommonMessages::run_summary`]）
+        let summary = FetchSummary {
+            succeeded: 1,
+            failed: vec!["alpha".to_owned()],
+        };
+
+        let japanese = summary_line(Language::Japanese.messages(), &summary);
+        let english = summary_line(Language::English.messages(), &summary);
+
+        assert_ne!(japanese, english, "the summary must be translated");
+        assert!(
+            english.contains('1') && english.contains("alpha"),
+            "the counts and the failed repository should be shown: {english}"
+        );
+        assert_eq!(english.lines().count(), 1, "1 行に収める: {english}");
+    }
+
+    #[test]
+    fn the_english_header_keeps_the_sections_on_one_line() {
+        let header = sibling_header(
+            Language::English.messages(),
+            &scan(siblings(), 2),
+            PruneMode::Prune,
+        );
+
+        assert_eq!(header.lines().count(), 1, "1 行に収める: {header}");
+        assert!(
+            header.contains(HEADER_SEPARATOR),
+            "the sections should be separated: {header}"
+        );
+        assert!(
+            header.contains(PRUNE_OPTION),
+            "the option name is not translated: {header}"
         );
     }
 }

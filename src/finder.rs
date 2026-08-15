@@ -18,15 +18,13 @@ use std::path::{Path, PathBuf};
 use skim::prelude::*;
 
 use crate::error::{Error, Result};
-use crate::git::exec::{capture_git, capture_git_in};
+use crate::git::exec::{capture_git_display, capture_git_display_in};
+use crate::i18n::Messages;
 
 /// ファイル内容のプレビューで読み込む最大バイト数。
 ///
 /// 巨大なファイルを選択した際にプレビュー生成で待たされないよう上限を設ける。
 const FILE_PREVIEW_LIMIT: usize = 64 * 1024;
-
-/// 内容が上限で打ち切られたことを示す注記。
-const TRUNCATION_NOTICE: &str = "\n… （以降は省略しました）";
 
 /// [`PreviewSource::Composite`] のセクション見出しの前置き。
 const SECTION_HEADING_PREFIX: &str = "── ";
@@ -79,21 +77,29 @@ pub enum PreviewSource {
 
 /// `git <args>` を実行してプレビュー本文を得る。
 ///
+/// プレビュー本文は fuzgit が解釈せずそのまま画面へ描画されるため、git の実行は
+/// **(B) 系**（[`capture_git_display`]）で行い、解決された表示言語を子プロセスへ伝える。
+///
 /// 失敗した場合も選択操作を止めず、表示用のメッセージを `Err` として返す
 /// （呼び出し側がプレビュー領域へ出す）。
-fn render_git(args: &[String]) -> std::result::Result<String, String> {
+fn render_git(messages: &dyn Messages, args: &[String]) -> std::result::Result<String, String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    capture_git(&args)
+    capture_git_display(messages.language(), &args)
         .map(|stdout| String::from_utf8_lossy(&stdout).into_owned())
         .map_err(|err| err.to_string())
 }
 
 /// `directory` をカレントディレクトリとして `git <args>` を実行し、プレビュー本文を得る。
 ///
-/// [`render_git`] と同じく、失敗しても選択操作を止めず表示用のメッセージを `Err` として返す。
-fn render_git_in(directory: &Path, args: &[String]) -> std::result::Result<String, String> {
+/// [`render_git`] と同じく (B) 系で実行し、失敗しても選択操作を止めず表示用のメッセージを
+/// `Err` として返す。
+fn render_git_in(
+    messages: &dyn Messages,
+    directory: &Path,
+    args: &[String],
+) -> std::result::Result<String, String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    capture_git_in(directory, &args)
+    capture_git_display_in(messages.language(), directory, &args)
         .map(|stdout| String::from_utf8_lossy(&stdout).into_owned())
         .map_err(|err| err.to_string())
 }
@@ -101,9 +107,8 @@ fn render_git_in(directory: &Path, args: &[String]) -> std::result::Result<Strin
 /// ファイルの内容を読んでプレビュー本文を得る。
 ///
 /// 読み取れない場合も選択操作を止めず、表示用のメッセージを `Err` として返す。
-fn render_file(path: &Path) -> std::result::Result<String, String> {
-    read_preview(path)
-        .map_err(|err| format!("{path} を読み込めません: {err}", path = path.display()))
+fn render_file(messages: &dyn Messages, path: &Path) -> std::result::Result<String, String> {
+    read_preview(messages, path).map_err(|err| messages.finder().file_read_failed(path, &err))
 }
 
 /// セクションの見出し行を組み立てる。
@@ -115,15 +120,15 @@ fn section_heading(label: &str) -> String {
 ///
 /// 失敗したソースはエラーメッセージを本文として返す。連結表示の一部が取れなかった
 /// ことを利用者に見せるためであり、失敗を無かったことにはしない。
-fn render(source: &PreviewSource) -> String {
+fn render(messages: &dyn Messages, source: &PreviewSource) -> String {
     match source {
         PreviewSource::None => String::new(),
-        PreviewSource::Git(args) => render_git(args).unwrap_or_else(|message| message),
+        PreviewSource::Git(args) => render_git(messages, args).unwrap_or_else(|message| message),
         PreviewSource::GitIn { directory, args } => {
-            render_git_in(directory, args).unwrap_or_else(|message| message)
+            render_git_in(messages, directory, args).unwrap_or_else(|message| message)
         }
-        PreviewSource::File(path) => render_file(path).unwrap_or_else(|message| message),
-        PreviewSource::Composite(sections) => render_composite(sections),
+        PreviewSource::File(path) => render_file(messages, path).unwrap_or_else(|message| message),
+        PreviewSource::Composite(sections) => render_composite(messages, sections),
     }
 }
 
@@ -132,11 +137,11 @@ fn render(source: &PreviewSource) -> String {
 /// 本文が空（空白のみを含む）になったセクションは見出しごと省略する。
 /// 該当しない観点（staged の変更が無いファイルの「staged」など）の見出しだけが並ぶと、
 /// プレビューの限られた表示領域が意味の無い行で埋まるため。
-fn render_composite(sections: &[(String, PreviewSource)]) -> String {
+fn render_composite(messages: &dyn Messages, sections: &[(String, PreviewSource)]) -> String {
     sections
         .iter()
         .filter_map(|(label, source)| {
-            let body = render(source);
+            let body = render(messages, source);
             if body.trim().is_empty() {
                 return None;
             }
@@ -155,7 +160,10 @@ fn render_composite(sections: &[(String, PreviewSource)]) -> String {
 ///
 /// 内容が UTF-8 でない場合（バイナリファイル等）も選択操作を止めたくないため、
 /// ここではロッシー変換を行う。表示のみに使う値であり、git へ渡す値ではない。
-fn read_preview(path: &Path) -> std::io::Result<String> {
+///
+/// 打ち切りが起きた場合は、その旨の注記（[`crate::i18n::messages::FinderMessages`]）を
+/// 末尾へ添えるため `messages` を受け取る。
+fn read_preview(messages: &dyn Messages, path: &Path) -> std::io::Result<String> {
     let mut buffer = Vec::new();
     // 打ち切りを検出するために上限より 1 バイト多く読む
     std::fs::File::open(path)?
@@ -167,7 +175,10 @@ fn read_preview(path: &Path) -> std::io::Result<String> {
 
     let mut text = String::from_utf8_lossy(&buffer).into_owned();
     if truncated {
-        text.push_str(TRUNCATION_NOTICE);
+        // 注記は本文の続きではないため改行で区切る。区切りは装飾であり文言ではないので
+        // ここで付け、[`FinderMessages::truncation_notice`] は注記そのものだけを返す
+        text.push('\n');
+        text.push_str(messages.finder().truncation_notice());
     }
     Ok(text)
 }
@@ -178,19 +189,38 @@ pub struct FinderItem {
     /// 一覧表示および絞り込み対象となる文字列。
     display: String,
     /// 決定時に呼び出し側へ返す値（ブランチ名・コミットハッシュ・パス等）。
+    ///
+    /// **決して翻訳しない。**この値は候補一覧との照合検証を経て git の引数になるため、
+    /// 言語によって変わると検証も git 実行も壊れる。
     key: String,
     /// プレビュー生成方法。
     preview: PreviewSource,
+    /// プレビュー生成に用いる文言一式（＝表示言語）。
+    ///
+    /// [`SkimItem::preview`] は skim から呼ばれるため引数を足せない。したがって
+    /// アイテム自身が言語を持つ必要がある。**必須フィールドであり `Option` にはしない**
+    /// （未設定を許すと、その場合に何語で出すかという暗黙のフォールバックが生まれるため）。
+    /// 実体はフィールドを持たない ZST への `&'static` 参照であり、`Clone` のコストは変わらない。
+    messages: &'static dyn Messages,
 }
 
 impl FinderItem {
     /// 候補アイテムを生成する。
+    ///
+    /// `messages` には解決済みの表示言語（`language.messages()`）を渡す。
+    /// プレビューで実行する git は (B) 系となり、この言語が子プロセスへ伝播する。
     #[must_use]
-    pub fn new(display: String, key: String, preview: PreviewSource) -> Self {
+    pub fn new(
+        display: String,
+        key: String,
+        preview: PreviewSource,
+        messages: &'static dyn Messages,
+    ) -> Self {
         Self {
             display,
             key,
             preview,
+            messages,
         }
     }
 
@@ -213,22 +243,26 @@ impl SkimItem for FinderItem {
     fn preview(&self, _context: PreviewContext) -> ItemPreview {
         match &self.preview {
             PreviewSource::None => ItemPreview::Text(String::new()),
-            PreviewSource::Git(args) => match render_git(args) {
+            PreviewSource::Git(args) => match render_git(self.messages, args) {
                 Ok(text) => ItemPreview::AnsiText(text),
                 // プレビュー失敗で選択操作全体を中断させたくないため、
                 // エラー内容をプレビュー領域に表示するに留める
                 Err(message) => ItemPreview::Text(message),
             },
-            PreviewSource::GitIn { directory, args } => match render_git_in(directory, args) {
-                Ok(text) => ItemPreview::AnsiText(text),
-                Err(message) => ItemPreview::Text(message),
-            },
-            // ファイル内容は git の出力と違い色付けされていないため、そのまま表示する
-            PreviewSource::File(path) => {
-                ItemPreview::Text(render_file(path).unwrap_or_else(|message| message))
+            PreviewSource::GitIn { directory, args } => {
+                match render_git_in(self.messages, directory, args) {
+                    Ok(text) => ItemPreview::AnsiText(text),
+                    Err(message) => ItemPreview::Text(message),
+                }
             }
+            // ファイル内容は git の出力と違い色付けされていないため、そのまま表示する
+            PreviewSource::File(path) => ItemPreview::Text(
+                render_file(self.messages, path).unwrap_or_else(|message| message),
+            ),
             // 連結結果には git の出力（色付き）が混ざり得るため ANSI として扱う
-            PreviewSource::Composite(sections) => ItemPreview::AnsiText(render_composite(sections)),
+            PreviewSource::Composite(sections) => {
+                ItemPreview::AnsiText(render_composite(self.messages, sections))
+            }
         }
     }
 }
@@ -451,12 +485,14 @@ pub fn select_many_with(items: Vec<FinderItem>, options: &FinderOptions) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Language;
 
     fn item() -> FinderItem {
         FinderItem::new(
             "* main".to_string(),
             "main".to_string(),
             PreviewSource::Git(vec!["log".to_string(), "--oneline".to_string()]),
+            Language::Japanese.messages(),
         )
     }
 
@@ -484,7 +520,12 @@ mod tests {
 
     #[test]
     fn preview_of_a_non_previewable_item_is_empty_text() {
-        let item = FinderItem::new("main".to_string(), "main".to_string(), PreviewSource::None);
+        let item = FinderItem::new(
+            "main".to_string(),
+            "main".to_string(),
+            PreviewSource::None,
+            Language::Japanese.messages(),
+        );
 
         match item.preview(preview_context()) {
             ItemPreview::Text(text) => assert!(text.is_empty()),
@@ -497,8 +538,11 @@ mod tests {
         let dir = crate::test_support::TempDir::new("finder-file-preview");
         crate::test_support::write_file(dir.path(), "untracked.txt", "line 1\nline 2\n");
 
-        let text = read_preview(&dir.path().join("untracked.txt"))
-            .expect("an existing file should be readable");
+        let text = read_preview(
+            Language::Japanese.messages(),
+            &dir.path().join("untracked.txt"),
+        )
+        .expect("an existing file should be readable");
 
         assert_eq!(text, "line 1\nline 2\n");
     }
@@ -509,11 +553,65 @@ mod tests {
         let contents = "x".repeat(FILE_PREVIEW_LIMIT + 100);
         crate::test_support::write_file(dir.path(), "large.txt", &contents);
 
-        let text =
-            read_preview(&dir.path().join("large.txt")).expect("a large file should be readable");
+        let messages = Language::Japanese.messages();
+        let text = read_preview(messages, &dir.path().join("large.txt"))
+            .expect("a large file should be readable");
 
-        assert_eq!(text.len(), FILE_PREVIEW_LIMIT + TRUNCATION_NOTICE.len());
-        assert!(text.ends_with(TRUNCATION_NOTICE), "the notice is missing");
+        let notice = messages.finder().truncation_notice();
+        // 本文と注記は改行 1 つで区切られる
+        assert_eq!(text.len(), FILE_PREVIEW_LIMIT + "\n".len() + notice.len());
+        assert!(text.ends_with(notice), "the notice is missing");
+    }
+
+    #[test]
+    fn the_truncation_notice_is_translated() {
+        let dir = crate::test_support::TempDir::new("finder-file-preview-large-en");
+        let contents = "x".repeat(FILE_PREVIEW_LIMIT + 100);
+        crate::test_support::write_file(dir.path(), "large.txt", &contents);
+        let path = dir.path().join("large.txt");
+
+        let japanese = read_preview(Language::Japanese.messages(), &path)
+            .expect("a large file should be readable");
+        let english = read_preview(Language::English.messages(), &path)
+            .expect("a large file should be readable");
+
+        assert_ne!(japanese, english, "the notice must be translated");
+        assert!(japanese.ends_with(Language::Japanese.messages().finder().truncation_notice()));
+        assert!(english.ends_with(Language::English.messages().finder().truncation_notice()));
+    }
+
+    #[test]
+    fn a_short_file_preview_carries_no_notice_in_either_language() {
+        // 打ち切りが起きていない本文に注記が混ざらないこと（言語を問わない）
+        let dir = crate::test_support::TempDir::new("finder-file-preview-short");
+        crate::test_support::write_file(dir.path(), "small.txt", "line 1\n");
+        let path = dir.path().join("small.txt");
+
+        for language in [Language::Japanese, Language::English] {
+            let text =
+                read_preview(language.messages(), &path).expect("a small file should be readable");
+
+            assert_eq!(text, "line 1\n", "{language:?} must not add a notice");
+        }
+    }
+
+    #[test]
+    fn the_file_read_failure_is_translated_and_names_the_path() {
+        let dir = crate::test_support::TempDir::new("finder-file-preview-missing-languages");
+        let missing = dir.path().join("missing.txt");
+
+        let japanese = render_file(Language::Japanese.messages(), &missing)
+            .expect_err("a missing file must not be readable");
+        let english = render_file(Language::English.messages(), &missing)
+            .expect_err("a missing file must not be readable");
+
+        assert_ne!(japanese, english, "the message must be translated");
+        for message in [&japanese, &english] {
+            assert!(
+                message.contains(&missing.display().to_string()),
+                "the path should be named: {message}"
+            );
+        }
     }
 
     #[test]
@@ -524,6 +622,7 @@ mod tests {
             "missing.txt".to_string(),
             "missing.txt".to_string(),
             PreviewSource::File(missing.clone()),
+            Language::Japanese.messages(),
         );
 
         match item.preview(preview_context()) {
@@ -549,6 +648,7 @@ mod tests {
                 directory: dir.path().to_path_buf(),
                 args: vec!["rev-parse".to_string(), "HEAD".to_string()],
             },
+            Language::Japanese.messages(),
         );
 
         match item.preview(preview_context()) {
@@ -569,6 +669,7 @@ mod tests {
                 directory: dir.path().to_path_buf(),
                 args: vec!["fuzgit-no-such-subcommand".to_string()],
             },
+            Language::Japanese.messages(),
         );
 
         match item.preview(preview_context()) {
@@ -594,7 +695,10 @@ mod tests {
             },
         )];
 
-        assert_eq!(render_composite(&sections), format!("── HEAD ──\n{head}"));
+        assert_eq!(
+            render_composite(Language::Japanese.messages(), &sections),
+            format!("── HEAD ──\n{head}")
+        );
     }
 
     /// 内容が固定のセクションを作る（git を実行せずに連結結果だけを検証するため）。
@@ -621,7 +725,7 @@ mod tests {
             ),
         ];
 
-        let text = render_composite(&sections);
+        let text = render_composite(Language::Japanese.messages(), &sections);
 
         assert_eq!(
             text,
@@ -637,7 +741,10 @@ mod tests {
             text_section(&dir, "new.txt", "hello\n"),
         )];
 
-        assert_eq!(render_composite(&sections), "── untracked ──\nhello");
+        assert_eq!(
+            render_composite(Language::Japanese.messages(), &sections),
+            "── untracked ──\nhello"
+        );
     }
 
     #[test]
@@ -654,7 +761,7 @@ mod tests {
             ),
         ];
 
-        let text = render_composite(&sections);
+        let text = render_composite(Language::Japanese.messages(), &sections);
 
         assert!(
             !text.contains("staged ──\n\n"),
@@ -670,12 +777,15 @@ mod tests {
             ("unstaged".to_string(), PreviewSource::None),
         ];
 
-        assert_eq!(render_composite(&sections), "");
+        assert_eq!(
+            render_composite(Language::Japanese.messages(), &sections),
+            ""
+        );
     }
 
     #[test]
     fn a_composite_without_sections_is_empty() {
-        assert_eq!(render_composite(&[]), "");
+        assert_eq!(render_composite(Language::Japanese.messages(), &[]), "");
     }
 
     #[test]
@@ -685,7 +795,7 @@ mod tests {
         let missing = dir.path().join("missing.txt");
         let sections = vec![("staged".to_string(), PreviewSource::File(missing.clone()))];
 
-        let text = render_composite(&sections);
+        let text = render_composite(Language::Japanese.messages(), &sections);
 
         assert!(text.starts_with("── staged ──\n"), "unexpected: {text}");
         assert!(
@@ -704,6 +814,7 @@ mod tests {
                 "staged".to_string(),
                 text_section(&dir, "staged.txt", "+staged line\n"),
             )]),
+            Language::Japanese.messages(),
         );
 
         match item.preview(preview_context()) {
@@ -726,7 +837,7 @@ mod tests {
         )];
 
         assert_eq!(
-            render_composite(&sections),
+            render_composite(Language::Japanese.messages(), &sections),
             "── outer ──\n── inner ──\nbody"
         );
     }
@@ -779,16 +890,47 @@ mod tests {
             "M  src/main.rs".to_string(),
             "src/main.rs".to_string(),
             PreviewSource::None,
+            Language::Japanese.messages(),
         );
         let unstaged = FinderItem::new(
             " M src/main.rs".to_string(),
             "src/main.rs".to_string(),
             PreviewSource::None,
+            Language::Japanese.messages(),
         );
 
         // 判定はキーではなく表示文字列の完全一致で行われる
         assert!(selector.should_select(0, &staged));
         assert!(!selector.should_select(1, &unstaged));
+    }
+
+    #[test]
+    fn the_preselection_matches_the_display_string_regardless_of_the_display_language() {
+        // 事前選択は表示文字列の完全一致で判定される。fuzgit 自身の文言（FinderMessages）は
+        // display に入らないため、表示言語を変えても同じ display は同じように事前選択される
+        // （`items()` と `preselect()` が同じ組み立て関数を使う依存関係が保たれている証拠）
+        let display = "M  src/main.rs".to_string();
+
+        for language in [Language::Japanese, Language::English] {
+            let options = build_options(
+                &FinderOptions::new(SelectionMode::Multi).with_preselect(vec![display.clone()]),
+            )
+            .expect("options should build");
+            let selector = options
+                .selector
+                .expect("multi mode should install a selector");
+            let item = FinderItem::new(
+                display.clone(),
+                "src/main.rs".to_string(),
+                PreviewSource::None,
+                language.messages(),
+            );
+
+            assert!(
+                selector.should_select(0, &item),
+                "{language:?} must not change the display string used for matching"
+            );
+        }
     }
 
     #[test]
@@ -800,6 +942,7 @@ mod tests {
             "M  src/main.rs".to_string(),
             "src/main.rs".to_string(),
             PreviewSource::None,
+            Language::Japanese.messages(),
         );
 
         assert!(selector.should_select(0, &staged));
@@ -814,6 +957,7 @@ mod tests {
             "?? notes.txt".to_string(),
             "notes.txt".to_string(),
             PreviewSource::None,
+            Language::Japanese.messages(),
         );
 
         assert!(!selector.should_select(0, &other));
@@ -829,6 +973,7 @@ mod tests {
                 display.to_string(),
                 display.to_string(),
                 PreviewSource::None,
+                Language::Japanese.messages(),
             )
         });
 

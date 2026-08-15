@@ -19,6 +19,7 @@ use crate::finder::{
 };
 use crate::git::exec::{pathspec, run_git};
 use crate::git::read::{ChangeScope, FileChange, Operation, changes};
+use crate::i18n::{Language, Messages};
 
 /// 「コンフリクトファイルの確認」項目の finder キー。
 const CONFLICTS_KEY: &str = "conflicts";
@@ -46,22 +47,6 @@ const REBASE_SKIP_ARGS: [&str; 2] = ["rebase", "--skip"];
 
 /// `git rebase --abort` の引数。
 const REBASE_ABORT_ARGS: [&str; 2] = ["rebase", "--abort"];
-
-/// 「コンフリクトファイルの確認」項目のラベル。
-const CONFLICTS_LABEL: &str = "コンフリクトファイルを確認して解決済みにする (git add)";
-
-/// 「skip」項目のラベル。rebase はコミットを 1 件ずつ適用するため、この操作を持つ。
-const SKIP_LABEL: &str = "現在のコミットを飛ばす";
-
-/// コンフリクトファイル一覧の上部に固定表示する操作説明。
-const CONFLICTS_HEADER: &str = "Tab: 選択の切替 / Enter: 選択したファイルを解決済みとして stage";
-
-/// 未解決のファイルが 1 件も無い場合の案内。
-///
-/// 異常ではないが、何も起きずに終わると「選んだのに反応が無い」状態になるため、
-/// 原因（未解決のファイルが無い）と次に取れる操作（continue）を伝えて終了する。
-const NO_CONFLICTS_MESSAGE: &str = "コンフリクト中のファイルはありません。\
-すべて解決済みであれば、メニューの continue で処理を再開してください";
 
 /// 復帰メニューで選べる操作。
 ///
@@ -101,17 +86,25 @@ struct MenuEntry {
 /// 選択（中断を含む）、コンフリクトファイル一覧の取得、`git add` および
 /// `git merge` / `git rebase` の実行に失敗した場合にエラーを返す。
 /// abort の確認プロンプトで承認が得られなかった場合は [`crate::error::Error::Cancelled`]。
-pub fn run(repository: &gix::Repository, operation: Operation) -> Result<()> {
-    let entries = menu(operation);
-    let items = entries.iter().map(to_item).collect();
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    operation: Operation,
+) -> Result<()> {
+    let entries = menu(messages, operation);
+    let items = entries
+        .iter()
+        .map(|entry| to_item(language, entry))
+        .collect();
 
     let selected = select_one(items)?;
-    let entry = resolve_entry(&entries, &selected)?;
+    let entry = resolve_entry(messages, &entries, &selected)?;
 
     match entry.action {
-        MenuAction::ShowConflicts => stage_resolved(repository),
-        MenuAction::Proceed(args) => execute(args),
-        MenuAction::Abort(args) => abort(operation, args),
+        MenuAction::ShowConflicts => stage_resolved(language, messages, repository),
+        MenuAction::Proceed(args) => execute(language, messages, args),
+        MenuAction::Abort(args) => abort(language, messages, operation, args),
     }
 }
 
@@ -127,46 +120,47 @@ fn operation_name(operation: Operation) -> &'static str {
 ///
 /// merge には `--skip` が無い（merge は 1 度の操作であり「飛ばす対象のコミット」を持たない）ため、
 /// 項目の有無を真偽値で切り替えず、操作ごとに項目の並びそのものを列挙する。
-fn menu(operation: Operation) -> Vec<MenuEntry> {
+fn menu(messages: &dyn Messages, operation: Operation) -> Vec<MenuEntry> {
     let name = operation_name(operation);
+    let in_progress = messages.in_progress();
 
     match operation {
         Operation::Merge => vec![
             entry(
                 CONFLICTS_KEY,
-                CONFLICTS_LABEL.to_owned(),
+                in_progress.conflicts_action().to_owned(),
                 MenuAction::ShowConflicts,
             ),
             entry(
                 CONTINUE_KEY,
-                format!("{name} を再開する"),
+                in_progress.continue_action(name),
                 MenuAction::Proceed(&MERGE_CONTINUE_ARGS),
             ),
             entry(
                 ABORT_KEY,
-                format!("{name} を中止する"),
+                in_progress.abort_action(name),
                 MenuAction::Abort(&MERGE_ABORT_ARGS),
             ),
         ],
         Operation::Rebase => vec![
             entry(
                 CONFLICTS_KEY,
-                CONFLICTS_LABEL.to_owned(),
+                in_progress.conflicts_action().to_owned(),
                 MenuAction::ShowConflicts,
             ),
             entry(
                 CONTINUE_KEY,
-                format!("{name} を再開する"),
+                in_progress.continue_action(name),
                 MenuAction::Proceed(&REBASE_CONTINUE_ARGS),
             ),
             entry(
                 SKIP_KEY,
-                SKIP_LABEL.to_owned(),
+                in_progress.skip_action().to_owned(),
                 MenuAction::Proceed(&REBASE_SKIP_ARGS),
             ),
             entry(
                 ABORT_KEY,
-                format!("{name} を中止する"),
+                in_progress.abort_action(name),
                 MenuAction::Abort(&REBASE_ABORT_ARGS),
             ),
         ],
@@ -193,11 +187,12 @@ fn entry(key: &'static str, label: String, action: MenuAction) -> MenuEntry {
 }
 
 /// メニュー項目を finder のアイテムへ変換する。
-fn to_item(entry: &MenuEntry) -> FinderItem {
+fn to_item(language: Language, entry: &MenuEntry) -> FinderItem {
     FinderItem::new(
         entry.display.clone(),
         entry.key.to_owned(),
         PreviewSource::Git(status_preview_args()),
+        language.messages(),
     )
 }
 
@@ -207,23 +202,23 @@ fn to_item(entry: &MenuEntry) -> FinderItem {
 ///
 /// 選択されたキーがメニューに含まれない場合にエラーを返す（対象を取り違えたまま
 /// git 操作を実行しないよう、暗黙に読み飛ばさない）。
-fn resolve_entry<'a>(entries: &'a [MenuEntry], selected: &str) -> Result<&'a MenuEntry> {
+fn resolve_entry<'a>(
+    messages: &dyn Messages,
+    entries: &'a [MenuEntry],
+    selected: &str,
+) -> Result<&'a MenuEntry> {
     entries
         .iter()
         .find(|entry| entry.key == selected)
-        .ok_or_else(|| anyhow!("選択されたメニュー項目 `{selected}` が見つかりません"))
+        .ok_or_else(|| anyhow!(messages.in_progress().menu_selection_not_found(selected)))
 }
 
 /// continue / skip を継承 stdio で実行する。
 ///
 /// コミットメッセージの入力が必要な場合のエディタ起動は git に委ねる。
-fn execute(args: &[&str]) -> Result<()> {
-    run_git(args).with_context(|| {
-        format!(
-            "{command} の実行に失敗しました",
-            command = command_display(args)
-        )
-    })
+fn execute(language: Language, messages: &dyn Messages, args: &[&str]) -> Result<()> {
+    run_git(language, args)
+        .with_context(|| messages.common().command_run_failed(&command_display(args)))
 }
 
 /// 確認を取ってから abort を実行する。
@@ -232,21 +227,28 @@ fn execute(args: &[&str]) -> Result<()> {
 ///
 /// 承認が得られなかった場合は [`crate::error::Error::Cancelled`]、
 /// git の実行に失敗した場合はそのエラーを返す。
-fn abort(operation: Operation, args: &[&str]) -> Result<()> {
+fn abort(
+    language: Language,
+    messages: &dyn Messages,
+    operation: Operation,
+    args: &[&str],
+) -> Result<()> {
     // abort はここまでの解決作業を巻き戻す取り消し不能な操作であるため、
     // 実行するコマンドを示したうえで明示的な同意を求める
-    confirm(&abort_header(operation), &[&command_display(args)])?;
+    confirm(
+        messages,
+        &abort_header(messages, operation),
+        &[&command_display(args)],
+    )?;
 
-    execute(args)
+    execute(language, messages, args)
 }
 
 /// abort の確認プロンプトに示す、失われるものの説明。
-fn abort_header(operation: Operation) -> String {
-    format!(
-        "{name} を中止すると、これまでのコンフリクトの解決内容（stage 済みのものを含む）は失われ、\
-{name} を開始する前の状態に戻ります",
-        name = operation_name(operation)
-    )
+fn abort_header(messages: &dyn Messages, operation: Operation) -> String {
+    messages
+        .in_progress()
+        .abort_confirmation(operation_name(operation))
 }
 
 /// コンフリクト中のファイルを複数選択し、解決済みとして stage する。
@@ -255,29 +257,34 @@ fn abort_header(operation: Operation) -> String {
 ///
 /// 一覧の取得、選択（中断を含む）、`git add` の実行に失敗した場合にエラーを返す。
 /// 未解決のファイルが 1 件も無い場合も、その旨を示して失敗として返す。
-fn stage_resolved(repository: &gix::Repository) -> Result<()> {
+fn stage_resolved(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+) -> Result<()> {
     let conflicts = changes(repository, ChangeScope::Unmerged)
-        .context("コンフリクト中のファイル一覧の取得に失敗しました")?;
+        .context(messages.in_progress().conflicts_read_failed())?;
     if conflicts.is_empty() {
-        bail!("{NO_CONFLICTS_MESSAGE}");
+        bail!(messages.in_progress().no_conflicts());
     }
 
     let mut candidates = Vec::with_capacity(conflicts.len());
     let mut items = Vec::with_capacity(conflicts.len());
     for change in &conflicts {
         let candidate = to_candidate(change);
-        items.push(to_conflict_item(&candidate));
+        items.push(to_conflict_item(language, &candidate));
         candidates.push(candidate);
     }
 
-    let options = FinderOptions::new(SelectionMode::Multi).with_header(CONFLICTS_HEADER.to_owned());
+    let options = FinderOptions::new(SelectionMode::Multi)
+        .with_header(messages.in_progress().conflicts_header().to_owned());
     let selected = select_many_with(items, &options)?;
-    let selected = resolve_files(&candidates, &selected)?;
+    let selected = resolve_files(messages, &candidates, &selected)?;
 
     let paths = target_paths(&selected);
     let arguments = add_args(&paths);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(&arguments).context("解決済みとしての stage（git add）に失敗しました")?;
+    run_git(language, &arguments).context(messages.in_progress().stage_failed())?;
 
     Ok(())
 }
@@ -291,11 +298,12 @@ fn to_candidate(change: &FileChange) -> FileCandidate {
 }
 
 /// コンフリクト中のファイルを finder のアイテムへ変換する。
-fn to_conflict_item(candidate: &FileCandidate) -> FinderItem {
+fn to_conflict_item(language: Language, candidate: &FileCandidate) -> FinderItem {
     FinderItem::new(
         candidate.display.clone(),
         candidate.key.clone(),
         PreviewSource::Git(preview_args(&candidate.key)),
+        language.messages(),
     )
 }
 
@@ -338,9 +346,14 @@ mod tests {
     }
 
     fn find(entries: &[MenuEntry], key: &str) -> MenuEntry {
-        resolve_entry(entries, key)
+        resolve_entry(Language::Japanese.messages(), entries, key)
             .expect("the key should belong to the menu")
             .clone()
+    }
+
+    /// 日本語のメニュー（既存のアサーションが対象とする言語）。
+    fn japanese_menu(operation: Operation) -> Vec<MenuEntry> {
+        menu(Language::Japanese.messages(), operation)
     }
 
     /// `shared.txt` の変更が衝突する 2 ブランチを持つテストリポジトリを用意する。
@@ -366,7 +379,7 @@ mod tests {
     fn the_merge_menu_has_no_skip_entry() {
         // merge は 1 度の操作であり、飛ばす対象のコミットを持たない
         assert_eq!(
-            keys(&menu(Operation::Merge)),
+            keys(&japanese_menu(Operation::Merge)),
             [CONFLICTS_KEY, CONTINUE_KEY, ABORT_KEY]
         );
     }
@@ -374,14 +387,14 @@ mod tests {
     #[test]
     fn the_rebase_menu_offers_skip_before_abort() {
         assert_eq!(
-            keys(&menu(Operation::Rebase)),
+            keys(&japanese_menu(Operation::Rebase)),
             [CONFLICTS_KEY, CONTINUE_KEY, SKIP_KEY, ABORT_KEY]
         );
     }
 
     #[test]
     fn the_merge_menu_runs_merge_subcommands_only() {
-        let entries = menu(Operation::Merge);
+        let entries = japanese_menu(Operation::Merge);
 
         assert_eq!(
             find(&entries, CONTINUE_KEY).action,
@@ -399,7 +412,7 @@ mod tests {
 
     #[test]
     fn the_rebase_menu_runs_rebase_subcommands_only() {
-        let entries = menu(Operation::Rebase);
+        let entries = japanese_menu(Operation::Rebase);
 
         assert_eq!(
             find(&entries, CONTINUE_KEY).action,
@@ -418,40 +431,49 @@ mod tests {
     #[test]
     fn every_entry_shows_the_command_it_runs() {
         assert_eq!(
-            find(&menu(Operation::Merge), CONTINUE_KEY).display,
+            find(&japanese_menu(Operation::Merge), CONTINUE_KEY).display,
             "merge を再開する (git merge --continue)"
         );
         assert_eq!(
-            find(&menu(Operation::Merge), ABORT_KEY).display,
+            find(&japanese_menu(Operation::Merge), ABORT_KEY).display,
             "merge を中止する (git merge --abort)"
         );
         assert_eq!(
-            find(&menu(Operation::Rebase), CONTINUE_KEY).display,
+            find(&japanese_menu(Operation::Rebase), CONTINUE_KEY).display,
             "rebase を再開する (git rebase --continue)"
         );
         assert_eq!(
-            find(&menu(Operation::Rebase), SKIP_KEY).display,
+            find(&japanese_menu(Operation::Rebase), SKIP_KEY).display,
             "現在のコミットを飛ばす (git rebase --skip)"
         );
         assert_eq!(
-            find(&menu(Operation::Rebase), ABORT_KEY).display,
+            find(&japanese_menu(Operation::Rebase), ABORT_KEY).display,
             "rebase を中止する (git rebase --abort)"
         );
     }
 
     #[test]
     fn the_conflicts_entry_is_the_same_for_both_operations() {
-        let merge = find(&menu(Operation::Merge), CONFLICTS_KEY);
-        let rebase = find(&menu(Operation::Rebase), CONFLICTS_KEY);
+        let merge = find(&japanese_menu(Operation::Merge), CONFLICTS_KEY);
+        let rebase = find(&japanese_menu(Operation::Rebase), CONFLICTS_KEY);
 
         assert_eq!(merge.display, rebase.display);
-        assert_eq!(merge.display, CONFLICTS_LABEL);
+        assert_eq!(
+            merge.display,
+            Language::Japanese
+                .messages()
+                .in_progress()
+                .conflicts_action()
+        );
     }
 
     #[test]
     fn an_item_is_identified_by_its_key_not_by_its_display() {
-        let entries = menu(Operation::Rebase);
-        let items: Vec<FinderItem> = entries.iter().map(to_item).collect();
+        let entries = japanese_menu(Operation::Rebase);
+        let items: Vec<FinderItem> = entries
+            .iter()
+            .map(|entry| to_item(Language::Japanese, entry))
+            .collect();
 
         assert_eq!(
             items.iter().map(FinderItem::key).collect::<Vec<_>>(),
@@ -469,9 +491,10 @@ mod tests {
 
     #[test]
     fn a_selected_key_resolves_to_its_entry() {
-        let entries = menu(Operation::Rebase);
+        let entries = japanese_menu(Operation::Rebase);
 
-        let entry = resolve_entry(&entries, SKIP_KEY).expect("skip belongs to the rebase menu");
+        let entry = resolve_entry(Language::Japanese.messages(), &entries, SKIP_KEY)
+            .expect("skip belongs to the rebase menu");
 
         assert_eq!(entry.action, MenuAction::Proceed(&["rebase", "--skip"]));
     }
@@ -479,7 +502,8 @@ mod tests {
     #[test]
     fn a_key_outside_of_the_menu_is_rejected() {
         // merge のメニューには skip が無いため、キーだけが渡ってきても解決できない
-        let err = resolve_entry(&menu(Operation::Merge), SKIP_KEY)
+        let messages = Language::Japanese.messages();
+        let err = resolve_entry(messages, &menu(messages, Operation::Merge), SKIP_KEY)
             .expect_err("an unknown key must be rejected");
 
         assert!(
@@ -490,7 +514,8 @@ mod tests {
 
     #[test]
     fn the_abort_confirmation_names_the_operation_and_what_is_lost() {
-        let header = abort_header(Operation::Merge);
+        let messages = Language::Japanese.messages();
+        let header = abort_header(messages, Operation::Merge);
 
         assert!(header.contains("merge"), "unexpected header: {header}");
         assert!(header.contains("失われ"), "unexpected header: {header}");
@@ -499,7 +524,7 @@ mod tests {
             "the other operation must not appear: {header}"
         );
         assert!(
-            abort_header(Operation::Rebase).contains("rebase"),
+            abort_header(messages, Operation::Rebase).contains("rebase"),
             "the rebase header should name rebase"
         );
     }
@@ -561,7 +586,7 @@ mod tests {
         );
         assert_eq!(candidates[0].paths, ["shared.txt"]);
         assert_eq!(
-            to_conflict_item(&candidates[0]).key(),
+            to_conflict_item(Language::Japanese, &candidates[0]).key(),
             "shared.txt",
             "the key must stay the path so that the selection resolves to it"
         );
@@ -574,12 +599,140 @@ mod tests {
         commit(dir.path(), "first commit");
         let repository = discover(dir.path()).expect("test repository should be discoverable");
 
-        let err = stage_resolved(&repository).expect_err("there is nothing to stage");
+        let err = stage_resolved(
+            Language::Japanese,
+            Language::Japanese.messages(),
+            &repository,
+        )
+        .expect_err("there is nothing to stage");
 
         assert!(
             err.to_string()
                 .contains("コンフリクト中のファイルはありません"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn every_menu_entry_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            for operation in [Operation::Merge, Operation::Rebase] {
+                for entry in menu(language.messages(), operation) {
+                    assert!(
+                        !entry.display.trim().is_empty(),
+                        "{language:?} left the {key} entry empty",
+                        key = entry.key
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_entry_names_the_command_it_runs_in_every_language() {
+        // 括弧内の git コマンド名は、実際に何が実行されるのかを示すため訳さない
+        for language in [Language::Japanese, Language::English] {
+            let entries = menu(language.messages(), Operation::Rebase);
+
+            for (key, command) in [
+                (CONTINUE_KEY, "git rebase --continue"),
+                (SKIP_KEY, "git rebase --skip"),
+                (ABORT_KEY, "git rebase --abort"),
+            ] {
+                let entry = resolve_entry(language.messages(), &entries, key)
+                    .expect("the key belongs to the menu");
+
+                assert!(
+                    entry.display.contains(command),
+                    "the {language:?} entry should name {command}: {display}",
+                    display = entry.display
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_menu_entry_is_matched_by_its_key_in_every_language() {
+        // 照合に使うキーは表示と分かれているため、表示言語を変えても解決結果は変わらない
+        for language in [Language::Japanese, Language::English] {
+            let messages = language.messages();
+            let entries = menu(messages, Operation::Merge);
+            let entry =
+                resolve_entry(messages, &entries, ABORT_KEY).expect("the key belongs to the menu");
+
+            assert_eq!(entry.action, MenuAction::Abort(&MERGE_ABORT_ARGS));
+        }
+    }
+
+    #[test]
+    fn every_in_progress_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let in_progress = language.messages().in_progress();
+
+            for text in [
+                in_progress.conflicts_action(),
+                in_progress.skip_action(),
+                in_progress.conflicts_header(),
+                in_progress.conflicts_read_failed(),
+                in_progress.no_conflicts(),
+                in_progress.stage_failed(),
+            ] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+
+            for text in [
+                in_progress.continue_action("merge"),
+                in_progress.abort_action("merge"),
+                in_progress.abort_confirmation("merge"),
+            ] {
+                assert!(
+                    text.contains("merge"),
+                    "{language:?} must name the operation: {text}"
+                );
+                assert!(
+                    !text.contains("rebase"),
+                    "the other operation must not appear: {text}"
+                );
+            }
+
+            assert!(
+                in_progress
+                    .menu_selection_not_found("drop")
+                    .contains("drop"),
+                "{language:?} must name the selection"
+            );
+        }
+    }
+
+    #[test]
+    fn the_in_progress_wording_is_translated() {
+        let japanese = Language::Japanese.messages().in_progress();
+        let english = Language::English.messages().in_progress();
+
+        assert_ne!(japanese.conflicts_action(), english.conflicts_action());
+        assert_ne!(
+            japanese.continue_action("merge"),
+            english.continue_action("merge")
+        );
+        assert_ne!(japanese.skip_action(), english.skip_action());
+        assert_ne!(
+            japanese.abort_action("rebase"),
+            english.abort_action("rebase")
+        );
+        assert_ne!(
+            japanese.menu_selection_not_found("drop"),
+            english.menu_selection_not_found("drop")
+        );
+        assert_ne!(
+            japanese.abort_confirmation("merge"),
+            english.abort_confirmation("merge")
+        );
+        assert_ne!(japanese.conflicts_header(), english.conflicts_header());
+        assert_ne!(
+            japanese.conflicts_read_failed(),
+            english.conflicts_read_failed()
+        );
+        assert_ne!(japanese.no_conflicts(), english.no_conflicts());
+        assert_ne!(japanese.stage_failed(), english.stage_failed());
     }
 }

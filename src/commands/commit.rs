@@ -12,26 +12,10 @@ use crate::error::Error;
 use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with};
 use crate::git::exec::{pathspec, run_git};
 use crate::git::read::{ChangeScope, FileChange, changes};
+use crate::i18n::{Language, Messages};
 
-/// 候補一覧の上部に固定表示する操作説明。
-///
-/// skim はフラットな 1 本のリストであり、リスト途中に「Staged」等の見出しを挟めない。
-/// 事前選択されている理由（ステージ済み）をここで補う。ヘッダーは候補リストの幅で
-/// 打ち切られるため、行頭の状態コード（`git status` と同じ表記）の説明までは載せない。
-const HEADER: &str = "Tab: 選択の切替 / Enter: コミット（ステージ済みは選択済み）";
-
-/// メッセージ入力を git（エディタ）に委ねたコミットが失敗したときに添える案内。
-///
-/// 失敗理由はメッセージが空だった場合に限らない（マージ中の partial commit 拒否、
-/// フックによる拒否など）ため、原因を断定せず条件付きで示す。
-/// エディタが即座に終了する設定（待機オプションの無い GUI エディタ）はユーザーが
-/// 自力で原因に辿り着きにくいため、次に取れる操作まで書く。
-const EDITOR_HINT: &str = "ヒント: エディタでコミットメッセージが保存されなかった場合、\
-git はメッセージが空だと判断してコミットを中止します。
-  - `gz commit -m \"<メッセージ>\"` を使うと、エディタを介さずメッセージを指定できます。
-  - EDITOR / GIT_EDITOR に GUI エディタを設定している場合は、終了を待つオプション\
-（例: `code --wait`）が必要です。待機しない設定ではエディタがすぐに終了し、\
-メッセージが空のまま扱われます。";
+/// 失敗を伝える文言に用いる、実行する git のサブコマンド名。
+const COMMIT_COMMAND: &str = "git commit";
 
 /// 変更ファイルを複数選択し、選んだファイルの変更だけをコミットする。
 ///
@@ -42,23 +26,28 @@ git はメッセージが空だと判断してコミットを中止します。
 ///
 /// 変更ファイル一覧の取得、選択（中断を含む）、`git add` / `git commit` の実行に失敗した場合に
 /// エラーを返す。
-pub fn run(repository: &gix::Repository, message: Option<&str>) -> Result<()> {
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    message: Option<&str>,
+) -> Result<()> {
     let changes = changes(repository, ChangeScope::TrackedOrUntracked)
-        .context("変更ファイル一覧の取得に失敗しました")?;
+        .context(messages.common().changed_files_read_failed())?;
 
     let mut items = Vec::with_capacity(changes.len());
     for change in &changes {
         let candidate = to_candidate(change);
-        items.push(to_item(repository, change, &candidate)?);
+        items.push(to_item(language, repository, change, &candidate)?);
     }
 
     let options = FinderOptions::new(SelectionMode::Multi)
-        .with_header(HEADER.to_owned())
+        .with_header(messages.commit().header().to_owned())
         .with_preselect(preselected(&changes));
     let selected = select_many_with(items, &options)?;
-    let selected = resolve_changes(&changes, &selected)?;
+    let selected = resolve_changes(messages, &changes, &selected)?;
 
-    run_on_changes(message, &selected)
+    run_on_changes(language, messages, message, &selected)
 }
 
 /// 選択済みの変更ファイルの内容だけをコミットする。
@@ -70,14 +59,19 @@ pub fn run(repository: &gix::Repository, message: Option<&str>) -> Result<()> {
 /// # Errors
 ///
 /// `git add` / `git commit` の実行に失敗した場合にエラーを返す。
-pub fn run_on_changes(message: Option<&str>, selected: &[&FileChange]) -> Result<()> {
+pub fn run_on_changes(
+    language: Language,
+    messages: &dyn Messages,
+    message: Option<&str>,
+    selected: &[&FileChange],
+) -> Result<()> {
     // 未追跡ファイルはパス指定コミットの対象にできず
     // 「did not match any file(s) known to git」で失敗するため、先にステージする
     let untracked = untracked_paths(selected);
     if !untracked.is_empty() {
         let arguments = add_args(&untracked);
         let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        run_git(&arguments).context("未追跡ファイルのステージ（git add）に失敗しました")?;
+        run_git(language, &arguments).context(messages.commit().untracked_stage_failed())?;
     }
 
     let candidates: Vec<FileCandidate> =
@@ -86,13 +80,13 @@ pub fn run_on_changes(message: Option<&str>, selected: &[&FileChange]) -> Result
 
     let arguments = commit_args(message, &paths);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    if let Err(error) = run_git(&arguments) {
-        if let Some(hint) = failure_hint(message) {
+    if let Err(error) = run_git(language, &arguments) {
+        if let Some(hint) = failure_hint(messages, message) {
             // 案内はあくまで補助であり、その書き込み失敗でコミット失敗そのものを
             // 置き換えてしまわないよう、ここだけは結果を破棄する
             let _ = writeln!(std::io::stderr(), "{hint}");
         }
-        return Err(error).context("git commit の実行に失敗しました");
+        return Err(error).context(messages.common().command_run_failed(COMMIT_COMMAND));
     }
 
     Ok(())
@@ -101,11 +95,12 @@ pub fn run_on_changes(message: Option<&str>, selected: &[&FileChange]) -> Result
 /// コミットが失敗したときに添える案内を選ぶ。
 ///
 /// `-m` でメッセージを指定した場合はエディタを起動しないため、エディタ設定の案内は
-/// 的外れになる。エディタに委ねた場合だけ [`EDITOR_HINT`] を返す。
-fn failure_hint(message: Option<&str>) -> Option<&'static str> {
+/// 的外れになる。エディタに委ねた場合だけ
+/// [`crate::i18n::messages::CommitMessages::editor_hint`] を返す。
+fn failure_hint(messages: &dyn Messages, message: Option<&str>) -> Option<&'static str> {
     match message {
         Some(_) => None,
-        None => Some(EDITOR_HINT),
+        None => Some(messages.commit().editor_hint()),
     }
 }
 
@@ -145,6 +140,7 @@ fn untracked_paths(selected: &[&FileChange]) -> Vec<String> {
 ///
 /// 未追跡ファイルの絶対パスを解決できない（作業ツリーを持たない）場合にエラーを返す。
 fn to_item(
+    language: Language,
     repository: &gix::Repository,
     change: &FileChange,
     candidate: &FileCandidate,
@@ -153,6 +149,7 @@ fn to_item(
         candidate.display.clone(),
         candidate.key.clone(),
         preview(repository, change, candidate)?,
+        language.messages(),
     ))
 }
 
@@ -300,7 +297,8 @@ mod tests {
 
     #[test]
     fn a_failed_commit_without_a_message_explains_the_editor() {
-        let hint = failure_hint(None).expect("the editor case needs guidance");
+        let hint = failure_hint(Language::Japanese.messages(), None)
+            .expect("the editor case needs guidance");
 
         assert!(
             hint.contains("gz commit -m"),
@@ -315,7 +313,8 @@ mod tests {
     #[test]
     fn the_editor_guidance_does_not_assert_a_single_cause() {
         // 失敗理由は空メッセージだけではない（マージ中の partial commit 拒否・フック等）
-        let hint = failure_hint(None).expect("the editor case needs guidance");
+        let hint = failure_hint(Language::Japanese.messages(), None)
+            .expect("the editor case needs guidance");
 
         assert!(
             hint.contains("保存されなかった場合"),
@@ -326,7 +325,7 @@ mod tests {
     #[test]
     fn a_failed_commit_with_a_message_says_nothing_about_the_editor() {
         assert_eq!(
-            failure_hint(Some("認証を修正")),
+            failure_hint(Language::Japanese.messages(), Some("認証を修正")),
             None,
             "-m does not start an editor, so the editor guidance would mislead"
         );
@@ -386,8 +385,12 @@ mod tests {
             change("new.txt", "??"),
             change("other new.txt", "??"),
         ];
-        let selected = resolve_changes(&changes, &paths(&["other new.txt", "tracked.txt"]))
-            .expect("all paths are listed");
+        let selected = resolve_changes(
+            Language::Japanese.messages(),
+            &changes,
+            &paths(&["other new.txt", "tracked.txt"]),
+        )
+        .expect("all paths are listed");
 
         assert_eq!(
             untracked_paths(&selected),
@@ -399,8 +402,12 @@ mod tests {
     #[test]
     fn a_selection_without_untracked_files_needs_no_staging() {
         let changes = [change("tracked.txt", "M "), change("new.txt", "??")];
-        let selected =
-            resolve_changes(&changes, &paths(&["tracked.txt"])).expect("all paths are listed");
+        let selected = resolve_changes(
+            Language::Japanese.messages(),
+            &changes,
+            &paths(&["tracked.txt"]),
+        )
+        .expect("all paths are listed");
 
         assert!(
             untracked_paths(&selected).is_empty(),
@@ -485,10 +492,71 @@ mod tests {
         let change = change("new.txt", "??");
         let candidate = to_candidate(&change);
 
-        let item = to_item(&repository, &change, &candidate).expect("the item should build");
+        let item = to_item(Language::Japanese, &repository, &change, &candidate)
+            .expect("the item should build");
 
         assert_eq!(item.key(), "new.txt");
         assert_eq!(candidate.display, "?? new.txt");
+    }
+
+    #[test]
+    fn every_commit_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let commit = language.messages().commit();
+
+            for text in [
+                commit.header(),
+                commit.editor_hint(),
+                commit.untracked_stage_failed(),
+            ] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+            // 端末が送るキーの名前であるため、どの言語でも同じ綴りで現れる
+            assert!(
+                commit.header().contains("Tab") && commit.header().contains("Enter"),
+                "{language:?} must name both keys: {text}",
+                text = commit.header()
+            );
+            // ユーザーがそのまま打ち込む・設定するものであるため、どの言語でも同じ綴りで現れる
+            assert!(
+                commit.editor_hint().contains("gz commit -m")
+                    && commit.editor_hint().contains("code --wait")
+                    && commit.editor_hint().contains("EDITOR / GIT_EDITOR"),
+                "{language:?} must spell out the command and the variables: {text}",
+                text = commit.editor_hint()
+            );
+            // 実行した git のサブコマンド名は訳さない
+            assert!(
+                commit.untracked_stage_failed().contains("git add"),
+                "{language:?} must name the command it ran: {text}",
+                text = commit.untracked_stage_failed()
+            );
+        }
+    }
+
+    #[test]
+    fn the_commit_wording_is_translated() {
+        let japanese = Language::Japanese.messages().commit();
+        let english = Language::English.messages().commit();
+
+        assert_ne!(japanese.header(), english.header());
+        assert_ne!(japanese.editor_hint(), english.editor_hint());
+        assert_ne!(
+            japanese.untracked_stage_failed(),
+            english.untracked_stage_failed()
+        );
+    }
+
+    #[test]
+    fn the_english_editor_guidance_does_not_assert_a_single_cause_either() {
+        // 失敗理由は空メッセージだけではない（マージ中の partial commit 拒否・フック等）
+        let hint = failure_hint(Language::English.messages(), None)
+            .expect("the editor case needs guidance");
+
+        assert!(
+            hint.contains("if the commit message is not saved"),
+            "the guidance must stay conditional: {hint}"
+        );
     }
 
     #[test]

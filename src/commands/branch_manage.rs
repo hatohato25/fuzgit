@@ -24,6 +24,7 @@ use crate::git::read::{
     merged_branches, tags, upstream, worktrees,
 };
 use crate::git::repo::workdir;
+use crate::i18n::{Language, Messages};
 
 /// merged 判定の既定の基準（`--into` 未指定時）。
 const DEFAULT_MERGE_BASE: &str = "HEAD";
@@ -48,26 +49,6 @@ const MERGED_LABEL: &str = "merged";
 
 /// merged でないブランチの表示。
 const UNMERGED_LABEL: &str = "unmerged";
-
-/// upstream（リモート追跡ブランチ）が設定されていないブランチの表示。
-const NO_TRACKING_LABEL: &str = "追跡なし";
-
-/// 最終更新日時を取得できなかった場合の表示。
-const UNKNOWN_DATE_LABEL: &str = "更新日時不明";
-
-/// 削除候補一覧の上部に固定表示する操作説明。
-const DELETE_HEADER: &str = "Tab: 選択の切替 / Enter: 選択したブランチを削除";
-
-/// 整理候補一覧の上部に固定表示する操作説明。
-const CLEANUP_HEADER: &str =
-    "全件を選択済みにしています。Tab: 残すブランチの選択を外す / Enter: 削除";
-
-/// 削除できる候補が 1 件も無い場合の案内。
-const NO_DELETE_CANDIDATE_MESSAGE: &str = "削除できるブランチがありません\
-（現在のブランチと、worktree でチェックアウト中のブランチは対象になりません）";
-
-/// 整理できる候補が 1 件も無い場合の案内。
-const NO_CLEANUP_CANDIDATE_MESSAGE: &str = "取り込み済み（merged）のブランチがありません";
 
 /// ブランチ作成後に切り替えるかどうか。
 ///
@@ -157,7 +138,12 @@ struct DeleteCandidate {
 /// # Errors
 ///
 /// 各操作が失敗した場合にエラーを返す。
-pub fn run(repository: &gix::Repository, command: &BranchCommand) -> Result<()> {
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    command: &BranchCommand,
+) -> Result<()> {
     match command {
         BranchCommand::Create { name, switch } => {
             let switch = if *switch {
@@ -165,7 +151,7 @@ pub fn run(repository: &gix::Repository, command: &BranchCommand) -> Result<()> 
             } else {
                 SwitchAfterCreate::Stay
             };
-            create(repository, name, switch)
+            create(language, messages, repository, name, switch)
         }
         BranchCommand::Delete { force, into } => {
             let mode = if *force {
@@ -173,9 +159,9 @@ pub fn run(repository: &gix::Repository, command: &BranchCommand) -> Result<()> 
             } else {
                 DeleteMode::MergedOnly
             };
-            delete(repository, mode, into.as_deref())
+            delete(language, messages, repository, mode, into.as_deref())
         }
-        BranchCommand::Cleanup { into } => cleanup(repository, into.as_deref()),
+        BranchCommand::Cleanup { into } => cleanup(language, messages, repository, into.as_deref()),
     }
 }
 
@@ -188,13 +174,22 @@ pub fn run(repository: &gix::Repository, command: &BranchCommand) -> Result<()> 
 ///
 /// 候補の取得、選択（中断を含む）、`git branch` / `git switch` の実行に失敗した場合に
 /// エラーを返す。
-fn create(repository: &gix::Repository, name: &str, switch: SwitchAfterCreate) -> Result<()> {
-    let branches =
-        branches(repository, BranchScope::All).context("ブランチ一覧の取得に失敗しました")?;
-    let tags = tags(repository).context("タグ一覧の取得に失敗しました")?;
+fn create(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    name: &str,
+    switch: SwitchAfterCreate,
+) -> Result<()> {
+    let branches = branches(repository, BranchScope::All)
+        .context(messages.common().branch_list_read_failed())?;
+    let tags = tags(repository).context(messages.common().tag_list_read_failed())?;
     let candidates = base_candidates(&branches, &tags);
 
-    let items = candidates.iter().map(to_base_item).collect();
+    let items = candidates
+        .iter()
+        .map(|candidate| to_base_item(language, candidate))
+        .collect();
     let selected = select_one(items)?;
 
     // `git branch` の作成元は `--` の後ろに置いてもオプション扱いから守れる位置に無いため、
@@ -202,18 +197,19 @@ fn create(repository: &gix::Repository, name: &str, switch: SwitchAfterCreate) -
     let base = candidates
         .iter()
         .find(|candidate| candidate.key == selected)
-        .ok_or_else(|| anyhow!("選択された作成元 `{selected}` が候補に見つかりません"))?;
+        .ok_or_else(|| anyhow!(messages.branch_manage().base_selection_not_found(&selected)))?;
 
     let arguments = create_args(name, &base.revision);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(&arguments).with_context(|| format!("ブランチ `{name}` の作成に失敗しました"))?;
+    run_git(language, &arguments)
+        .with_context(|| messages.branch_manage().creation_failed(name))?;
 
-    report_created(&mut std::io::stderr(), name, base, switch)?;
+    report_created(&mut std::io::stderr(), messages, name, base, switch)?;
 
     if switch == SwitchAfterCreate::Switch {
         let arguments = switch_args(name);
         let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        run_git(&arguments).with_context(|| format!("`{name}` への切り替えに失敗しました"))?;
+        run_git(language, &arguments).with_context(|| messages.common().switch_failed(name))?;
     }
 
     Ok(())
@@ -261,11 +257,12 @@ fn base_display(kind: BaseKind, name: &str, message: Option<&str>) -> String {
 }
 
 /// 作成元候補を finder のアイテムへ変換する。
-fn to_base_item(candidate: &BaseCandidate) -> FinderItem {
+fn to_base_item(language: Language, candidate: &BaseCandidate) -> FinderItem {
     FinderItem::new(
         candidate.display.clone(),
         candidate.key.clone(),
         PreviewSource::Git(log_preview_args(&candidate.revision)),
+        language.messages(),
     )
 }
 
@@ -315,24 +312,22 @@ fn switch_args(name: &str) -> Vec<String> {
 /// 書き込みに失敗した場合にエラーを返す。
 fn report_created(
     writer: &mut impl std::io::Write,
+    messages: &dyn Messages,
     name: &str,
     base: &BaseCandidate,
     switch: SwitchAfterCreate,
 ) -> Result<()> {
     writeln!(
         writer,
-        "ブランチ `{name}` を {base} から作成しました",
-        base = base.key
+        "{}",
+        messages.branch_manage().created(name, &base.key)
     )
-    .context("標準エラー出力への書き込みに失敗しました")?;
+    .context(messages.common().stderr_write_failed())?;
 
     // 切り替える場合は続けて `git switch` を実行するため、案内は重複させない
     if switch == SwitchAfterCreate::Stay {
-        writeln!(
-            writer,
-            "切り替えるには `git switch {name}` を実行してください"
-        )
-        .context("標準エラー出力への書き込みに失敗しました")?;
+        writeln!(writer, "{}", messages.branch_manage().switch_hint(name))
+            .context(messages.common().stderr_write_failed())?;
     }
 
     Ok(())
@@ -345,26 +340,36 @@ fn report_created(
 /// 候補の取得、選択（中断を含む）、`git branch` の実行に失敗した場合にエラーを返す。
 /// merged でないブランチが `--force` なしで選ばれた場合は、実行前に停止する。
 /// 確認で承認が得られなかった場合は [`crate::error::Error::Cancelled`]。
-fn delete(repository: &gix::Repository, mode: DeleteMode, into: Option<&str>) -> Result<()> {
-    let candidates = delete_candidates(repository, into)?;
+fn delete(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    mode: DeleteMode,
+    into: Option<&str>,
+) -> Result<()> {
+    let candidates = delete_candidates(messages, repository, into)?;
     if candidates.is_empty() {
-        bail!(NO_DELETE_CANDIDATE_MESSAGE);
+        bail!(messages.branch_manage().no_delete_candidates());
     }
 
-    let items = candidates.iter().map(to_delete_item).collect();
-    let options = FinderOptions::new(SelectionMode::Multi).with_header(DELETE_HEADER.to_owned());
+    let items = candidates
+        .iter()
+        .map(|candidate| to_delete_item(language, messages, candidate))
+        .collect();
+    let options = FinderOptions::new(SelectionMode::Multi)
+        .with_header(messages.branch_manage().delete_header().to_owned());
     let selected = select_many_with(items, &options)?;
-    let selected = in_candidate_order(&candidates, &selected)?;
+    let selected = in_candidate_order(messages, &candidates, &selected)?;
 
     let unmerged = unmerged_among(&selected);
 
     // 1 件でも merged でないものが含まれていれば、他のブランチも削除せずに停止する。
     // 一部だけ削除してから止まると、どこまで進んだのかをユーザーが追う必要が出るため
     if mode == DeleteMode::MergedOnly && !unmerged.is_empty() {
-        bail!(unmerged_rejection(&unmerged));
+        bail!(unmerged_rejection(messages, &unmerged));
     }
 
-    execute_delete(mode, &selected, &unmerged)
+    execute_delete(language, messages, mode, &selected, &unmerged)
 }
 
 /// merged なブランチを全件選択済みで提示し、確認のうえ一括削除する。
@@ -372,25 +377,38 @@ fn delete(repository: &gix::Repository, mode: DeleteMode, into: Option<&str>) ->
 /// # Errors
 ///
 /// [`delete`] と同じ。候補は merged のみに絞られるため、実行するのは常に `git branch -d`。
-fn cleanup(repository: &gix::Repository, into: Option<&str>) -> Result<()> {
-    let candidates: Vec<DeleteCandidate> = delete_candidates(repository, into)?
+fn cleanup(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    into: Option<&str>,
+) -> Result<()> {
+    let candidates: Vec<DeleteCandidate> = delete_candidates(messages, repository, into)?
         .into_iter()
         .filter(|candidate| candidate.is_merged)
         .collect();
     if candidates.is_empty() {
-        bail!(NO_CLEANUP_CANDIDATE_MESSAGE);
+        bail!(messages.branch_manage().no_cleanup_candidates());
     }
 
-    let items = candidates.iter().map(to_delete_item).collect();
+    let items = candidates
+        .iter()
+        .map(|candidate| to_delete_item(language, messages, candidate))
+        .collect();
     let options = FinderOptions::new(SelectionMode::Multi)
-        .with_header(CLEANUP_HEADER.to_owned())
+        .with_header(messages.branch_manage().cleanup_header().to_owned())
         // 事前選択は表示文字列の完全一致で判定される（`crate::finder::FinderOptions`）
-        .with_preselect(candidates.iter().map(display_line).collect());
+        .with_preselect(
+            candidates
+                .iter()
+                .map(|candidate| display_line(messages, candidate))
+                .collect(),
+        );
 
     let selected = select_many_with(items, &options)?;
-    let selected = in_candidate_order(&candidates, &selected)?;
+    let selected = in_candidate_order(messages, &candidates, &selected)?;
 
-    execute_delete(DeleteMode::MergedOnly, &selected, &[])
+    execute_delete(language, messages, DeleteMode::MergedOnly, &selected, &[])
 }
 
 /// 確認プロンプトを経て `git branch -d|-D -- <names>...` を実行する。
@@ -400,6 +418,8 @@ fn cleanup(repository: &gix::Repository, into: Option<&str>) -> Result<()> {
 /// 承認が得られなかった場合は [`crate::error::Error::Cancelled`]、
 /// `git branch` の実行に失敗した場合はそのエラーを返す。
 fn execute_delete(
+    language: Language,
+    messages: &dyn Messages,
     mode: DeleteMode,
     selected: &[&DeleteCandidate],
     unmerged: &[&DeleteCandidate],
@@ -408,10 +428,10 @@ fn execute_delete(
     // 一覧と同じ行を見せることで、merged / 最終更新日時ごと確認できる
     let lines: Vec<String> = selected
         .iter()
-        .map(|candidate| display_line(candidate))
+        .map(|candidate| display_line(messages, candidate))
         .collect();
     let targets: Vec<&str> = lines.iter().map(String::as_str).collect();
-    confirm(&confirm_header(unmerged), &targets)?;
+    confirm(messages, &confirm_header(messages, unmerged), &targets)?;
 
     let names: Vec<&str> = selected
         .iter()
@@ -419,7 +439,7 @@ fn execute_delete(
         .collect();
     let arguments = delete_args(mode, &names);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(&arguments).context("ブランチの削除に失敗しました")?;
+    run_git(language, &arguments).context(messages.branch_manage().deletion_failed())?;
 
     Ok(())
 }
@@ -435,22 +455,24 @@ fn execute_delete(
 /// `--into` に指定された名前がブランチ一覧に無い場合、各情報の取得に失敗した場合に
 /// エラーを返す。
 fn delete_candidates(
+    messages: &dyn Messages,
     repository: &gix::Repository,
     into: Option<&str>,
 ) -> Result<Vec<DeleteCandidate>> {
-    let all = branches(repository, BranchScope::All).context("ブランチ一覧の取得に失敗しました")?;
-    let base = merge_base_revision(&all, into)?;
+    let all = branches(repository, BranchScope::All)
+        .context(messages.common().branch_list_read_failed())?;
+    let base = merge_base_revision(messages, &all, into)?;
 
     let workdir = workdir(repository)?;
-    let merged =
-        merged_branches(workdir, &base).context("取り込み済みブランチの判定に失敗しました")?;
+    let merged = merged_branches(workdir, &base)
+        .context(messages.branch_manage().merged_state_read_failed())?;
     let activity =
-        branch_activity(workdir).context("ブランチの最終更新日時の取得に失敗しました")?;
-    let worktrees = worktrees(workdir).context("worktree 一覧の取得に失敗しました")?;
+        branch_activity(workdir).context(messages.branch_manage().activity_read_failed())?;
+    let worktrees = worktrees(workdir).context(messages.common().worktree_list_read_failed())?;
     let in_use = checked_out_branches(&worktrees);
 
     let locals: Vec<BranchInfo> = all.into_iter().filter(|branch| !branch.is_remote).collect();
-    let tracking = tracking_names(repository, &locals)?;
+    let tracking = tracking_names(messages, repository, &locals)?;
 
     Ok(build_candidates(
         &locals, &merged, &activity, &in_use, &tracking,
@@ -465,17 +487,14 @@ fn delete_candidates(
 ///
 /// upstream の読み取りに失敗した場合にエラーを返す。
 fn tracking_names(
+    messages: &dyn Messages,
     repository: &gix::Repository,
     locals: &[BranchInfo],
 ) -> Result<HashMap<String, String>> {
     let mut tracking = HashMap::new();
     for branch in locals {
-        let upstream = upstream(repository, &branch.name).with_context(|| {
-            format!(
-                "`{name}` の upstream の取得に失敗しました",
-                name = branch.name
-            )
-        })?;
+        let upstream = upstream(repository, &branch.name)
+            .with_context(|| messages.common().upstream_read_failed(&branch.name))?;
 
         if let Some(upstream) = upstream {
             tracking.insert(
@@ -527,7 +546,7 @@ fn build_candidates(
 /// 削除の判断に必要な情報（取り込み済みか・いつ更新されたか・リモート側に残るか）を
 /// 一覧の時点で並べる。いずれも全件を一括取得できる情報に限る
 /// （最終コミットの詳細はプレビューに委ねる。requirements.md FR-20）。
-fn display_line(candidate: &DeleteCandidate) -> String {
+fn display_line(messages: &dyn Messages, candidate: &DeleteCandidate) -> String {
     format!(
         "{name}  {state}  {date}  {tracking}",
         name = candidate.name,
@@ -539,20 +558,25 @@ fn display_line(candidate: &DeleteCandidate) -> String {
         date = candidate
             .relative_date
             .as_deref()
-            .unwrap_or(UNKNOWN_DATE_LABEL),
+            .unwrap_or_else(|| messages.branch_manage().unknown_date()),
         tracking = match &candidate.tracking {
-            Some(tracking) => format!("追跡: {tracking}"),
-            None => NO_TRACKING_LABEL.to_owned(),
+            Some(tracking) => messages.branch_manage().tracking(tracking),
+            None => messages.branch_manage().no_tracking().to_owned(),
         }
     )
 }
 
 /// 削除候補を finder のアイテムへ変換する。
-fn to_delete_item(candidate: &DeleteCandidate) -> FinderItem {
+fn to_delete_item(
+    language: Language,
+    messages: &dyn Messages,
+    candidate: &DeleteCandidate,
+) -> FinderItem {
     FinderItem::new(
-        display_line(candidate),
+        display_line(messages, candidate),
         candidate.name.clone(),
         PreviewSource::Git(log_preview_args(&candidate.name)),
+        language.messages(),
     )
 }
 
@@ -564,7 +588,11 @@ fn to_delete_item(candidate: &DeleteCandidate) -> FinderItem {
 /// # Errors
 ///
 /// 指定された名前がブランチ一覧に無い場合にエラーを返す。
-fn merge_base_revision(branches: &[BranchInfo], into: Option<&str>) -> Result<String> {
+fn merge_base_revision(
+    messages: &dyn Messages,
+    branches: &[BranchInfo],
+    into: Option<&str>,
+) -> Result<String> {
     let Some(into) = into else {
         return Ok(DEFAULT_MERGE_BASE.to_owned());
     };
@@ -573,7 +601,7 @@ fn merge_base_revision(branches: &[BranchInfo], into: Option<&str>) -> Result<St
         .iter()
         .find(|branch| branch.name == into)
         .map(|branch| branch.name.clone())
-        .ok_or_else(|| anyhow!("`--into` に指定したブランチ `{into}` が見つかりません"))
+        .ok_or_else(|| anyhow!(messages.branch_manage().unknown_merge_base(into)))
 }
 
 /// 選択されたブランチ名を候補一覧の順序へ並べ直す。
@@ -586,6 +614,7 @@ fn merge_base_revision(branches: &[BranchInfo], into: Option<&str>) -> Result<St
 /// 選択された名前が候補一覧に含まれない場合にエラーを返す（対象を取り違えたまま
 /// 削除しないよう、暗黙に読み飛ばさない）。
 fn in_candidate_order<'a>(
+    messages: &dyn Messages,
     candidates: &'a [DeleteCandidate],
     selected: &[String],
 ) -> Result<Vec<&'a DeleteCandidate>> {
@@ -596,8 +625,9 @@ fn in_candidate_order<'a>(
         .collect();
     if !missing.is_empty() {
         bail!(
-            "選択されたブランチ {names} が候補に見つかりません",
-            names = missing.join(", ")
+            messages
+                .branch_manage()
+                .selection_not_found(&missing.join(", "))
         );
     }
 
@@ -617,30 +647,24 @@ fn unmerged_among<'a>(selected: &[&'a DeleteCandidate]) -> Vec<&'a DeleteCandida
 }
 
 /// merged でないブランチが `--force` なしで選ばれた場合のエラーメッセージを組み立てる。
-fn unmerged_rejection(unmerged: &[&DeleteCandidate]) -> String {
-    format!(
-        "取り込まれていない（unmerged）ブランチが選択に含まれています: {names}\n\
-         これらを削除すると、そのブランチにしか無いコミットが失われる可能性があります。\
-         それでも削除する場合は `gz branch delete --force` を実行してください",
-        names = names_of(unmerged)
-    )
+fn unmerged_rejection(messages: &dyn Messages, unmerged: &[&DeleteCandidate]) -> String {
+    messages
+        .branch_manage()
+        .unmerged_rejection(&names_of(unmerged))
 }
 
 /// 確認プロンプトに示す説明を組み立てる。
 ///
 /// merged でないブランチが含まれる場合のみ、失われるものを名指しで警告する
 /// （`--force` を付けていても、実際に含まれていなければ根拠の無い警告は出さない）。
-fn confirm_header(unmerged: &[&DeleteCandidate]) -> String {
+fn confirm_header(messages: &dyn Messages, unmerged: &[&DeleteCandidate]) -> String {
     if unmerged.is_empty() {
-        return "以下のブランチを削除します（削除したブランチは元に戻せません）".to_owned();
+        return messages.branch_manage().delete_confirmation().to_owned();
     }
 
-    format!(
-        "以下のブランチを削除します（削除したブランチは元に戻せません）\n\
-         警告: 取り込まれていない（unmerged）ブランチが含まれます: {names}\n\
-         これらのブランチにしか無いコミットは失われます",
-        names = names_of(unmerged)
-    )
+    messages
+        .branch_manage()
+        .unmerged_confirmation(&names_of(unmerged))
 }
 
 /// ブランチ名を読点区切りで並べる。
@@ -788,7 +812,10 @@ mod tests {
     fn a_base_item_keeps_the_prefixed_key() {
         let candidates = base_candidates(&[local("main")], &[]);
 
-        assert_eq!(to_base_item(&candidates[0]).key(), "branch main");
+        assert_eq!(
+            to_base_item(Language::Japanese, &candidates[0]).key(),
+            "branch main"
+        );
     }
 
     #[test]
@@ -817,8 +844,14 @@ mod tests {
         let base = &base_candidates(&[local("main")], &[])[0];
         let mut output = Vec::new();
 
-        report_created(&mut output, "feature", base, SwitchAfterCreate::Stay)
-            .expect("writing to a buffer should succeed");
+        report_created(
+            &mut output,
+            Language::Japanese.messages(),
+            "feature",
+            base,
+            SwitchAfterCreate::Stay,
+        )
+        .expect("writing to a buffer should succeed");
 
         let text = String::from_utf8(output).expect("the message should be utf-8");
         assert!(text.contains("ブランチ `feature`"), "unexpected: {text}");
@@ -834,8 +867,14 @@ mod tests {
         let base = &base_candidates(&[local("main")], &[])[0];
         let mut output = Vec::new();
 
-        report_created(&mut output, "feature", base, SwitchAfterCreate::Switch)
-            .expect("writing to a buffer should succeed");
+        report_created(
+            &mut output,
+            Language::Japanese.messages(),
+            "feature",
+            base,
+            SwitchAfterCreate::Switch,
+        )
+        .expect("writing to a buffer should succeed");
 
         let text = String::from_utf8(output).expect("the message should be utf-8");
         assert!(text.contains("ブランチ `feature`"), "unexpected: {text}");
@@ -955,7 +994,7 @@ mod tests {
         );
 
         assert_eq!(
-            display_line(&candidates[0]),
+            display_line(Language::Japanese.messages(), &candidates[0]),
             "done  merged  3 days ago  追跡: origin/done"
         );
     }
@@ -971,7 +1010,7 @@ mod tests {
         );
 
         assert_eq!(
-            display_line(&candidates[0]),
+            display_line(Language::Japanese.messages(), &candidates[0]),
             "wip  unmerged  2 hours ago  追跡なし"
         );
     }
@@ -986,9 +1025,14 @@ mod tests {
             &HashMap::new(),
         );
 
+        let branch_manage = Language::Japanese.messages().branch_manage();
         assert_eq!(
-            display_line(&candidates[0]),
-            format!("odd  unmerged  {UNKNOWN_DATE_LABEL}  {NO_TRACKING_LABEL}")
+            display_line(Language::Japanese.messages(), &candidates[0]),
+            format!(
+                "odd  unmerged  {date}  {tracking}",
+                date = branch_manage.unknown_date(),
+                tracking = branch_manage.no_tracking()
+            )
         );
     }
 
@@ -1004,7 +1048,7 @@ mod tests {
             );
 
             assert!(
-                display_line(&candidates[0]).contains(date),
+                display_line(Language::Japanese.messages(), &candidates[0]).contains(date),
                 "the relative date should be shown as is: {date}"
             );
         }
@@ -1020,7 +1064,15 @@ mod tests {
             &HashMap::new(),
         );
 
-        assert_eq!(to_delete_item(&candidates[0]).key(), "feature/login");
+        assert_eq!(
+            to_delete_item(
+                Language::Japanese,
+                Language::Japanese.messages(),
+                &candidates[0]
+            )
+            .key(),
+            "feature/login"
+        );
     }
 
     #[test]
@@ -1047,7 +1099,10 @@ mod tests {
         );
 
         assert_eq!(
-            candidates.iter().map(display_line).collect::<Vec<_>>(),
+            candidates
+                .iter()
+                .map(|candidate| display_line(Language::Japanese.messages(), candidate))
+                .collect::<Vec<_>>(),
             [
                 "done  merged  3 days ago  追跡: origin/done",
                 "wip  unmerged  10 minutes ago  追跡なし",
@@ -1079,7 +1134,8 @@ mod tests {
         let branches = [current("main"), local("feature")];
 
         assert_eq!(
-            merge_base_revision(&branches, None).expect("no base is always valid"),
+            merge_base_revision(Language::Japanese.messages(), &branches, None)
+                .expect("no base is always valid"),
             DEFAULT_MERGE_BASE
         );
     }
@@ -1089,7 +1145,8 @@ mod tests {
         let branches = [current("main"), local("develop")];
 
         assert_eq!(
-            merge_base_revision(&branches, Some("develop")).expect("a listed branch resolves"),
+            merge_base_revision(Language::Japanese.messages(), &branches, Some("develop"))
+                .expect("a listed branch resolves"),
             "develop"
         );
     }
@@ -1099,7 +1156,12 @@ mod tests {
         let branches = [current("main"), remote("origin/main")];
 
         assert_eq!(
-            merge_base_revision(&branches, Some("origin/main")).expect("a listed branch resolves"),
+            merge_base_revision(
+                Language::Japanese.messages(),
+                &branches,
+                Some("origin/main")
+            )
+            .expect("a listed branch resolves"),
             "origin/main"
         );
     }
@@ -1108,7 +1170,7 @@ mod tests {
     fn an_unknown_merge_base_is_rejected_instead_of_being_passed_to_git() {
         let branches = [current("main")];
 
-        let err = merge_base_revision(&branches, Some("nope"))
+        let err = merge_base_revision(Language::Japanese.messages(), &branches, Some("nope"))
             .expect_err("an unknown branch must be rejected");
 
         assert!(
@@ -1123,7 +1185,7 @@ mod tests {
         let branches = [current("main")];
 
         assert!(
-            merge_base_revision(&branches, Some("--all")).is_err(),
+            merge_base_revision(Language::Japanese.messages(), &branches, Some("--all")).is_err(),
             "a value that was never listed must not reach git"
         );
     }
@@ -1140,7 +1202,8 @@ mod tests {
         ];
         let selected = ["c".to_owned(), "a".to_owned()];
 
-        let ordered = in_candidate_order(&candidates, &selected).expect("all names are listed");
+        let ordered = in_candidate_order(Language::Japanese.messages(), &candidates, &selected)
+            .expect("all names are listed");
 
         assert_eq!(
             ordered
@@ -1155,8 +1218,12 @@ mod tests {
     fn a_name_outside_of_the_candidates_is_rejected() {
         let candidates = [candidate("a", true)];
 
-        let err = in_candidate_order(&candidates, &["b".to_owned()])
-            .expect_err("an unknown branch must be rejected");
+        let err = in_candidate_order(
+            Language::Japanese.messages(),
+            &candidates,
+            &["b".to_owned()],
+        )
+        .expect_err("an unknown branch must be rejected");
 
         assert!(
             err.to_string().contains('b'),
@@ -1223,7 +1290,7 @@ mod tests {
 
     #[test]
     fn deleting_merged_branches_only_warns_that_it_cannot_be_undone() {
-        let header = confirm_header(&[]);
+        let header = confirm_header(Language::Japanese.messages(), &[]);
 
         assert!(header.contains("元に戻せません"), "unexpected: {header}");
         assert!(
@@ -1237,7 +1304,7 @@ mod tests {
         let candidates = [candidate("wip", false), candidate("old", false)];
         let unmerged: Vec<&DeleteCandidate> = candidates.iter().collect();
 
-        let header = confirm_header(&unmerged);
+        let header = confirm_header(Language::Japanese.messages(), &unmerged);
 
         assert!(header.contains("警告"), "unexpected: {header}");
         assert!(header.contains("wip, old"), "unexpected: {header}");
@@ -1249,12 +1316,192 @@ mod tests {
         let candidates = [candidate("wip", false)];
         let unmerged: Vec<&DeleteCandidate> = candidates.iter().collect();
 
-        let message = unmerged_rejection(&unmerged);
+        let message = unmerged_rejection(Language::Japanese.messages(), &unmerged);
 
         assert!(message.contains("wip"), "unexpected: {message}");
         assert!(
             message.contains("gz branch delete --force"),
             "the way forward should be named: {message}"
+        );
+    }
+
+    // --- 文言 ----------------------------------------------------------------
+
+    /// 引数を取らない文言。
+    fn plain_texts(language: Language) -> Vec<&'static str> {
+        let branch_manage = language.messages().branch_manage();
+
+        vec![
+            branch_manage.no_tracking(),
+            branch_manage.unknown_date(),
+            branch_manage.merged_state_read_failed(),
+            branch_manage.activity_read_failed(),
+            branch_manage.deletion_failed(),
+            branch_manage.delete_header(),
+            branch_manage.no_delete_candidates(),
+            branch_manage.delete_confirmation(),
+            branch_manage.cleanup_header(),
+            branch_manage.no_cleanup_candidates(),
+        ]
+    }
+
+    /// 引数を取る文言と、そこへ展開されるべき引数。
+    fn texts_with_arguments(language: Language) -> Vec<(String, &'static str)> {
+        let branch_manage = language.messages().branch_manage();
+
+        vec![
+            (
+                branch_manage.base_selection_not_found("tag v1.0"),
+                "tag v1.0",
+            ),
+            (branch_manage.creation_failed("feature"), "feature"),
+            (branch_manage.created("feature", "branch main"), "feature"),
+            (
+                branch_manage.created("feature", "branch main"),
+                "branch main",
+            ),
+            (branch_manage.switch_hint("feature"), "git switch feature"),
+            (branch_manage.tracking("origin/done"), "origin/done"),
+            (branch_manage.unknown_merge_base("nope"), "nope"),
+            (branch_manage.unknown_merge_base("nope"), "--into"),
+            (branch_manage.selection_not_found("wip, old"), "wip, old"),
+            (branch_manage.unmerged_rejection("wip"), "wip"),
+            (
+                branch_manage.unmerged_rejection("wip"),
+                "gz branch delete --force",
+            ),
+            (branch_manage.unmerged_confirmation("wip, old"), "wip, old"),
+        ]
+    }
+
+    #[test]
+    fn every_branch_manage_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            for text in plain_texts(language) {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+            for (text, _) in texts_with_arguments(language) {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+        }
+    }
+
+    #[test]
+    fn every_branch_manage_message_expands_its_arguments() {
+        for language in [Language::Japanese, Language::English] {
+            for (text, argument) in texts_with_arguments(language) {
+                assert!(
+                    text.contains(argument),
+                    "{language:?} must mention `{argument}`: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_branch_manage_wording_is_translated() {
+        for (japanese, english) in plain_texts(Language::Japanese)
+            .into_iter()
+            .zip(plain_texts(Language::English))
+        {
+            assert_ne!(japanese, english, "the wording must be translated");
+        }
+
+        for ((japanese, _), (english, _)) in texts_with_arguments(Language::Japanese)
+            .into_iter()
+            .zip(texts_with_arguments(Language::English))
+        {
+            assert_ne!(japanese, english, "the wording must be translated");
+        }
+    }
+
+    #[test]
+    fn a_line_keeps_the_git_merge_state_in_every_language() {
+        // `merged` / `unmerged` は git の語彙であるため訳さない（design.md「翻訳しないもの」）
+        let candidates = build_candidates(
+            &[local("done"), local("wip")],
+            &set(&["done"]),
+            &map(&[("done", "3 days ago")]),
+            &HashSet::new(),
+            &map(&[("done", "origin/done")]),
+        );
+
+        for language in [Language::Japanese, Language::English] {
+            let merged = display_line(language.messages(), &candidates[0]);
+            let unmerged = display_line(language.messages(), &candidates[1]);
+
+            assert!(
+                merged.starts_with(&format!("done  {MERGED_LABEL}  3 days ago  ")),
+                "{language:?}: {merged}"
+            );
+            assert!(
+                unmerged.starts_with(&format!("wip  {UNMERGED_LABEL}  ")),
+                "{language:?}: {unmerged}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tracking_part_of_a_line_is_translated() {
+        // 追跡の有無は fuzgit 自身の文言であり、git の出力ではないため訳す
+        let candidates = build_candidates(
+            &[local("done"), local("wip")],
+            &set(&["done"]),
+            &map(&[("done", "3 days ago")]),
+            &HashSet::new(),
+            &map(&[("done", "origin/done")]),
+        );
+
+        for candidate in &candidates {
+            assert_ne!(
+                display_line(Language::Japanese.messages(), candidate),
+                display_line(Language::English.messages(), candidate),
+                "the line must be translated: {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_english_creation_report_explains_how_to_switch_as_well() {
+        let base = &base_candidates(&[local("main")], &[])[0];
+        let mut output = Vec::new();
+
+        report_created(
+            &mut output,
+            Language::English.messages(),
+            "feature",
+            base,
+            SwitchAfterCreate::Stay,
+        )
+        .expect("writing to a buffer should succeed");
+
+        let text = String::from_utf8(output).expect("the message should be utf-8");
+        assert_eq!(text.lines().count(), 2, "unexpected: {text}");
+        assert!(text.contains("branch main"), "unexpected: {text}");
+        assert!(
+            text.contains("git switch feature"),
+            "the way to switch should be suggested: {text}"
+        );
+    }
+
+    #[test]
+    fn the_english_confirmation_keeps_the_warning_on_its_own_lines() {
+        let candidates = [candidate("wip", false), candidate("old", false)];
+        let unmerged: Vec<&DeleteCandidate> = candidates.iter().collect();
+
+        let header = confirm_header(Language::English.messages(), &unmerged);
+
+        assert_eq!(header.lines().count(), 3, "unexpected: {header}");
+        assert!(header.contains("wip, old"), "unexpected: {header}");
+        assert!(header.contains(UNMERGED_LABEL), "unexpected: {header}");
+        assert!(
+            header.starts_with(
+                Language::English
+                    .messages()
+                    .branch_manage()
+                    .delete_confirmation()
+            ),
+            "the warning is appended to the common explanation: {header}"
         );
     }
 }

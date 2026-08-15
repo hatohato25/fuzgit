@@ -1,11 +1,22 @@
 //! 共通要件（requirements.md「共通要件」）のうち、非対話パスの統合テスト。
 //!
 //! TUI（skim）が起動する対話パスは自動テスト対象外とし、手動確認とする。
+//!
+//! # メッセージのアサーションと表示言語（FR-27）
+//!
+//! 日本語のメッセージをアサートしているテストは、[`gz`]（`FUZGIT_LANG=ja` 既定）で起動する
+//! **ja のアサーション**である。既存のメッセージは要件そのものであるため削除せず、言語を
+//! 明示する形で維持する。`fuzgit::error::Error` を訳す `describe` と `commands` 側の文言
+//! （`.context(...)` / `bail!(...)`）はいずれも移行済みであり、`en` を選べば連鎖の全体が
+//! 英語になる。ただし `clap` が組み立てるヘルプ（`Usage:` 等）だけは別であり、
+//! それらをアサートしているテストは言語を問わず英語のままである。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use assert_cmd::Command;
+use fuzgit::i18n::Language;
+use fuzgit::i18n::messages::CliMessages;
 
 /// 検証対象のバイナリ（パッケージ名 `fuzgit` に対する実行ファイル名は `gz`）。
 const BIN_NAME: &str = "gz";
@@ -47,10 +58,33 @@ const WORKTREE_SUBCOMMANDS: [&str; 3] = ["add", "remove", "prune"];
 const DEFAULT_COMMIT_LIMIT: &str = "1000";
 
 /// unborn HEAD のエラーメッセージが伝えるべき原因（`fuzgit::error::Error::UnbornHead` と対応）。
+///
+/// **ja のアサーション**（`fuzgit::i18n::ja` の `describe` が返す文言）。
 const UNBORN_HEAD_CAUSE: &str = "まだコミットがありません";
 
+/// [`UNBORN_HEAD_CAUSE`] と同じ原因を伝える **en** の文言（`fuzgit::i18n::en` と対応）。
+const UNBORN_HEAD_CAUSE_EN: &str = "has no commits yet";
+
 /// unborn HEAD のエラーメッセージが伝えるべき次の操作。
+///
+/// 実際に打ち込むコマンドであり「翻訳しないもの」であるため、ja / en で共通。
 const UNBORN_HEAD_NEXT_STEP: &str = "git commit";
+
+/// 候補が 1 件も無い場合のエラーメッセージ（`fuzgit::error::Error::NoCandidates` と対応）。
+///
+/// **ja のアサーション**。
+const NO_CANDIDATES: &str = "選択できる候補がありません";
+
+/// [`NO_CANDIDATES`] と同じ内容を伝える **en** の文言。
+const NO_CANDIDATES_EN: &str = "no candidates to select from";
+
+/// リポジトリ外での実行を伝えるエラーメッセージ（`fuzgit::error::Error::NotARepository` と対応）。
+///
+/// **ja のアサーション**。
+const NOT_A_REPOSITORY: &str = "git リポジトリではありません";
+
+/// [`NOT_A_REPOSITORY`] と同じ内容を伝える **en** の文言。
+const NOT_A_REPOSITORY_EN: &str = "Not a git repository";
 
 /// デバッグログ（`FUZGIT_DEBUG=1`）の行頭に付く接頭辞（`fuzgit::git::exec` と対応）。
 const DEBUG_PREFIX: &str = "[fuzgit]";
@@ -90,8 +124,52 @@ impl Drop for TempDir {
     }
 }
 
+/// 統合テストが `gz` を起動するときの既定の表示言語。
+///
+/// 既存のアサーションは日本語の文言を前提としているため `ja` を明示する
+/// （実行環境のロケール設定に結果を左右させない）。
+const DEFAULT_LANGUAGE: &str = "ja";
+
+/// 表示言語の指定を受け取る環境変数名（`fuzgit::i18n::resolve::LANGUAGE_ENV` と対応）。
+const LANGUAGE_ENV: &str = "FUZGIT_LANG";
+
+/// 表示言語の解決（FR-25 の層 4）が参照するロケール環境変数。
+///
+/// テストを実行するマシンのロケールで結果が変わらないよう、すべて取り除いてから起動する。
+const LOCALE_ENVS: [&str; 4] = ["LC_ALL", "LC_MESSAGES", "LANGUAGE", "LANG"];
+
+/// 表示言語を明示して `gz` を起動する。
+///
+/// 言語を引数に取るのは、同じ操作を ja / en の両方で検証できるようにするため。
+fn gz_with(language: &str) -> Command {
+    let mut command = Command::cargo_bin(BIN_NAME).expect("gz binary should be built");
+    command.env(LANGUAGE_ENV, language);
+    for key in LOCALE_ENVS {
+        command.env_remove(key);
+    }
+    command
+}
+
+/// 既定の表示言語（[`DEFAULT_LANGUAGE`]）で `gz` を起動する。
 fn gz() -> Command {
-    Command::cargo_bin(BIN_NAME).expect("gz binary should be built")
+    gz_with(DEFAULT_LANGUAGE)
+}
+
+/// 文字列に日本語の文字が含まれるかどうかを判定する。
+///
+/// `en` を選んだ出力に日本語が混ざっていないことを確かめるために用いる。逆
+/// （日本語の出力に英語が混ざらないこと）は検査しない。`git commit` のように
+/// **翻訳しない語**が日本語の文言にも意図的に含まれるため。
+fn contains_japanese(text: &str) -> bool {
+    text.chars().any(|character| {
+        matches!(character,
+            '\u{3000}'..='\u{303F}'   // 全角の記号・句読点
+            | '\u{3040}'..='\u{309F}' // ひらがな
+            | '\u{30A0}'..='\u{30FF}' // カタカナ
+            | '\u{4E00}'..='\u{9FFF}' // 漢字
+            | '\u{FF00}'..='\u{FFEF}' // 全角形
+        )
+    })
 }
 
 /// コミットを 1 件も持たない git リポジトリを用意する。
@@ -197,6 +275,7 @@ fn bare_invocation_shows_help_and_exits_non_zero() {
     }
 }
 
+/// リポジトリ外での実行が専用のメッセージで停止することを確認する（**ja**）。
 #[test]
 fn running_outside_a_repository_fails_with_a_dedicated_message() {
     let dir = TempDir::new("outside");
@@ -214,8 +293,38 @@ fn running_outside_a_repository_fails_with_a_dedicated_message() {
 
     let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
     assert!(
-        stderr.contains("git リポジトリではありません"),
+        stderr.contains(NOT_A_REPOSITORY),
         "unexpected stderr:\n{stderr}"
+    );
+}
+
+/// 同じ経路が `en` では英語のメッセージになることを確認する（FR-27）。
+///
+/// この経路は `.context(...)` を挟まないため、連鎖全体が `describe` の英語だけで構成される。
+/// 日本語が 1 文字も混ざらないことまで確かめられる数少ない経路である。
+#[test]
+fn running_outside_a_repository_is_reported_in_english() {
+    let dir = TempDir::new("outside-en");
+
+    let output = gz_with("en")
+        .arg("branch")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz branch");
+
+    assert!(
+        !output.status.success(),
+        "running outside a repository should exit non-zero"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains(NOT_A_REPOSITORY_EN),
+        "unexpected stderr:\n{stderr}"
+    );
+    assert!(
+        !contains_japanese(&stderr),
+        "the english output must not mix japanese:\n{stderr}"
     );
 }
 
@@ -237,6 +346,159 @@ fn every_subcommand_has_its_own_help() {
             stdout.contains(&format!("gz {subcommand}")),
             "usage line missing for {subcommand}:\n{stdout}"
         );
+    }
+}
+
+/// `--help` を検証する対象と、そこへ出るべき `about` の組を並べる。
+///
+/// 20 のサブコマンドに加え、入れ子のサブコマンド（`branch` / `stash` / `worktree`）も
+/// すべて並べる。ヘルプの差し替えは組み立て済みの `clap` の定義を**実行時**に書き換える
+/// ため、呼び忘れがコンパイルエラーにならない。この網羅が唯一の担保である
+/// （design.md「差し替え漏れはコンパイルエラーにならない」）。
+fn help_targets(cli: &dyn CliMessages) -> Vec<(&'static [&'static str], &'static str)> {
+    vec![
+        (&[], cli.about()),
+        (&["branch"], cli.branch_about()),
+        (&["branch", "create"], cli.branch_create_about()),
+        (&["branch", "delete"], cli.branch_delete_about()),
+        (&["branch", "cleanup"], cli.branch_cleanup_about()),
+        (&["log"], cli.log_about()),
+        (&["cherry-pick"], cli.cherry_pick_about()),
+        (&["restore"], cli.restore_about()),
+        (&["add"], cli.add_about()),
+        (&["stash"], cli.stash_about()),
+        (&["stash", "push"], cli.stash_push_about()),
+        (&["stash", "apply"], cli.stash_apply_about()),
+        (&["stash", "pop"], cli.stash_pop_about()),
+        (&["stash", "drop"], cli.stash_drop_about()),
+        (&["tag"], cli.tag_about()),
+        (&["reflog"], cli.reflog_about()),
+        (&["commit"], cli.commit_about()),
+        (&["push"], cli.push_about()),
+        (&["fixup"], cli.fixup_about()),
+        (&["merge"], cli.merge_about()),
+        (&["rebase"], cli.rebase_about()),
+        (&["revert"], cli.revert_about()),
+        (&["status"], cli.status_about()),
+        (&["diff"], cli.diff_about()),
+        (&["fetch"], cli.fetch_about()),
+        (&["pull"], cli.pull_about()),
+        (&["sync"], cli.sync_about()),
+        (&["worktree"], cli.worktree_about()),
+        (&["worktree", "add"], cli.worktree_add_about()),
+        (&["worktree", "remove"], cli.worktree_remove_about()),
+        (&["worktree", "prune"], cli.worktree_prune_about()),
+    ]
+}
+
+/// 検証対象の全コマンドについて、`--help` が選んだ言語の説明を出すことを確認する（FR-27）。
+///
+/// 併せて `--lang` の説明も検査する。`--lang` はグローバル引数であり、差し替えた定義が
+/// 各サブコマンドへ伝播していることはこのアサーションでしか確かめられない。
+#[test]
+fn every_help_is_shown_in_the_selected_language() {
+    for language in [Language::Japanese, Language::English] {
+        let cli = language.messages().cli();
+
+        for (path, about) in help_targets(cli) {
+            let output = gz_with(language.code())
+                .args(path)
+                .arg("--help")
+                .output()
+                .unwrap_or_else(|err| panic!("failed to run gz {path:?} --help: {err}"));
+
+            assert!(
+                output.status.success(),
+                "gz {path:?} --help should exit successfully"
+            );
+
+            let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
+            assert!(
+                stdout.contains(about),
+                "the description of gz {path:?} is not shown in {language:?}:\n{stdout}"
+            );
+            assert!(
+                stdout.contains(cli.lang_help()),
+                "the description of --lang is not shown in {language:?} for gz {path:?}:\n{stdout}"
+            );
+
+            // 日本語のヘルプには `Usage:` などの clap 自身の英語が必ず混ざるため、
+            // 「別の言語が混ざっていないこと」を確かめられるのは en だけ
+            if language == Language::English {
+                assert!(
+                    !contains_japanese(&stdout),
+                    "the english help must not mix japanese for gz {path:?}:\n{stdout}"
+                );
+            }
+        }
+    }
+}
+
+/// 差し替え済みの定義を再帰的に辿り、説明の欠落と差し替え漏れが無いことを確かめる。
+///
+/// `clap` が自ら足す `-h` / `--help` / `-V` / `--version` と `help` サブコマンドは
+/// `clap` 自身の文言（requirements.md のスコープ外）であるため対象から除く。
+fn assert_descriptions_are_localized(command: &clap::Command, path: &str, language: Language) {
+    let about = command
+        .get_about()
+        .unwrap_or_else(|| panic!("`{path}` has no about"))
+        .to_string();
+    assert_is_written_in(&about, language, &format!("the about of `{path}`"));
+
+    for argument in command.get_arguments() {
+        let id = argument.get_id().as_str();
+        if id == "help" || id == "version" {
+            continue;
+        }
+
+        let help = argument
+            .get_help()
+            .unwrap_or_else(|| panic!("`{path}` has no help for `{id}`"))
+            .to_string();
+        assert_is_written_in(&help, language, &format!("the help of `{path}` `{id}`"));
+    }
+
+    for subcommand in command.get_subcommands() {
+        let name = subcommand.get_name();
+        if name == "help" {
+            continue;
+        }
+
+        assert_descriptions_are_localized(subcommand, &format!("{path} {name}"), language);
+    }
+}
+
+/// 文言が空でなく、その言語で書かれていることを確かめる。
+///
+/// derive のリテラル（＝英語のフォールバック）が日本語を含まないことは
+/// `fuzgit::cli` の単体テストが固定しているため、日本語の文字が現れることが
+/// **差し替えが行われた証拠**になる。
+fn assert_is_written_in(text: &str, language: Language, label: &str) {
+    assert!(!text.trim().is_empty(), "{label} is empty");
+
+    match language {
+        Language::Japanese => assert!(
+            contains_japanese(text),
+            "{label} was left untranslated: {text}"
+        ),
+        Language::English => assert!(
+            !contains_japanese(text),
+            "{label} must stay in english: {text}"
+        ),
+    }
+}
+
+/// 全サブコマンド・全オプションに、選んだ言語の説明が付いていることを確認する。
+///
+/// [`every_help_is_shown_in_the_selected_language`] が `about` を実プロセスで確かめるのに
+/// 対し、こちらは**すべての引数**まで含めて網羅する。オプションを 1 つ足して
+/// `localized_command` の差し替えを書き忘れると、ここが英語のまま残っていることを検出する。
+#[test]
+fn every_description_of_the_localized_definition_is_translated() {
+    for language in [Language::Japanese, Language::English] {
+        let command = fuzgit::cli::localized_command(language.messages());
+
+        assert_descriptions_are_localized(&command, "gz", language);
     }
 }
 
@@ -311,7 +573,7 @@ fn log_accepts_the_limit_and_reports_when_there_are_no_commits() {
     }
 }
 
-/// コミットがまだ 1 件も無いリポジトリでは、候補ゼロではなくその原因を伝えることを確認する。
+/// コミットがまだ 1 件も無いリポジトリでは、候補ゼロではなくその原因を伝えることを確認する（**ja**）。
 #[test]
 fn an_unborn_head_is_reported_with_its_cause_and_next_step() {
     let dir = empty_repository("unborn-head");
@@ -338,10 +600,44 @@ fn an_unborn_head_is_reported_with_its_cause_and_next_step() {
             "the next step should be suggested for gz {subcommand}:\n{stderr}"
         );
         assert!(
-            !stderr.contains("選択できる候補がありません"),
+            !stderr.contains(NO_CANDIDATES),
             "the generic message should not be used for gz {subcommand}:\n{stderr}"
         );
     }
+}
+
+/// 同じ原因と次の操作が `en` でも伝わることを確認する（FR-27）。
+///
+/// この経路は `commands` 側の文脈（`.context(...)`）を挟むため、連鎖の先頭と
+/// `describe` が返す部分の双方が英語になっていなければならない。
+#[test]
+fn an_unborn_head_is_reported_in_english() {
+    let dir = empty_repository("unborn-head-en");
+
+    let output = gz_with("en")
+        .arg("log")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz log");
+
+    assert!(
+        !output.status.success(),
+        "gz log should exit non-zero when there are no commits"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains(UNBORN_HEAD_CAUSE_EN),
+        "the cause should be explained in english:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(UNBORN_HEAD_NEXT_STEP),
+        "the next step should be suggested:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains(UNBORN_HEAD_CAUSE),
+        "the japanese description must not be used:\n{stderr}"
+    );
 }
 
 /// サブコマンドを追加しても、引数なし・`--all` の `gz branch` が切替のままであることを確認する。
@@ -446,7 +742,7 @@ fn nested_subcommands_have_their_own_help() {
     }
 }
 
-/// 変更が 1 件も無い場合、`gz restore` / `gz add` は TUI を起動せずに終了することを確認する。
+/// 変更が 1 件も無い場合、`gz restore` / `gz add` は TUI を起動せずに終了することを確認する（**ja**）。
 #[test]
 fn restore_and_add_report_when_there_is_nothing_to_select() {
     let dir = empty_repository("nothing-to-select");
@@ -465,13 +761,43 @@ fn restore_and_add_report_when_there_is_nothing_to_select() {
 
         let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
         assert!(
-            stderr.contains("選択できる候補がありません"),
+            stderr.contains(NO_CANDIDATES),
             "unexpected stderr for gz {arguments:?}:\n{stderr}"
         );
     }
 }
 
-/// stash / タグ / reflog が 1 件も無い場合、TUI を起動せずに終了することを確認する。
+/// 候補が 1 件も無いことが `en` では英語で伝わることを確認する（FR-27）。
+///
+/// `gz add` の候補ゼロは `.context(...)` を挟まずに `Error::NoCandidates` が返る経路であり、
+/// 連鎖全体が `describe` の英語だけで構成される。
+#[test]
+fn nothing_to_select_is_reported_in_english() {
+    let dir = empty_repository("nothing-to-select-en");
+
+    let output = gz_with("en")
+        .arg("add")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz add");
+
+    assert!(
+        !output.status.success(),
+        "gz add should exit non-zero when there is nothing to select"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains(NO_CANDIDATES_EN),
+        "unexpected stderr:\n{stderr}"
+    );
+    assert!(
+        !contains_japanese(&stderr),
+        "the english output must not mix japanese:\n{stderr}"
+    );
+}
+
+/// stash / タグ / reflog が 1 件も無い場合、TUI を起動せずに終了することを確認する（**ja**）。
 #[test]
 fn stash_tag_and_reflog_report_when_there_is_nothing_to_select() {
     let dir = empty_repository("nothing-to-select-p3");
@@ -501,7 +827,7 @@ fn stash_tag_and_reflog_report_when_there_is_nothing_to_select() {
 
         let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
         assert!(
-            stderr.contains("選択できる候補がありません"),
+            stderr.contains(NO_CANDIDATES),
             "unexpected stderr for gz {arguments:?}:\n{stderr}"
         );
         assert!(
@@ -616,7 +942,7 @@ fn commit_reports_when_there_is_nothing_to_commit() {
 
         let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
         assert!(
-            stderr.contains("選択できる候補がありません"),
+            stderr.contains(NO_CANDIDATES),
             "unexpected stderr for gz {arguments:?}:\n{stderr}"
         );
         assert!(
@@ -796,6 +1122,39 @@ fn the_debug_variable_logs_the_git_commands_to_stderr() {
     assert!(
         output.stdout.is_empty(),
         "the debug log must not pollute stdout"
+    );
+}
+
+/// デバッグログが (A)(B) の分類と、設定したロケール環境変数を併記することを確認する。
+///
+/// 候補一覧の読み取りは fuzgit が出力をパースする (A) 系であり、メッセージ言語を
+/// `LC_MESSAGES=C` に固定したことがログから追えなければならない（FR-26）。
+/// (B) 系は TUI を起動する経路にしか現れないため、行の組み立ての検証は
+/// `fuzgit::git::exec` の単体テストが受け持つ。
+#[test]
+fn the_debug_log_annotates_the_classification_and_the_locale() {
+    let dir = empty_repository("debug-log-locale");
+
+    let output = gz()
+        .arg("add")
+        .env("FUZGIT_DEBUG", "1")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz add with FUZGIT_DEBUG=1");
+
+    let stderr = String::from_utf8(output.stderr).expect("debug output should be utf-8");
+    let logged = stderr
+        .lines()
+        .find(|line| line.starts_with(DEBUG_PREFIX) && line.contains("git status"))
+        .unwrap_or_else(|| panic!("the candidate listing should be logged:\n{stderr}"));
+
+    assert!(
+        logged.contains("(A)"),
+        "the parsed classification should be logged: {logged}"
+    );
+    assert!(
+        logged.contains("LC_MESSAGES=C"),
+        "the pinned message locale should be logged: {logged}"
     );
 }
 
@@ -1047,26 +1406,40 @@ fn diff_documents_its_comparison_modes_and_takes_no_revision_argument() {
 }
 
 /// `gz restore --source` に解決できないリビジョンを渡した場合、その名前を含むエラーになることを確認する。
+///
+/// 失敗した読み取り操作は `fuzgit::git::read::ReadOperation` という値であり、文へ組み立てるのは
+/// 言語ごとの `describe` である。言語を明示して起動し、リビジョン名（翻訳しないもの）と
+/// 操作の説明（翻訳するもの）の双方が出ることを確かめる。
 #[test]
 fn restore_reports_an_unknown_source_revision_by_name() {
-    let dir = empty_repository("restore-unknown-source");
+    // (表示言語, 操作の説明)
+    for (language, operation) in [
+        ("ja", "リビジョン `no-such-revision` の解決"),
+        ("en", "resolving the revision `no-such-revision`"),
+    ] {
+        let dir = empty_repository(&format!("restore-unknown-source-{language}"));
 
-    let output = gz()
-        .args(["restore", "--source", "no-such-revision"])
-        .current_dir(dir.path())
-        .output()
-        .expect("failed to run gz restore --source no-such-revision");
+        let output = gz_with(language)
+            .args(["restore", "--source", "no-such-revision"])
+            .current_dir(dir.path())
+            .output()
+            .expect("failed to run gz restore --source no-such-revision");
 
-    assert!(
-        !output.status.success(),
-        "an unknown revision should exit non-zero"
-    );
+        assert!(
+            !output.status.success(),
+            "an unknown revision should exit non-zero"
+        );
 
-    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
-    assert!(
-        stderr.contains("no-such-revision"),
-        "the unknown revision should be named:\n{stderr}"
-    );
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("no-such-revision"),
+            "the unknown revision should be named:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(operation),
+            "{language} should describe the failed operation:\n{stderr}"
+        );
+    }
 }
 
 /// リモートが 1 つも無い場合、`gz fetch` は原因と次の操作を伝えて終了することを確認する。
@@ -1607,24 +1980,37 @@ fn branch_without_a_subcommand_is_unaffected_by_the_management_subcommands() {
 }
 
 /// `gz cherry-pick --branch` に存在しないブランチを渡した場合、その名前を含むエラーになることを確認する。
+///
+/// [`restore_reports_an_unknown_source_revision_by_name`] と同じく、言語を明示して
+/// ブランチ名（翻訳しないもの）と操作の説明（翻訳するもの）の双方を確かめる。
 #[test]
 fn cherry_pick_reports_an_unknown_branch_by_name() {
-    let dir = empty_repository("cherry-pick-unknown-branch");
+    // (表示言語, 操作の説明)
+    for (language, operation) in [
+        ("ja", "ブランチ `no-such-branch` の解決"),
+        ("en", "resolving the branch `no-such-branch`"),
+    ] {
+        let dir = empty_repository(&format!("cherry-pick-unknown-branch-{language}"));
 
-    let output = gz()
-        .args(["cherry-pick", "--branch", "no-such-branch"])
-        .current_dir(dir.path())
-        .output()
-        .expect("failed to run gz cherry-pick --branch no-such-branch");
+        let output = gz_with(language)
+            .args(["cherry-pick", "--branch", "no-such-branch"])
+            .current_dir(dir.path())
+            .output()
+            .expect("failed to run gz cherry-pick --branch no-such-branch");
 
-    assert!(
-        !output.status.success(),
-        "an unknown branch should exit non-zero"
-    );
+        assert!(
+            !output.status.success(),
+            "an unknown branch should exit non-zero"
+        );
 
-    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
-    assert!(
-        stderr.contains("no-such-branch"),
-        "the unknown branch should be named:\n{stderr}"
-    );
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("no-such-branch"),
+            "the unknown branch should be named:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(operation),
+            "{language} should describe the failed operation:\n{stderr}"
+        );
+    }
 }

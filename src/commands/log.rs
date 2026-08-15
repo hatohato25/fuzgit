@@ -6,22 +6,31 @@ use anyhow::{Context as _, Result};
 
 use crate::finder::{FinderItem, PreviewSource, select_one};
 use crate::git::read::{CommitInfo, CommitScope, commits};
+use crate::i18n::{Language, Messages};
 
 /// コミット履歴から 1 件選び、そのフルハッシュを標準出力へ書き出す。
 ///
 /// # Errors
 ///
 /// コミット履歴の取得、選択（中断を含む）、標準出力への書き込みに失敗した場合にエラーを返す。
-pub fn run(repository: &gix::Repository, limit: usize) -> Result<()> {
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    limit: usize,
+) -> Result<()> {
     let candidates = commits(repository, CommitScope::Head, limit)
-        .context("コミット履歴の取得に失敗しました")?;
+        .context(messages.common().commit_history_read_failed())?;
 
-    let items = candidates.iter().map(to_item).collect();
+    let items = candidates
+        .iter()
+        .map(|commit| to_item(language, commit))
+        .collect();
     let selected = select_one(items)?;
 
     // パイプ利用を想定し、stdout にはフルハッシュ以外を混ぜない。
     // パイプ先が先に閉じた場合に panic しないよう、書き込みエラーは明示的に伝播する
-    writeln!(std::io::stdout(), "{selected}").context("標準出力への書き込みに失敗しました")?;
+    writeln!(std::io::stdout(), "{selected}").context(messages.common().stdout_write_failed())?;
 
     Ok(())
 }
@@ -49,11 +58,12 @@ fn preview_args(commit: &CommitInfo) -> Vec<String> {
 }
 
 /// コミットを finder の候補へ変換する。
-fn to_item(commit: &CommitInfo) -> FinderItem {
+fn to_item(language: Language, commit: &CommitInfo) -> FinderItem {
     FinderItem::new(
         display_line(commit),
         commit.id.clone(),
         PreviewSource::Git(preview_args(commit)),
+        language.messages(),
     )
 }
 
@@ -94,7 +104,7 @@ mod tests {
 
     #[test]
     fn an_item_keeps_the_full_hash_as_its_key() {
-        let item = to_item(&commit());
+        let item = to_item(Language::Japanese, &commit());
 
         assert_eq!(item.key(), "1f0c9a4b3d2e5f60718293a4b5c6d7e8f9012345");
     }

@@ -23,6 +23,7 @@ use crate::git::read::{
     current_branch, upstream,
 };
 use crate::git::repo::workdir;
+use crate::i18n::{Language, Messages};
 
 /// 現在の位置を指すリビジョン。
 const HEAD_REVISION: &str = "HEAD";
@@ -33,31 +34,8 @@ const STAGED_OPTION: &str = "--staged";
 /// キャプチャ実行でも色付けを維持させる `git diff` のオプション（プレビュー用）。
 const COLOR_OPTION: &str = "--color=always";
 
-/// 比較範囲に差分が無い場合に伝えること。
-///
-/// 差分が無いのは正常な状態であり、エラーにはしない（requirements.md FR-17）。
-const NO_DIFF_MESSAGE: &str = "差分はありません";
-
-/// 比較元のブランチを選ぶ際のヘッダー。
-///
-/// ヘッダーは候補リストの幅で打ち切られるため、進捗（`1/2`）と対象だけに絞る。
-const BASE_BRANCH_HEADER: &str = "1/2 比較元のブランチ";
-
-/// 比較先のブランチを選ぶ際のヘッダー。
-const TARGET_BRANCH_HEADER: &str = "2/2 比較先のブランチ";
-
-/// 比較元のコミットを選ぶ際のヘッダー。
-const BASE_COMMIT_HEADER: &str = "1/2 比較元のコミット";
-
-/// 比較先のコミットを選ぶ際のヘッダー。
-const TARGET_COMMIT_HEADER: &str = "2/2 比較先のコミット";
-
 /// プレビューに表示する直近コミット数（ブランチ候補）。
 const PREVIEW_COMMIT_COUNT: &str = "50";
-
-/// detached HEAD で `--upstream` を指定した場合の案内。
-const DETACHED_MESSAGE: &str = "detached HEAD には upstream がありません。\
-`gz branch` でブランチへ切り替えてから実行してください";
 
 /// 比較のモード。
 ///
@@ -95,6 +73,7 @@ impl DiffMode {
     ///
     /// 2 つ以上が同時に指定された場合にエラーを返す。
     pub fn from_flags(
+        messages: &dyn Messages,
         staged: bool,
         head: bool,
         upstream: bool,
@@ -108,9 +87,7 @@ impl DiffMode {
             (false, false, true, false, false) => Ok(Self::Upstream),
             (false, false, false, true, false) => Ok(Self::BranchToBranch),
             (false, false, false, false, true) => Ok(Self::CommitToCommit),
-            _ => bail!(
-                "`--staged` / `--head` / `--upstream` / `--branch` / `--commit` は同時に指定できません"
-            ),
+            _ => bail!(messages.diff().conflicting_modes()),
         }
     }
 }
@@ -131,26 +108,26 @@ struct DiffRange {
 
 impl DiffRange {
     /// index と作業ツリーの比較（引数なしの `git diff` と同じ）。
-    fn unstaged() -> Self {
+    fn unstaged(messages: &dyn Messages) -> Self {
         Self {
             arguments: Vec::new(),
-            description: "未ステージの変更: index と作業ツリー".to_owned(),
+            description: messages.diff().unstaged_range().to_owned(),
         }
     }
 
     /// HEAD と index の比較（`git diff --staged`）。
-    fn staged() -> Self {
+    fn staged(messages: &dyn Messages) -> Self {
         Self {
             arguments: vec![STAGED_OPTION.to_owned()],
-            description: "ステージ済みの変更: HEAD と index".to_owned(),
+            description: messages.diff().staged_range().to_owned(),
         }
     }
 
     /// HEAD と作業ツリーの比較（`git diff HEAD`）。
-    fn head() -> Self {
+    fn head(messages: &dyn Messages) -> Self {
         Self {
             arguments: vec![HEAD_REVISION.to_owned()],
-            description: "HEAD と作業ツリー".to_owned(),
+            description: messages.diff().head_range().to_owned(),
         }
     }
 
@@ -178,18 +155,19 @@ impl DiffRange {
 /// 比較範囲の確定（upstream 未設定・detached HEAD を含む）、候補の取得、
 /// 選択（中断を含む）、`git diff` の実行に失敗した場合にエラーを返す。
 /// 比較範囲に差分が無い場合はエラーにせず、その旨を伝えて正常終了する。
-pub fn run(repository: &gix::Repository, mode: DiffMode) -> Result<()> {
-    let range = resolve_range(repository, mode)?;
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    mode: DiffMode,
+) -> Result<()> {
+    let range = resolve_range(language, messages, repository, mode)?;
 
-    let files = changed_files(workdir(repository)?, &range.arguments).with_context(|| {
-        format!(
-            "変更ファイル一覧の取得に失敗しました（{description}）",
-            description = range.description
-        )
-    })?;
+    let files = changed_files(workdir(repository)?, &range.arguments)
+        .with_context(|| messages.diff().files_read_failed(&range.description))?;
 
     if files.is_empty() {
-        return report_no_diff(&mut std::io::stderr(), &range);
+        return report_no_diff(messages, &mut std::io::stderr(), &range);
     }
 
     let candidates: Vec<FileCandidate> = files
@@ -198,23 +176,19 @@ pub fn run(repository: &gix::Repository, mode: DiffMode) -> Result<()> {
         .collect();
     let items = candidates
         .iter()
-        .map(|candidate| to_item(&range, candidate))
+        .map(|candidate| to_item(language, &range, candidate))
         .collect();
     let options = FinderOptions::new(SelectionMode::Multi).with_header(range.description.clone());
     let selected = select_many_with(items, &options)?;
 
     // skim が返す選択順は候補順と一致しないため、候補一覧の並び（git が報告した順）へ戻す
-    let selected = resolve(&candidates, &selected)?;
+    let selected = resolve(messages, &candidates, &selected)?;
     let paths = target_paths(&selected);
 
     let arguments = diff_args(&range, &paths);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(&arguments).with_context(|| {
-        format!(
-            "差分の表示に失敗しました（{description}）",
-            description = range.description
-        )
-    })?;
+    run_git(language, &arguments)
+        .with_context(|| messages.diff().diff_failed(&range.description))?;
 
     Ok(())
 }
@@ -226,14 +200,19 @@ pub fn run(repository: &gix::Repository, mode: DiffMode) -> Result<()> {
 /// # Errors
 ///
 /// upstream が無い場合、候補の取得・選択に失敗した場合にエラーを返す。
-fn resolve_range(repository: &gix::Repository, mode: DiffMode) -> Result<DiffRange> {
+fn resolve_range(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    mode: DiffMode,
+) -> Result<DiffRange> {
     match mode {
-        DiffMode::Unstaged => Ok(DiffRange::unstaged()),
-        DiffMode::Staged => Ok(DiffRange::staged()),
-        DiffMode::Head => Ok(DiffRange::head()),
-        DiffMode::Upstream => upstream_range(repository),
-        DiffMode::BranchToBranch => branch_range(repository),
-        DiffMode::CommitToCommit => commit_range(repository),
+        DiffMode::Unstaged => Ok(DiffRange::unstaged(messages)),
+        DiffMode::Staged => Ok(DiffRange::staged(messages)),
+        DiffMode::Head => Ok(DiffRange::head(messages)),
+        DiffMode::Upstream => upstream_range(messages, repository),
+        DiffMode::BranchToBranch => branch_range(language, messages, repository),
+        DiffMode::CommitToCommit => commit_range(language, messages, repository),
     }
 }
 
@@ -246,28 +225,25 @@ fn resolve_range(repository: &gix::Repository, mode: DiffMode) -> Result<DiffRan
 ///
 /// detached HEAD の場合、upstream が設定されていない場合、追跡参照を組み立てられない
 /// 設定の場合に、それぞれの原因を示すエラーを返す（推測して別の対象へ倒さない）。
-fn upstream_range(repository: &gix::Repository) -> Result<DiffRange> {
-    let Some(branch) = current_branch(repository).context("現在のブランチの取得に失敗しました")?
+fn upstream_range(messages: &dyn Messages, repository: &gix::Repository) -> Result<DiffRange> {
+    let Some(branch) =
+        current_branch(repository).context(messages.common().current_branch_read_failed())?
     else {
-        bail!("{DETACHED_MESSAGE}");
+        bail!(messages.common().detached_head_without_upstream());
     };
 
     let Some(upstream) = upstream(repository, &branch)
-        .with_context(|| format!("`{branch}` の upstream の取得に失敗しました"))?
+        .with_context(|| messages.common().upstream_read_failed(&branch))?
     else {
-        bail!(
-            "`{branch}` に upstream が設定されていません。\
-`gz push -u` で push するか、`git branch --set-upstream-to=<remote>/<branch>` で設定してください"
-        );
+        bail!(messages.common().upstream_not_configured(&branch));
     };
 
     let Some(reference) = upstream.tracking_ref() else {
-        bail!(
-            "`{branch}` の upstream（{remote} / {merge_ref}）からリモート追跡参照を組み立てられません。\
-比較するリビジョンを `gz diff --branch` で選ぶか、素の `git diff` を使ってください",
-            remote = upstream.remote,
-            merge_ref = upstream.merge_ref
-        );
+        bail!(messages.diff().tracking_ref_unavailable(
+            &branch,
+            &upstream.remote,
+            &upstream.merge_ref
+        ));
     };
 
     Ok(DiffRange::revisions(HEAD_REVISION, &reference))
@@ -278,14 +254,28 @@ fn upstream_range(repository: &gix::Repository) -> Result<DiffRange> {
 /// # Errors
 ///
 /// ブランチ一覧の取得、選択（中断を含む）に失敗した場合にエラーを返す。
-fn branch_range(repository: &gix::Repository) -> Result<DiffRange> {
+fn branch_range(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+) -> Result<DiffRange> {
     // リモート追跡ブランチも候補に含める。`main` と `origin/main` の比較は
     // 「push していない変更の確認」という日常的な用途であるため
-    let candidates =
-        branches(repository, BranchScope::All).context("ブランチ一覧の取得に失敗しました")?;
+    let candidates = branches(repository, BranchScope::All)
+        .context(messages.common().branch_list_read_failed())?;
 
-    let base = choose_branch(&candidates, BASE_BRANCH_HEADER)?;
-    let target = choose_branch(&candidates, TARGET_BRANCH_HEADER)?;
+    let base = choose_branch(
+        language,
+        messages,
+        &candidates,
+        messages.diff().base_branch_header(),
+    )?;
+    let target = choose_branch(
+        language,
+        messages,
+        &candidates,
+        messages.diff().target_branch_header(),
+    )?;
 
     Ok(DiffRange::revisions(&base, &target))
 }
@@ -295,13 +285,27 @@ fn branch_range(repository: &gix::Repository) -> Result<DiffRange> {
 /// # Errors
 ///
 /// コミット履歴の取得、選択（中断を含む）に失敗した場合にエラーを返す。
-fn commit_range(repository: &gix::Repository) -> Result<DiffRange> {
+fn commit_range(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+) -> Result<DiffRange> {
     // 候補・プレビューは `gz log` と共通（requirements.md FR-17）
     let candidates = commits(repository, CommitScope::Head, DEFAULT_COMMIT_LIMIT)
-        .context("コミット履歴の取得に失敗しました")?;
+        .context(messages.common().commit_history_read_failed())?;
 
-    let base = choose_commit(&candidates, BASE_COMMIT_HEADER)?;
-    let target = choose_commit(&candidates, TARGET_COMMIT_HEADER)?;
+    let base = choose_commit(
+        language,
+        messages,
+        &candidates,
+        messages.diff().base_commit_header(),
+    )?;
+    let target = choose_commit(
+        language,
+        messages,
+        &candidates,
+        messages.diff().target_commit_header(),
+    )?;
 
     Ok(DiffRange::labelled_revisions(
         &base.id,
@@ -316,8 +320,16 @@ fn commit_range(repository: &gix::Repository) -> Result<DiffRange> {
 /// # Errors
 ///
 /// 選択（中断を含む）に失敗した場合、選択結果が候補一覧に無い場合にエラーを返す。
-fn choose_branch(candidates: &[BranchInfo], header: &str) -> Result<String> {
-    let items = candidates.iter().map(branch_item).collect();
+fn choose_branch(
+    language: Language,
+    messages: &dyn Messages,
+    candidates: &[BranchInfo],
+    header: &str,
+) -> Result<String> {
+    let items = candidates
+        .iter()
+        .map(|branch| branch_item(language, branch))
+        .collect();
     let options = FinderOptions::new(SelectionMode::Single).with_header(header.to_owned());
     let selected = select_one_with(items, &options)?;
 
@@ -327,7 +339,7 @@ fn choose_branch(candidates: &[BranchInfo], header: &str) -> Result<String> {
         .iter()
         .find(|candidate| candidate.name == selected)
         .map(|candidate| candidate.name.clone())
-        .ok_or_else(|| anyhow!("選択されたブランチ `{selected}` が候補に見つかりません"))
+        .ok_or_else(|| anyhow!(messages.diff().branch_selection_not_found(&selected)))
 }
 
 /// コミットを 1 件選び、候補一覧との照合を経たコミットを返す。
@@ -338,15 +350,23 @@ fn choose_branch(candidates: &[BranchInfo], header: &str) -> Result<String> {
 /// # Errors
 ///
 /// [`choose_branch`] と同じ。
-fn choose_commit<'a>(candidates: &'a [CommitInfo], header: &str) -> Result<&'a CommitInfo> {
-    let items = candidates.iter().map(commit_item).collect();
+fn choose_commit<'a>(
+    language: Language,
+    messages: &dyn Messages,
+    candidates: &'a [CommitInfo],
+    header: &str,
+) -> Result<&'a CommitInfo> {
+    let items = candidates
+        .iter()
+        .map(|commit| commit_item(language, commit))
+        .collect();
     let options = FinderOptions::new(SelectionMode::Single).with_header(header.to_owned());
     let selected = select_one_with(items, &options)?;
 
     candidates
         .iter()
         .find(|candidate| candidate.id == selected)
-        .ok_or_else(|| anyhow!("選択されたコミット `{selected}` が候補に見つかりません"))
+        .ok_or_else(|| anyhow!(messages.diff().commit_selection_not_found(&selected)))
 }
 
 /// ブランチ候補の一覧に表示する 1 行を組み立てる。
@@ -373,11 +393,12 @@ fn branch_preview_args(branch: &BranchInfo) -> Vec<String> {
 }
 
 /// ブランチを finder の候補へ変換する。
-fn branch_item(branch: &BranchInfo) -> FinderItem {
+fn branch_item(language: Language, branch: &BranchInfo) -> FinderItem {
     FinderItem::new(
         branch_display_line(branch),
         branch.name.clone(),
         PreviewSource::Git(branch_preview_args(branch)),
+        language.messages(),
     )
 }
 
@@ -402,11 +423,12 @@ fn commit_preview_args(commit: &CommitInfo) -> Vec<String> {
 }
 
 /// コミットを finder の候補へ変換する。
-fn commit_item(commit: &CommitInfo) -> FinderItem {
+fn commit_item(language: Language, commit: &CommitInfo) -> FinderItem {
     FinderItem::new(
         commit_display_line(commit),
         commit.id.clone(),
         PreviewSource::Git(commit_preview_args(commit)),
+        language.messages(),
     )
 }
 
@@ -420,11 +442,12 @@ fn file_preview_args(range: &DiffRange, path: &str) -> Vec<String> {
 }
 
 /// 変更ファイルを finder の候補へ変換する。
-fn to_item(range: &DiffRange, candidate: &FileCandidate) -> FinderItem {
+fn to_item(language: Language, range: &DiffRange, candidate: &FileCandidate) -> FinderItem {
     FinderItem::new(
         candidate.display.clone(),
         candidate.key.clone(),
         PreviewSource::Git(file_preview_args(range, &candidate.key)),
+        language.messages(),
     )
 }
 
@@ -441,11 +464,8 @@ fn diff_args(range: &DiffRange, paths: &[String]) -> Vec<String> {
 }
 
 /// 差分が無いことを伝える 1 行を組み立てる。
-fn no_diff_message(range: &DiffRange) -> String {
-    format!(
-        "{NO_DIFF_MESSAGE}（{description}）",
-        description = range.description
-    )
+fn no_diff_message(messages: &dyn Messages, range: &DiffRange) -> String {
+    messages.diff().no_diff(&range.description)
 }
 
 /// 差分が無いことを伝えて正常終了する。
@@ -455,9 +475,17 @@ fn no_diff_message(range: &DiffRange) -> String {
 /// # Errors
 ///
 /// 書き込みに失敗した場合にエラーを返す。
-fn report_no_diff(writer: &mut impl std::io::Write, range: &DiffRange) -> Result<()> {
-    writeln!(writer, "{message}", message = no_diff_message(range))
-        .context("標準エラーへの書き込みに失敗しました")?;
+fn report_no_diff(
+    messages: &dyn Messages,
+    writer: &mut impl std::io::Write,
+    range: &DiffRange,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "{message}",
+        message = no_diff_message(messages, range)
+    )
+    .context(messages.common().stderr_write_failed())?;
 
     Ok(())
 }
@@ -465,6 +493,11 @@ fn report_no_diff(writer: &mut impl std::io::Write, range: &DiffRange) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 既定（日本語）の文言一式。文言そのものを固定するテスト以外はこれを使う。
+    fn messages() -> &'static dyn Messages {
+        Language::Japanese.messages()
+    }
 
     fn branch(name: &str) -> BranchInfo {
         BranchInfo {
@@ -491,7 +524,7 @@ mod tests {
     #[test]
     fn no_flag_compares_the_index_with_the_work_tree_like_plain_git_diff() {
         assert_eq!(
-            DiffMode::from_flags(false, false, false, false, false)
+            DiffMode::from_flags(messages(), false, false, false, false, false)
                 .expect("no flag is a valid combination"),
             DiffMode::Unstaged
         );
@@ -508,7 +541,7 @@ mod tests {
         ];
 
         for ((staged, head, upstream, branch, commit), expected) in combinations {
-            let mode = DiffMode::from_flags(staged, head, upstream, branch, commit)
+            let mode = DiffMode::from_flags(messages(), staged, head, upstream, branch, commit)
                 .unwrap_or_else(|err| panic!("a single flag should be accepted: {err:#}"));
 
             assert_eq!(mode, expected);
@@ -526,7 +559,7 @@ mod tests {
         ];
 
         for (staged, head, upstream, branch, commit) in combinations {
-            let err = DiffMode::from_flags(staged, head, upstream, branch, commit)
+            let err = DiffMode::from_flags(messages(), staged, head, upstream, branch, commit)
                 .expect_err("combined flags must be rejected");
 
             assert!(
@@ -539,19 +572,19 @@ mod tests {
     #[test]
     fn the_unstaged_range_adds_no_argument_of_its_own() {
         assert!(
-            DiffRange::unstaged().arguments.is_empty(),
+            DiffRange::unstaged(messages()).arguments.is_empty(),
             "plain `git diff` already compares the index with the work tree"
         );
     }
 
     #[test]
     fn the_staged_range_uses_the_git_option_of_the_same_name() {
-        assert_eq!(DiffRange::staged().arguments, [STAGED_OPTION]);
+        assert_eq!(DiffRange::staged(messages()).arguments, [STAGED_OPTION]);
     }
 
     #[test]
     fn the_head_range_names_the_revision_to_compare_against() {
-        assert_eq!(DiffRange::head().arguments, [HEAD_REVISION]);
+        assert_eq!(DiffRange::head(messages()).arguments, [HEAD_REVISION]);
     }
 
     #[test]
@@ -598,7 +631,10 @@ mod tests {
 
     #[test]
     fn the_paths_are_placed_after_the_separator_as_pathspecs() {
-        let arguments = diff_args(&DiffRange::unstaged(), &paths(&["src/main.rs", "a b.txt"]));
+        let arguments = diff_args(
+            &DiffRange::unstaged(messages()),
+            &paths(&["src/main.rs", "a b.txt"]),
+        );
 
         assert_eq!(
             arguments,
@@ -614,11 +650,11 @@ mod tests {
     #[test]
     fn the_range_is_kept_between_the_subcommand_and_the_separator() {
         assert_eq!(
-            diff_args(&DiffRange::staged(), &paths(&["a.txt"])),
+            diff_args(&DiffRange::staged(messages()), &paths(&["a.txt"])),
             ["diff", STAGED_OPTION, "--", ":(top,literal)a.txt"]
         );
         assert_eq!(
-            diff_args(&DiffRange::head(), &paths(&["a.txt"])),
+            diff_args(&DiffRange::head(messages()), &paths(&["a.txt"])),
             ["diff", "HEAD", "--", ":(top,literal)a.txt"]
         );
         assert_eq!(
@@ -632,7 +668,7 @@ mod tests {
 
     #[test]
     fn a_path_starting_with_a_dash_is_never_taken_for_an_option() {
-        let arguments = diff_args(&DiffRange::unstaged(), &paths(&["-weird.txt"]));
+        let arguments = diff_args(&DiffRange::unstaged(messages()), &paths(&["-weird.txt"]));
 
         let separator = arguments
             .iter()
@@ -666,24 +702,24 @@ mod tests {
     #[test]
     fn a_preview_of_the_unstaged_range_carries_the_colour_option_alone() {
         assert_eq!(
-            file_preview_args(&DiffRange::unstaged(), "a.txt"),
+            file_preview_args(&DiffRange::unstaged(messages()), "a.txt"),
             ["diff", COLOR_OPTION, "--", ":(top,literal)a.txt"]
         );
     }
 
     #[test]
     fn a_file_item_is_keyed_by_its_path_and_previews_that_path_only() {
-        let range = DiffRange::head();
+        let range = DiffRange::head(messages());
         let candidate = FileCandidate::from_path("dir/with space.txt");
 
-        let item = to_item(&range, &candidate);
+        let item = to_item(Language::Japanese, &range, &candidate);
 
         assert_eq!(item.key(), "dir/with space.txt");
     }
 
     #[test]
     fn a_branch_item_keeps_the_branch_name_as_its_key() {
-        let item = branch_item(&branch("origin/main"));
+        let item = branch_item(Language::Japanese, &branch("origin/main"));
 
         assert_eq!(item.key(), "origin/main");
         assert_eq!(
@@ -703,7 +739,7 @@ mod tests {
 
     #[test]
     fn a_commit_item_keeps_the_full_hash_as_its_key_and_shows_the_same_line_as_the_log() {
-        let item = commit_item(&commit());
+        let item = commit_item(Language::Japanese, &commit());
 
         assert_eq!(item.key(), "1f0c9a4b3d2e5f60718293a4b5c6d7e8f9012345");
         assert_eq!(
@@ -724,12 +760,125 @@ mod tests {
     #[test]
     fn the_message_of_an_empty_diff_names_the_range_that_was_compared() {
         assert_eq!(
-            no_diff_message(&DiffRange::unstaged()),
+            no_diff_message(messages(), &DiffRange::unstaged(messages())),
             "差分はありません（未ステージの変更: index と作業ツリー）"
         );
         assert_eq!(
-            no_diff_message(&DiffRange::revisions("main", "origin/main")),
+            no_diff_message(messages(), &DiffRange::revisions("main", "origin/main")),
             "差分はありません（main → origin/main）"
+        );
+    }
+
+    #[test]
+    fn every_diff_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let diff = language.messages().diff();
+
+            for text in [
+                diff.conflicting_modes(),
+                diff.unstaged_range(),
+                diff.staged_range(),
+                diff.head_range(),
+                diff.base_branch_header(),
+                diff.target_branch_header(),
+                diff.base_commit_header(),
+                diff.target_commit_header(),
+            ] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+
+            for (text, argument) in [
+                (
+                    diff.tracking_ref_unavailable("main", "origin", "refs/heads/main"),
+                    "refs/heads/main",
+                ),
+                (diff.files_read_failed("HEAD → main"), "HEAD → main"),
+                (diff.branch_selection_not_found("main"), "main"),
+                (diff.commit_selection_not_found("1f0c9a4"), "1f0c9a4"),
+                (diff.no_diff("HEAD → main"), "HEAD → main"),
+                (diff.diff_failed("HEAD → main"), "HEAD → main"),
+            ] {
+                assert!(
+                    text.contains(argument),
+                    "{language:?} must mention `{argument}`: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_two_step_headers_keep_their_progress_in_both_languages() {
+        // どちらを選んでいるのかを示す `1/2` / `2/2` は数値であり訳さない
+        for language in [Language::Japanese, Language::English] {
+            let diff = language.messages().diff();
+
+            assert!(
+                diff.base_branch_header().starts_with("1/2")
+                    && diff.base_commit_header().starts_with("1/2"),
+                "{language:?} must keep the progress of the first step"
+            );
+            assert!(
+                diff.target_branch_header().starts_with("2/2")
+                    && diff.target_commit_header().starts_with("2/2"),
+                "{language:?} must keep the progress of the second step"
+            );
+        }
+    }
+
+    #[test]
+    fn the_diff_wording_is_translated() {
+        let japanese = Language::Japanese.messages().diff();
+        let english = Language::English.messages().diff();
+
+        assert_ne!(japanese.conflicting_modes(), english.conflicting_modes());
+        assert_ne!(japanese.unstaged_range(), english.unstaged_range());
+        assert_ne!(japanese.staged_range(), english.staged_range());
+        assert_ne!(japanese.head_range(), english.head_range());
+        assert_ne!(japanese.base_branch_header(), english.base_branch_header());
+        assert_ne!(
+            japanese.target_branch_header(),
+            english.target_branch_header()
+        );
+        assert_ne!(japanese.base_commit_header(), english.base_commit_header());
+        assert_ne!(
+            japanese.target_commit_header(),
+            english.target_commit_header()
+        );
+        assert_ne!(
+            japanese.tracking_ref_unavailable("main", "origin", "refs/heads/main"),
+            english.tracking_ref_unavailable("main", "origin", "refs/heads/main")
+        );
+        assert_ne!(
+            japanese.files_read_failed("HEAD → main"),
+            english.files_read_failed("HEAD → main")
+        );
+        assert_ne!(
+            japanese.branch_selection_not_found("main"),
+            english.branch_selection_not_found("main")
+        );
+        assert_ne!(
+            japanese.commit_selection_not_found("1f0c9a4"),
+            english.commit_selection_not_found("1f0c9a4")
+        );
+        assert_ne!(
+            japanese.no_diff("HEAD → main"),
+            english.no_diff("HEAD → main")
+        );
+        assert_ne!(
+            japanese.diff_failed("HEAD → main"),
+            english.diff_failed("HEAD → main")
+        );
+    }
+
+    #[test]
+    fn the_range_of_a_message_follows_the_language_of_the_range_itself() {
+        // 比較範囲の呼称は見出しにもメッセージにも現れるため、同じ文言一式から引く
+        let english = Language::English.messages();
+
+        assert!(
+            no_diff_message(english, &DiffRange::unstaged(english))
+                .contains(english.diff().unstaged_range()),
+            "the range must be described in the language of the message"
         );
     }
 
@@ -737,12 +886,13 @@ mod tests {
     fn an_empty_diff_is_reported_without_failing() {
         let mut written = Vec::new();
 
-        report_no_diff(&mut written, &DiffRange::staged()).expect("reporting should succeed");
+        report_no_diff(messages(), &mut written, &DiffRange::staged(messages()))
+            .expect("reporting should succeed");
 
         let text = String::from_utf8(written).expect("the message should be utf-8");
         assert!(
-            text.contains(NO_DIFF_MESSAGE),
-            "the empty diff should be reported: {text}"
+            text.contains(messages().diff().staged_range()),
+            "the empty diff should be reported with the range it compared: {text}"
         );
         assert!(
             text.ends_with('\n'),

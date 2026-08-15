@@ -5,6 +5,7 @@ use anyhow::{Context as _, Result, anyhow};
 use crate::finder::{FinderItem, PreviewSource, select_one};
 use crate::git::exec::run_git;
 use crate::git::read::{BranchInfo, BranchScope, branches};
+use crate::i18n::{Language, Messages};
 
 /// 現在のブランチを示すマーク（`git branch` と同じ `*`）。
 const CURRENT_MARK: &str = "* ";
@@ -20,20 +21,29 @@ const PREVIEW_COMMIT_COUNT: &str = "50";
 /// # Errors
 ///
 /// ブランチ一覧の取得、選択（中断を含む）、`git switch` の実行に失敗した場合にエラーを返す。
-pub fn run(repository: &gix::Repository, scope: BranchScope) -> Result<()> {
-    let candidates = branches(repository, scope).context("ブランチ一覧の取得に失敗しました")?;
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    scope: BranchScope,
+) -> Result<()> {
+    let candidates =
+        branches(repository, scope).context(messages.common().branch_list_read_failed())?;
 
-    let items = candidates.iter().map(to_item).collect();
+    let items = candidates
+        .iter()
+        .map(|branch| to_item(language, branch))
+        .collect();
     let selected = select_one(items)?;
 
     let branch = candidates
         .iter()
         .find(|candidate| candidate.name == selected)
-        .ok_or_else(|| anyhow!("選択されたブランチ `{selected}` が候補に見つかりません"))?;
+        .ok_or_else(|| anyhow!(messages.branch().selection_not_found(&selected)))?;
 
-    let target = switch_target(branch)?;
-    run_git(&["switch", &target])
-        .with_context(|| format!("`{target}` への切り替えに失敗しました"))?;
+    let target = switch_target(messages, branch)?;
+    run_git(language, &["switch", &target])
+        .with_context(|| messages.common().switch_failed(&target))?;
 
     Ok(())
 }
@@ -67,11 +77,12 @@ fn preview_args(branch: &BranchInfo) -> Vec<String> {
 }
 
 /// ブランチを finder の候補へ変換する。
-fn to_item(branch: &BranchInfo) -> FinderItem {
+fn to_item(language: Language, branch: &BranchInfo) -> FinderItem {
     FinderItem::new(
         display_line(branch),
         branch.name.clone(),
         PreviewSource::Git(preview_args(branch)),
+        language.messages(),
     )
 }
 
@@ -84,7 +95,7 @@ fn to_item(branch: &BranchInfo) -> FinderItem {
 /// # Errors
 ///
 /// リモート追跡ブランチ名がリモート名を含まない形式で、追跡先の名前を決定できない場合にエラーを返す。
-fn switch_target(branch: &BranchInfo) -> Result<String> {
+fn switch_target(messages: &dyn Messages, branch: &BranchInfo) -> Result<String> {
     if !branch.is_remote {
         return Ok(branch.name.clone());
     }
@@ -93,12 +104,7 @@ fn switch_target(branch: &BranchInfo) -> Result<String> {
         .name
         .split_once('/')
         .map(|(_remote, local)| local.to_owned())
-        .ok_or_else(|| {
-            anyhow!(
-                "リモート追跡ブランチ `{}` から追跡先のブランチ名を決定できません",
-                branch.name
-            )
-        })
+        .ok_or_else(|| anyhow!(messages.branch().tracking_target_undetermined(&branch.name)))
 }
 
 #[cfg(test)]
@@ -123,7 +129,8 @@ mod tests {
 
     #[test]
     fn a_local_branch_switches_to_its_own_name() {
-        let target = switch_target(&local("feature")).expect("local branch is always switchable");
+        let target = switch_target(Language::Japanese.messages(), &local("feature"))
+            .expect("local branch is always switchable");
 
         assert_eq!(target, "feature");
     }
@@ -133,36 +140,43 @@ mod tests {
         let mut branch = local("main");
         branch.is_current = true;
 
-        let target = switch_target(&branch).expect("current branch is switchable");
+        let target = switch_target(Language::Japanese.messages(), &branch)
+            .expect("current branch is switchable");
 
         assert_eq!(target, "main");
     }
 
     #[test]
     fn a_remote_branch_drops_the_remote_name_for_dwim() {
-        let target = switch_target(&remote("origin/feature")).expect("remote branch is switchable");
+        let target = switch_target(Language::Japanese.messages(), &remote("origin/feature"))
+            .expect("remote branch is switchable");
 
         assert_eq!(target, "feature");
     }
 
     #[test]
     fn only_the_remote_name_is_dropped_from_a_hierarchical_branch() {
-        let target =
-            switch_target(&remote("upstream/feature/login")).expect("remote branch is switchable");
+        let target = switch_target(
+            Language::Japanese.messages(),
+            &remote("upstream/feature/login"),
+        )
+        .expect("remote branch is switchable");
 
         assert_eq!(target, "feature/login");
     }
 
     #[test]
     fn a_local_branch_containing_a_slash_keeps_its_full_name() {
-        let target = switch_target(&local("feature/login")).expect("local branch is switchable");
+        let target = switch_target(Language::Japanese.messages(), &local("feature/login"))
+            .expect("local branch is switchable");
 
         assert_eq!(target, "feature/login");
     }
 
     #[test]
     fn a_remote_branch_without_a_remote_name_is_rejected() {
-        let err = switch_target(&remote("origin")).expect_err("a bare remote name is not a branch");
+        let err = switch_target(Language::Japanese.messages(), &remote("origin"))
+            .expect_err("a bare remote name is not a branch");
 
         assert!(
             err.to_string().contains("origin"),
@@ -201,8 +215,41 @@ mod tests {
 
     #[test]
     fn an_item_keeps_the_branch_name_as_its_key() {
-        let item = to_item(&remote("origin/main"));
+        let item = to_item(Language::Japanese, &remote("origin/main"));
 
         assert_eq!(item.key(), "origin/main");
+    }
+
+    #[test]
+    fn every_branch_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let branch = language.messages().branch();
+
+            for (text, argument) in [
+                (branch.selection_not_found("feature"), "feature"),
+                (branch.tracking_target_undetermined("origin"), "origin"),
+            ] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+                assert!(
+                    text.contains(argument),
+                    "{language:?} must mention `{argument}`: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_branch_wording_is_translated() {
+        let japanese = Language::Japanese.messages().branch();
+        let english = Language::English.messages().branch();
+
+        assert_ne!(
+            japanese.selection_not_found("feature"),
+            english.selection_not_found("feature")
+        );
+        assert_ne!(
+            japanese.tracking_target_undetermined("origin"),
+            english.tracking_target_undetermined("origin")
+        );
     }
 }

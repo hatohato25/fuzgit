@@ -7,26 +7,34 @@ use crate::error::Error;
 use crate::finder::{FinderItem, PreviewSource, select_many};
 use crate::git::exec::{pathspec, run_git};
 use crate::git::read::{ChangeScope, FileChange, changes};
+use crate::i18n::{Language, Messages};
+
+/// 失敗を伝える文言に用いる、実行する git のサブコマンド名。
+const ADD_COMMAND: &str = "git add";
 
 /// 未ステージの変更と未追跡ファイルを複数選択し、`git add` でステージする。
 ///
 /// # Errors
 ///
 /// 変更ファイル一覧の取得、選択（中断を含む）、`git add` の実行に失敗した場合にエラーを返す。
-pub fn run(repository: &gix::Repository) -> Result<()> {
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+) -> Result<()> {
     let changes = changes(repository, ChangeScope::Stageable)
-        .context("変更ファイル一覧の取得に失敗しました")?;
+        .context(messages.common().changed_files_read_failed())?;
 
     let mut items = Vec::with_capacity(changes.len());
     for change in &changes {
         let candidate = to_candidate(change);
-        items.push(to_item(repository, change, &candidate)?);
+        items.push(to_item(language, repository, change, &candidate)?);
     }
 
     let selected = select_many(items)?;
-    let selected = resolve_changes(&changes, &selected)?;
+    let selected = resolve_changes(messages, &changes, &selected)?;
 
-    run_on_changes(&selected)
+    run_on_changes(language, messages, &selected)
 }
 
 /// 選択済みの変更ファイルを `git add` でステージする。
@@ -37,14 +45,18 @@ pub fn run(repository: &gix::Repository) -> Result<()> {
 /// # Errors
 ///
 /// `git add` の実行に失敗した場合にエラーを返す。
-pub fn run_on_changes(selected: &[&FileChange]) -> Result<()> {
+pub fn run_on_changes(
+    language: Language,
+    messages: &dyn Messages,
+    selected: &[&FileChange],
+) -> Result<()> {
     let candidates: Vec<FileCandidate> =
         selected.iter().map(|change| to_candidate(change)).collect();
     let paths = target_paths(&candidates.iter().collect::<Vec<&FileCandidate>>());
 
     let arguments = add_args(&paths);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(&arguments).context("git add の実行に失敗しました")?;
+    run_git(language, &arguments).context(messages.common().command_run_failed(ADD_COMMAND))?;
 
     Ok(())
 }
@@ -63,6 +75,7 @@ fn to_candidate(change: &FileChange) -> FileCandidate {
 ///
 /// 未追跡ファイルの絶対パスを解決できない（作業ツリーを持たない）場合にエラーを返す。
 fn to_item(
+    language: Language,
     repository: &gix::Repository,
     change: &FileChange,
     candidate: &FileCandidate,
@@ -71,6 +84,7 @@ fn to_item(
         candidate.display.clone(),
         candidate.key.clone(),
         preview(repository, change)?,
+        language.messages(),
     ))
 }
 
@@ -231,7 +245,8 @@ mod tests {
         let change = change("new.txt", "??");
         let candidate = to_candidate(&change);
 
-        let item = to_item(&repository, &change, &candidate).expect("the item should build");
+        let item = to_item(Language::Japanese, &repository, &change, &candidate)
+            .expect("the item should build");
 
         assert_eq!(item.key(), "new.txt");
         assert_eq!(candidate.display, "?? new.txt");

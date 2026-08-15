@@ -16,6 +16,7 @@ use crate::finder::{FinderItem, PreviewSource, select_one};
 use crate::git::exec::run_git;
 use crate::git::read::{BranchInfo, commit_count, operation_in_progress, other_branches};
 use crate::git::repo::workdir;
+use crate::i18n::{Language, Messages};
 
 /// replay の対象となる現在の位置を指すリビジョン。
 ///
@@ -26,17 +27,6 @@ const CURRENT_REVISION: &str = "HEAD";
 /// プレビューに表示する最大コミット数。
 const PREVIEW_COMMIT_COUNT: &str = "50";
 
-/// base になるブランチが 1 件も無い場合の案内。
-///
-/// 一般の「選択できる候補がありません」では、候補から現在のブランチを除いた結果である
-/// ことが分からないため、原因を明示する。
-const NO_CANDIDATES_MESSAGE: &str = "rebase の base になるブランチがありません。\
-現在のブランチ以外のローカルブランチ・リモート追跡ブランチが必要です";
-
-/// 確認プロンプトで示す、rebase が履歴改変であることの説明。
-const HISTORY_REWRITE_NOTE: &str = "rebase は replay したコミットを作り直すため、\
-コミットハッシュが変わります（push 済みのコミットを含む場合は特に注意してください）";
-
 /// rebase の base を 1 件選び、確認のうえ `git rebase <base>` を実行する。
 ///
 /// merge / rebase が進行中の場合は base 選択を行わず、復帰メニュー（FR-14）を表示する。
@@ -46,19 +36,27 @@ const HISTORY_REWRITE_NOTE: &str = "rebase は replay したコミットを作�
 /// ブランチ一覧の取得、選択（中断を含む）、コミット数の取得、`git rebase` の実行に
 /// 失敗した場合にエラーを返す。確認プロンプトで承認が得られなかった場合は
 /// [`crate::error::Error::Cancelled`]。
-pub fn run(repository: &gix::Repository) -> Result<()> {
+pub fn run(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+) -> Result<()> {
     // 進行中の merge / rebase を残したまま新しい rebase は開始できないため、
     // 選択させる前に復帰メニューへ委譲する
     if let Some(operation) = operation_in_progress(repository) {
-        return in_progress::run(repository, operation);
+        return in_progress::run(language, messages, repository, operation);
     }
 
-    let candidates = other_branches(repository).context("ブランチ一覧の取得に失敗しました")?;
+    let candidates =
+        other_branches(repository).context(messages.common().branch_list_read_failed())?;
     if candidates.is_empty() {
-        bail!("{NO_CANDIDATES_MESSAGE}");
+        bail!(messages.rebase().no_candidates());
     }
 
-    let items = candidates.iter().map(to_item).collect();
+    let items = candidates
+        .iter()
+        .map(|branch| to_item(language, branch))
+        .collect();
     let selected = select_one(items)?;
 
     // `git rebase` はブランチ名を位置引数に取り `--` で保護できないため、
@@ -66,27 +64,22 @@ pub fn run(repository: &gix::Repository) -> Result<()> {
     let branch = candidates
         .iter()
         .find(|candidate| candidate.name == selected)
-        .ok_or_else(|| anyhow!("選択されたブランチ `{selected}` が候補に見つかりません"))?;
+        .ok_or_else(|| anyhow!(messages.rebase().selection_not_found(&selected)))?;
 
-    let count =
-        commit_count(workdir(repository)?, &replay_range(&branch.name)).with_context(|| {
-            format!(
-                "`{name}` の上に replay されるコミット数の取得に失敗しました",
-                name = branch.name
-            )
-        })?;
+    let count = commit_count(workdir(repository)?, &replay_range(&branch.name))
+        .with_context(|| messages.rebase().replayed_commit_count_failed(&branch.name))?;
 
     let arguments = rebase_args(&branch.name);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     // 履歴改変であり、コンフリクトすれば作業が中断されるため、実行前に同意を求める
     // （design.md セキュリティ設計）
     confirm(
-        &confirmation_header(&branch.name, count),
+        messages,
+        &confirmation_header(messages, &branch.name, count),
         &[&command_display(&arguments)],
     )?;
 
-    run_git(&arguments)
-        .with_context(|| format!("`{name}` への rebase に失敗しました", name = branch.name))?;
+    run_git(language, &arguments).with_context(|| messages.rebase().rebase_failed(&branch.name))?;
 
     Ok(())
 }
@@ -122,11 +115,12 @@ fn preview_args(branch: &BranchInfo) -> Vec<String> {
 ///
 /// 表示は名前だけとし、一覧へ ahead/behind 等を事前表示しない
 /// （全候補分の事前計算は初期表示の応答性を損なうため。requirements.md「スコープ外」）。
-fn to_item(branch: &BranchInfo) -> FinderItem {
+fn to_item(language: Language, branch: &BranchInfo) -> FinderItem {
     FinderItem::new(
         branch.name.clone(),
         branch.name.clone(),
         PreviewSource::Git(preview_args(branch)),
+        language.messages(),
     )
 }
 
@@ -141,8 +135,13 @@ fn rebase_args(branch: &str) -> Vec<String> {
 /// 確認プロンプトの見出しを組み立てる。
 ///
 /// replay されるコミット数と、履歴改変であることを示す。
-fn confirmation_header(branch: &str, count: usize) -> String {
-    format!("`{branch}` の上に {count} 件のコミットを replay します\n{HISTORY_REWRITE_NOTE}")
+fn confirmation_header(messages: &dyn Messages, base: &str, count: usize) -> String {
+    // 本文と注記を区切る改行は装飾であるため、文言ではなくここで付ける
+    format!(
+        "{headline}\n{note}",
+        headline = messages.rebase().confirmation(base, count),
+        note = messages.common().history_rewrite_note()
+    )
 }
 
 #[cfg(test)]
@@ -199,12 +198,15 @@ mod tests {
 
     #[test]
     fn an_item_keeps_the_branch_name_as_its_key() {
-        assert_eq!(to_item(&local("origin/main")).key(), "origin/main");
+        assert_eq!(
+            to_item(Language::Japanese, &local("origin/main")).key(),
+            "origin/main"
+        );
     }
 
     #[test]
     fn the_confirmation_names_the_base_and_the_number_of_commits() {
-        let header = confirmation_header("main", 2);
+        let header = confirmation_header(Language::Japanese.messages(), "main", 2);
 
         assert!(header.contains("`main`"), "unexpected header: {header}");
         assert!(header.contains("2 件"), "unexpected header: {header}");
@@ -212,7 +214,7 @@ mod tests {
 
     #[test]
     fn the_confirmation_warns_that_the_history_is_rewritten() {
-        let header = confirmation_header("main", 0);
+        let header = confirmation_header(Language::Japanese.messages(), "main", 0);
 
         assert!(
             header.contains("コミットハッシュが変わります"),
@@ -232,12 +234,88 @@ mod tests {
         commit(dir.path(), "first commit");
         let repository = discover(dir.path()).expect("test repository should be discoverable");
 
-        let err = run(&repository).expect_err("the only branch is the current one");
+        let err = run(
+            Language::Japanese,
+            Language::Japanese.messages(),
+            &repository,
+        )
+        .expect_err("the only branch is the current one");
 
         assert!(
             err.to_string()
                 .contains("rebase の base になるブランチがありません"),
             "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn every_rebase_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let rebase = language.messages().rebase();
+
+            assert!(
+                !rebase.no_candidates().trim().is_empty(),
+                "{language:?} left a message empty"
+            );
+
+            assert!(
+                rebase.selection_not_found("main").contains("main"),
+                "{language:?} must name the selection"
+            );
+            assert!(
+                rebase.replayed_commit_count_failed("main").contains("main"),
+                "{language:?} must name the base"
+            );
+            assert!(
+                rebase.rebase_failed("main").contains("main"),
+                "{language:?} must name the base"
+            );
+
+            let confirmation = rebase.confirmation("main", 2);
+            assert!(
+                confirmation.contains("main") && confirmation.contains('2'),
+                "{language:?} must name the base and the number of commits: {confirmation}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rebase_wording_is_translated() {
+        let japanese = Language::Japanese.messages().rebase();
+        let english = Language::English.messages().rebase();
+
+        assert_ne!(japanese.no_candidates(), english.no_candidates());
+        assert_ne!(
+            japanese.selection_not_found("main"),
+            english.selection_not_found("main")
+        );
+        assert_ne!(
+            japanese.replayed_commit_count_failed("main"),
+            english.replayed_commit_count_failed("main")
+        );
+        assert_ne!(
+            japanese.rebase_failed("main"),
+            english.rebase_failed("main")
+        );
+        assert_ne!(
+            japanese.confirmation("main", 2),
+            english.confirmation("main", 2)
+        );
+    }
+
+    #[test]
+    fn the_english_count_agrees_with_the_noun_it_qualifies() {
+        let english = Language::English.messages().rebase();
+
+        assert!(
+            english.confirmation("main", 1).contains("1 commit will"),
+            "unexpected wording: {header}",
+            header = english.confirmation("main", 1)
+        );
+        assert!(
+            english.confirmation("main", 2).contains("2 commits will"),
+            "unexpected wording: {header}",
+            header = english.confirmation("main", 2)
         );
     }
 }

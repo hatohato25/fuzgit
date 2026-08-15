@@ -18,6 +18,20 @@ use crate::error::{Error, Result};
 use crate::git::read;
 use crate::git::repo;
 
+/// リポジトリ探索に伴うファイルシステムの操作。
+///
+/// [`Error::FilesystemReadFailed`] が「何の操作に失敗したか」を**表示済みの文字列ではなく
+/// 値として**保持するための型（[`crate::git::read::ReadOperation`] と同じ設計）。
+/// 表示は [`crate::i18n::messages::ErrorMessages::describe`] が担うため、
+/// バリアントを追加すると ja / en の双方がコンパイルエラーになる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilesystemOperation {
+    /// パスの正規化（`canonicalize`）。
+    PathCanonicalization,
+    /// ディレクトリの走査（`read_dir`）。
+    DirectoryScan,
+}
+
 /// リポジトリを示すディレクトリ内のエントリ名。
 ///
 /// ディレクトリ形式（通常のリポジトリ）とファイル形式（linked worktree / submodule）の
@@ -122,13 +136,13 @@ fn scope_of(current_workdir: &Path) -> Result<PathBuf> {
 /// パスを正規化（シンボリックリンクを解決した絶対パス化）する。
 fn canonicalize(path: &Path) -> Result<PathBuf> {
     path.canonicalize()
-        .map_err(|source| filesystem_error("パスの正規化", path, source))
+        .map_err(|source| filesystem_error(FilesystemOperation::PathCanonicalization, path, source))
 }
 
 /// I/O エラーを [`Error::FilesystemReadFailed`] へ変換する。
-fn filesystem_error(operation: &str, path: &Path, source: std::io::Error) -> Error {
+fn filesystem_error(operation: FilesystemOperation, path: &Path, source: std::io::Error) -> Error {
     Error::FilesystemReadFailed {
-        operation: operation.to_owned(),
+        operation,
         path: path.to_path_buf(),
         source,
     }
@@ -242,12 +256,13 @@ struct RepositoryDirectory {
 /// 並び順は `read_dir` の返す順序のままであり、呼び出し側で並べ替える。
 fn repository_directories(scope: &Path) -> Result<Vec<RepositoryDirectory>> {
     let entries = std::fs::read_dir(scope)
-        .map_err(|source| filesystem_error("ディレクトリの走査", scope, source))?;
+        .map_err(|source| filesystem_error(FilesystemOperation::DirectoryScan, scope, source))?;
 
     let mut directories = Vec::new();
     for entry in entries {
-        let entry =
-            entry.map_err(|source| filesystem_error("ディレクトリの走査", scope, source))?;
+        let entry = entry.map_err(|source| {
+            filesystem_error(FilesystemOperation::DirectoryScan, scope, source)
+        })?;
         let path = entry.path();
 
         // 走査中に消えたエントリは stat に失敗する。走査範囲の他のリポジトリとは無関係な
@@ -278,6 +293,7 @@ fn repository_directories(scope: &Path) -> Result<Vec<RepositoryDirectory>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Language;
     use crate::test_support::{TempDir, commit, git_in, init_bare_repository, init_repository};
 
     /// テスト用の親ディレクトリ（走査範囲）を作る。
@@ -660,6 +676,93 @@ mod tests {
                 .first()
                 .expect("candidates are not empty")
                 .is_current
+        );
+    }
+
+    /// [`FilesystemOperation`] の全バリアント。網羅性は `match` でコンパイル時に担保する。
+    fn every_filesystem_operation() -> Vec<FilesystemOperation> {
+        let all = vec![
+            FilesystemOperation::PathCanonicalization,
+            FilesystemOperation::DirectoryScan,
+        ];
+
+        // バリアントを追加したらこの `match` が壊れ、`all` の更新漏れに気づける
+        for operation in &all {
+            match operation {
+                FilesystemOperation::PathCanonicalization | FilesystemOperation::DirectoryScan => {}
+            }
+        }
+
+        all
+    }
+
+    /// 指定した操作の [`Error::FilesystemReadFailed`] を組み立てる。
+    fn filesystem_failure(operation: FilesystemOperation) -> Error {
+        filesystem_error(operation, Path::new("/work"), std::io::Error::other("boom"))
+    }
+
+    #[test]
+    fn every_filesystem_operation_is_described_in_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            for operation in every_filesystem_operation() {
+                let described = language
+                    .messages()
+                    .errors()
+                    .describe(&filesystem_failure(operation));
+
+                assert!(
+                    !described.trim().is_empty(),
+                    "{language:?} left {operation:?} empty"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_filesystem_operation_wording_is_translated() {
+        for operation in every_filesystem_operation() {
+            let failure = filesystem_failure(operation);
+
+            assert_ne!(
+                Language::Japanese.messages().errors().describe(&failure),
+                Language::English.messages().errors().describe(&failure),
+                "{operation:?} must differ between the languages"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scan_failure_is_described_in_the_language_of_the_display() {
+        // 走査層は操作を値として返すだけであり、言語は表示のときに決まることを両言語で確かめる
+        let dir = TempDir::new("siblings-language");
+        let missing = dir.path().join("missing");
+
+        let err =
+            repository_directories(&missing).expect_err("a missing directory cannot be scanned");
+
+        assert!(
+            matches!(
+                &err,
+                Error::FilesystemReadFailed { operation, .. }
+                    if *operation == FilesystemOperation::DirectoryScan
+            ),
+            "unexpected: {err:?}"
+        );
+        assert!(
+            Language::Japanese
+                .messages()
+                .errors()
+                .describe(&err)
+                .contains("ディレクトリの走査"),
+            "the japanese description must name the failed operation"
+        );
+        assert!(
+            Language::English
+                .messages()
+                .errors()
+                .describe(&err)
+                .contains("scanning the directory"),
+            "the english description must name the failed operation"
         );
     }
 }
