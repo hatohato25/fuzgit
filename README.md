@@ -170,7 +170,6 @@ $ gz pull
 | [`gz tag`](https://hatohato25.github.io/fuzgit/docs.html#tag) | Pick a tag to print, switch to, or diff |
 | [`gz reflog`](https://hatohato25.github.io/fuzgit/docs.html#reflog) | Trace the HEAD reflog and recover lost commits |
 | [`gz commit`](https://hatohato25.github.io/fuzgit/docs.html#commit) | Pick changed files and commit only those |
-| [`gz push`](https://hatohato25.github.io/fuzgit/docs.html#push) | Pick a push target (remote × current branch) and push |
 | [`gz fixup`](https://hatohato25.github.io/fuzgit/docs.html#fixup) | Pick the commit to amend and create a fixup commit |
 | [`gz merge`](https://hatohato25.github.io/fuzgit/docs.html#merge) | Pick a branch to merge (resume menu while one is in progress) |
 | [`gz rebase`](https://hatohato25.github.io/fuzgit/docs.html#rebase) | Pick the rebase base (resume menu while one is in progress) |

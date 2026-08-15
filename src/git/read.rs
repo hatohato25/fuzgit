@@ -699,89 +699,6 @@ pub fn commit_count(workdir: &Path, range: &str) -> Result<usize> {
     parse_commit_count(&output)
 }
 
-/// push 先の候補 1 件分の情報（リモート × 現在のブランチ）。
-///
-/// `remote` / `branch` はいずれも gix が列挙した値であり、ユーザーの自由入力ではない。
-/// `git push` はパス以外の位置引数を取り `--` で保護できないため、この由来を保つことが
-/// そのままインジェクション対策になる（design.md セキュリティ設計）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PushTarget {
-    /// リモート名（`origin` 等）。
-    pub remote: String,
-    /// push するブランチ名（現在のブランチ）。
-    pub branch: String,
-    /// 現在のブランチの upstream に対応する候補かどうか。
-    pub is_upstream: bool,
-    /// リモート追跡参照に対する (ahead, behind)。追跡参照が無い場合は `None`。
-    pub ahead_behind: Option<(usize, usize)>,
-}
-
-impl PushTarget {
-    /// リモート追跡参照の短縮名（`origin/main`）。表示と選択結果の照合に用いる。
-    #[must_use]
-    pub fn tracking_name(&self) -> String {
-        format!(
-            "{remote}/{branch}",
-            remote = self.remote,
-            branch = self.branch
-        )
-    }
-
-    /// リモート追跡参照の完全な参照名（`refs/remotes/origin/main`）。
-    ///
-    /// git へ渡す際は短縮名ではなくこちらを使う。同名のローカルブランチ・タグがあっても
-    /// リモート追跡参照として解決されることを保証するため。
-    #[must_use]
-    pub fn tracking_ref(&self) -> String {
-        format!("refs/remotes/{name}", name = self.tracking_name())
-    }
-}
-
-/// `upstream` が「リモート `remote` の `refs/heads/<branch>`」を指しているかどうか。
-///
-/// `gz push` の候補は `git push <remote> <branch>`（= リモート側の `refs/heads/<branch>` を更新）
-/// であるため、リモート名だけでなく更新先の参照名まで一致して初めて upstream と同じ宛先といえる。
-fn targets_upstream(upstream: Option<&Upstream>, remote: &str, branch: &str) -> bool {
-    upstream.is_some_and(|upstream| {
-        upstream.remote == remote && upstream.merge_ref == format!("refs/heads/{branch}")
-    })
-}
-
-/// push 先の候補（リモート × 現在のブランチ）をリモート名順で取得する。
-///
-/// # Errors
-///
-/// - HEAD がブランチを指していない場合は [`Error::DetachedHead`]
-/// - 作業ツリーを持たない bare リポジトリの場合は [`Error::NoWorktree`]
-/// - リモート・upstream の読み取り、ahead/behind の算出に失敗した場合はそれぞれのエラー
-pub fn push_targets(repository: &gix::Repository) -> Result<Vec<PushTarget>> {
-    let Some(branch) = current_branch(repository)? else {
-        return Err(Error::DetachedHead);
-    };
-
-    let upstream = upstream(repository, &branch)?;
-    let workdir = workdir(repository)?;
-    // まだコミットが 1 件も無いブランチはローカル側を解決できず、比較そのものが成立しない
-    let branch_exists = revision_exists(workdir, &branch)?;
-
-    let mut targets = Vec::new();
-    for remote in remotes(repository)? {
-        let mut target = PushTarget {
-            remote,
-            branch: branch.clone(),
-            is_upstream: false,
-            ahead_behind: None,
-        };
-        target.is_upstream = targets_upstream(upstream.as_ref(), &target.remote, &branch);
-        if branch_exists {
-            target.ahead_behind = ahead_behind(workdir, &branch, &target.tracking_ref())?;
-        }
-        targets.push(target);
-    }
-
-    Ok(targets)
-}
-
 /// upstream へ追随させられるローカルブランチ 1 件分の情報（`gz pull`）。
 ///
 /// `remote` は [`remotes`] が列挙した名前と一致することを確認済みの値、`tracking_ref` は
@@ -865,9 +782,8 @@ fn pull_target(
 /// リモートが登録済みであるローカルブランチに限る。それ以外と、他の worktree で
 /// チェックアウト中のブランチは候補から除外し、件数を [`PullScan::excluded`] として返す。
 ///
-/// detached HEAD はエラーにしない（[`push_targets`] が [`Error::DetachedHead`] を返すのとの
-/// 違い）。`gz pull` は複数のローカルブランチを対象にする一括処理であり、現在のブランチが
-/// 無くても他のブランチは通常どおり取り込めるため。
+/// detached HEAD はエラーにしない。`gz pull` は複数のローカルブランチを対象にする一括処理で
+/// あり、現在のブランチが無くても他のブランチは通常どおり取り込めるため。
 ///
 /// 起動する `git` プロセスは [`worktrees`] の `git worktree list` 1 回だけで、upstream と
 /// リモートの解決は `gix` のプロセス内読み取りで行う。ahead/behind は求めない
@@ -3707,160 +3623,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_push_target_is_generated_for_every_remote() {
-        let (dir, _repository, _head) = repository_with_one_commit("read-push-targets");
-        add_remote(dir.path(), "upstream");
-        add_remote(dir.path(), "origin");
-        let repository = discover(dir.path()).expect("test repository should be discoverable");
-
-        let targets = push_targets(&repository).expect("push targets should be generated");
-
-        assert_eq!(
-            targets
-                .iter()
-                .map(PushTarget::tracking_name)
-                .collect::<Vec<_>>(),
-            ["origin/main", "upstream/main"],
-            "every remote is combined with the current branch, in name order"
-        );
-        assert!(
-            targets.iter().all(|target| target.branch == "main"),
-            "the current branch is fixed as the push target: {targets:?}"
-        );
-    }
-
-    #[test]
-    fn a_repository_without_remotes_has_no_push_target() {
-        let (_dir, repository, _head) = repository_with_one_commit("read-push-targets-empty");
-
-        let targets = push_targets(&repository).expect("push targets should be generated");
-
-        assert!(targets.is_empty(), "unexpected targets: {targets:?}");
-    }
-
-    #[test]
-    fn only_the_configured_upstream_is_marked_among_the_targets() {
-        let (dir, _repository, head) = repository_with_one_commit("read-push-targets-upstream");
-        add_remote(dir.path(), "origin");
-        add_remote(dir.path(), "backup");
-        create_remote_branch(dir.path(), "origin/main", &head);
-        git_in(
-            dir.path(),
-            &["branch", "--set-upstream-to=origin/main", "main"],
-        );
-        let repository = discover(dir.path()).expect("test repository should be discoverable");
-
-        let targets = push_targets(&repository).expect("push targets should be generated");
-
-        assert_eq!(
-            targets
-                .iter()
-                .map(|target| (target.tracking_name(), target.is_upstream))
-                .collect::<Vec<_>>(),
-            [
-                ("backup/main".to_owned(), false),
-                ("origin/main".to_owned(), true)
-            ]
-        );
-    }
-
-    #[test]
-    fn a_push_target_carries_the_counts_against_its_tracking_reference() {
-        let (dir, _repository, _head) = repository_with_one_commit("read-push-targets-counts");
-        add_remote(dir.path(), "origin");
-        add_remote(dir.path(), "backup");
-        create_branch(dir.path(), "remote-side");
-        commit(dir.path(), "local 1");
-        commit(dir.path(), "local 2");
-        git_in(dir.path(), &["switch", "--quiet", "remote-side"]);
-        let remote_head = commit(dir.path(), "remote 1");
-        git_in(dir.path(), &["switch", "--quiet", "main"]);
-        create_remote_branch(dir.path(), "origin/main", &remote_head);
-        let repository = discover(dir.path()).expect("test repository should be discoverable");
-
-        let targets = push_targets(&repository).expect("push targets should be generated");
-
-        assert_eq!(
-            targets
-                .iter()
-                .map(|target| (target.tracking_name(), target.ahead_behind))
-                .collect::<Vec<_>>(),
-            [
-                ("backup/main".to_owned(), None),
-                ("origin/main".to_owned(), Some((2, 1)))
-            ],
-            "a remote without a tracking reference cannot be compared"
-        );
-    }
-
-    #[test]
-    fn a_push_target_of_a_branch_without_commits_has_no_counts() {
-        let dir = TempDir::new("read-push-targets-unborn");
-        init_repository(dir.path());
-        add_remote(dir.path(), "origin");
-        let repository = discover(dir.path()).expect("test repository should be discoverable");
-
-        let targets = push_targets(&repository).expect("push targets should be generated");
-
-        assert_eq!(
-            targets
-                .iter()
-                .map(|target| (target.tracking_name(), target.ahead_behind))
-                .collect::<Vec<_>>(),
-            [("origin/main".to_owned(), None)]
-        );
-    }
-
-    #[test]
-    fn a_detached_head_has_no_push_target() {
-        let (dir, _repository, head) = repository_with_one_commit("read-push-targets-detached");
-        add_remote(dir.path(), "origin");
-        git_in(dir.path(), &["switch", "--quiet", "--detach", &head]);
-        let repository = discover(dir.path()).expect("test repository should be discoverable");
-
-        let err = push_targets(&repository)
-            .expect_err("a detached HEAD gives no branch to push and must be reported");
-
-        assert!(matches!(err, Error::DetachedHead), "unexpected: {err:?}");
-    }
-
-    #[test]
-    fn a_tracking_reference_is_addressed_by_its_full_name() {
-        let target = PushTarget {
-            remote: "origin".to_owned(),
-            branch: "feature/login".to_owned(),
-            is_upstream: false,
-            ahead_behind: None,
-        };
-
-        assert_eq!(target.tracking_name(), "origin/feature/login");
-        assert_eq!(
-            target.tracking_ref(),
-            "refs/remotes/origin/feature/login",
-            "the full name keeps a same-named local branch or tag from winning"
-        );
-    }
-
-    #[test]
-    fn a_target_matches_the_upstream_only_when_both_the_remote_and_the_reference_agree() {
-        let upstream = Upstream {
-            remote: "origin".to_owned(),
-            merge_ref: "refs/heads/main".to_owned(),
-        };
-
-        assert!(targets_upstream(Some(&upstream), "origin", "main"));
-        assert!(
-            !targets_upstream(Some(&upstream), "backup", "main"),
-            "another remote is a different destination"
-        );
-        assert!(
-            !targets_upstream(Some(&upstream), "origin", "trunk"),
-            "a branch tracking a differently named reference is a different destination"
-        );
-        assert!(!targets_upstream(None, "origin", "main"));
-    }
-
     /// `origin` を登録済みで、`main` に 1 コミットを持つ `gz pull` 用のリポジトリを用意する。
     fn repository_for_pull(label: &str) -> (TempDir, String) {
         let (dir, _repository, head) = repository_with_one_commit(label);
@@ -4035,8 +3797,7 @@ and checked out elsewhere are all counted"
 
     #[test]
     fn a_detached_head_still_offers_the_other_branches() {
-        // `push_targets` は detached HEAD を `Error::DetachedHead` にするが、`gz pull` は
-        // 複数のブランチを対象にする一括処理であり、現在のブランチが無いだけで成立する
+        // `gz pull` は複数のブランチを対象にする一括処理であり、現在のブランチが無いだけで成立する
         let (dir, head) = repository_for_pull("read-pull-targets-detached");
         set_upstream(dir.path(), "main", &head);
         create_branch(dir.path(), "alpha");

@@ -167,7 +167,6 @@ $ gz pull
 | [`gz tag`](https://hatohato25.github.io/fuzgit/docs.html#tag) | タグを選んで出力・切替・差分表示する |
 | [`gz reflog`](https://hatohato25.github.io/fuzgit/docs.html#reflog) | HEAD の reflog を辿り、失われたコミットを取り出す |
 | [`gz commit`](https://hatohato25.github.io/fuzgit/docs.html#commit) | 変更ファイルを選んで、選んだものだけをコミットする |
-| [`gz push`](https://hatohato25.github.io/fuzgit/docs.html#push) | push 先（リモート × 現在ブランチ）を選んで push する |
 | [`gz fixup`](https://hatohato25.github.io/fuzgit/docs.html#fixup) | 修正対象のコミットを選んで fixup コミットを作る |
 | [`gz merge`](https://hatohato25.github.io/fuzgit/docs.html#merge) | merge するブランチを選ぶ（進行中は復帰メニュー） |
 | [`gz rebase`](https://hatohato25.github.io/fuzgit/docs.html#rebase) | rebase の base を選ぶ（進行中は復帰メニュー） |

@@ -7,7 +7,7 @@
 //! [`Messages::finder`]（選択 UI のプレビュー）、
 //! [`Messages::confirm`]（破壊的操作の確認プロンプト）の共通レイヤーに加え、
 //! [`Messages::common`]（複数コマンドで共有する語彙）と
-//! `gz branch` / `gz cherry-pick` / `gz tag` / `gz reflog` / `gz restore` / `gz push` /
+//! `gz branch` / `gz cherry-pick` / `gz tag` / `gz reflog` / `gz restore` /
 //! `gz revert` / `gz stash` / `gz commit` / `gz fixup` / `gz status` / `gz merge` /
 //! `gz rebase` / `gz worktree` / `gz sync` / `gz diff` / `gz fetch` / `gz pull` /
 //! `gz branch create` / `delete` / `cleanup`、および複数コマンドが共用するファイル選択・
@@ -78,9 +78,6 @@ pub trait Messages: Sync + std::fmt::Debug {
 
     /// `gz restore`（[`crate::commands::restore`]）の文言。
     fn restore(&self) -> &dyn RestoreMessages;
-
-    /// `gz push`（[`crate::commands::push`]）の文言。
-    fn push(&self) -> &dyn PushMessages;
 
     /// `gz revert`（[`crate::commands::revert`]）の文言。
     fn revert(&self) -> &dyn RevertMessages;
@@ -186,7 +183,7 @@ pub trait CommonMessages: Sync + std::fmt::Debug {
     /// upstream が設定されていないことと、設定する手立てを伝える
     /// （`gz sync` / `gz diff --upstream`）。
     ///
-    /// 案内に含まれる `gz push -u` / `git branch --set-upstream-to` はユーザーがそのまま
+    /// 案内に含まれる `git push -u` / `git branch --set-upstream-to` はユーザーがそのまま
     /// 打ち込むコマンド列であるため翻訳しない。
     fn upstream_not_configured(&self, branch: &str) -> String;
 
@@ -349,19 +346,13 @@ pub trait CliMessages: Sync + std::fmt::Debug {
     /// `gz reflog --restore` の説明。
     fn reflog_restore_help(&self) -> &'static str;
 
-    // `gz commit` / `gz push` / `gz fixup`
+    // `gz commit` / `gz fixup`
 
     /// `gz commit` の説明。
     fn commit_about(&self) -> &'static str;
 
     /// `gz commit --message` の説明。
     fn commit_message_help(&self) -> &'static str;
-
-    /// `gz push` の説明。
-    fn push_about(&self) -> &'static str;
-
-    /// `gz push --set-upstream` の説明。
-    fn push_set_upstream_help(&self) -> &'static str;
 
     /// `gz fixup` の説明。
     fn fixup_about(&self) -> &'static str;
@@ -635,32 +626,6 @@ pub trait RestoreMessages: Sync + std::fmt::Debug {
     /// `revision` にはユーザーが `--source` へ指定した文字列をそのまま示す
     /// （解決済みハッシュより読み取りやすいため）。
     fn overwrite_confirmation(&self, count: usize, revision: &str) -> String;
-}
-
-/// `gz push`（[`crate::commands::push`]）の文言。
-pub trait PushMessages: Sync + std::fmt::Debug {
-    /// push 先の候補を読み取れなかったことを伝える。
-    fn targets_read_failed(&self) -> &'static str;
-
-    /// push 先のリモートが 1 つも登録されていないことを伝える。
-    ///
-    /// 案内に含まれる `git remote add` はユーザーがそのまま打ち込むコマンドであるため
-    /// 翻訳しない（design.md「翻訳しないもの」）。プレースホルダは読み手のための語であり
-    /// 表示言語に合わせる。
-    fn no_remotes(&self) -> &'static str;
-
-    /// 選択された push 先が候補一覧に見つからなかったことを伝える。
-    fn selection_not_found(&self, selected: &str) -> String;
-
-    /// push に失敗したことを伝える。
-    fn push_failed(&self, target: &str) -> String;
-
-    /// リモート追跡参照がまだ無い候補であることを示す注記。
-    ///
-    /// 候補行の一部だが、ブランチ名・数値ではなく **fuzgit 自身の説明語**であり、
-    /// git の語彙でもコマンド列でもないため翻訳する（design.md「候補行は原則として
-    /// 翻訳しない。翻訳対象は付随するラベルに限る」）。
-    fn no_tracking_ref(&self) -> &'static str;
 }
 
 /// `gz revert`（[`crate::commands::revert`]）の文言。
@@ -985,7 +950,7 @@ pub trait SyncMessages: Sync + std::fmt::Debug {
     /// `branch.<name>.remote` には URL を直接書けるため、登録済みのリモート名でない値は
     /// fetch せずに拒否する（design.md セキュリティ設計）。案内に含まれるコマンド列は
     /// 翻訳しないが、`<名前>` `<URL>` のようなプレースホルダは読み手のための語であり
-    /// 表示言語に合わせる（[`PushMessages::no_remotes`] と同じ扱い）。
+    /// 表示言語に合わせる（[`FetchMessages::no_remotes`] と同じ扱い）。
     fn unknown_remote(&self, branch: &str, remote: &str) -> String;
 
     /// fetch してもリモート追跡参照が現れなかったことを伝える。
@@ -1098,7 +1063,7 @@ pub trait FetchMessages: Sync + std::fmt::Debug {
     /// fetch 元のリモートが 1 つも登録されていないことを伝える。
     ///
     /// 案内に含まれるコマンド列は翻訳しないが、`<名前>` `<URL>` のようなプレースホルダは
-    /// 読み手のための語であり表示言語に合わせる（[`PushMessages::no_remotes`] と同じ扱い）。
+    /// 読み手のための語であり表示言語に合わせる（[`FetchMessages::no_remotes`] と同じ扱い）。
     fn no_remotes(&self) -> &'static str;
 
     /// finder を省略して対象を確定したことと、省略した理由を伝える 1 行。
@@ -1182,7 +1147,7 @@ pub trait PullMessages: Sync + std::fmt::Debug {
 
     /// upstream へ追随させられるブランチが 1 件も無いことと、upstream の設定方法を伝える。
     ///
-    /// 案内に含まれる `gz push -u` / `git branch --set-upstream-to` はユーザーがそのまま
+    /// 案内に含まれる `git push -u` / `git branch --set-upstream-to` はユーザーがそのまま
     /// 打ち込むコマンド列であるため翻訳しない（design.md「翻訳しないもの」）。
     /// 次に取れる操作が「対象を選び直す」ではなく「upstream を設定する」である点は
     /// [`CommonMessages::upstream_not_configured`] と同じだが、こちらは対象が複数ある

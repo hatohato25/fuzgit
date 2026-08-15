@@ -102,13 +102,6 @@ pub enum Error {
         branch: String,
     },
 
-    /// HEAD がブランチではなくコミットを直接指している（detached HEAD）。
-    ///
-    /// `gz push` は「現在のブランチ」を push 対象として固定するため、
-    /// ブランチが定まらない状態では候補を作れない。
-    #[error("HEAD is not on a branch (detached HEAD)")]
-    DetachedHead,
-
     /// 作業ツリーを持たない（bare）リポジトリで、作業ツリーを前提とする操作を行おうとした。
     #[error("no worktree: this operation is not available in a bare repository")]
     NoWorktree,
@@ -284,7 +277,6 @@ mod tests {
         // 代表的なバリアントで確認する。ユーザー向けの日本語は `describe` が担う
         for error in [
             Error::GitNotFound,
-            Error::DetachedHead,
             Error::NoWorktree,
             Error::Cancelled,
             Error::NoCandidates,

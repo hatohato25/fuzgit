@@ -22,7 +22,7 @@ use fuzgit::i18n::messages::CliMessages;
 const BIN_NAME: &str = "gz";
 
 /// `gz` のすべてのサブコマンド名。ヘルプ出力の検証に用いる。
-const SUBCOMMANDS: [&str; 20] = [
+const SUBCOMMANDS: [&str; 19] = [
     "branch",
     "log",
     "cherry-pick",
@@ -32,7 +32,6 @@ const SUBCOMMANDS: [&str; 20] = [
     "tag",
     "reflog",
     "commit",
-    "push",
     "fixup",
     "merge",
     "rebase",
@@ -374,7 +373,6 @@ fn help_targets(cli: &dyn CliMessages) -> Vec<(&'static [&'static str], &'static
         (&["tag"], cli.tag_about()),
         (&["reflog"], cli.reflog_about()),
         (&["commit"], cli.commit_about()),
-        (&["push"], cli.push_about()),
         (&["fixup"], cli.fixup_about()),
         (&["merge"], cli.merge_about()),
         (&["rebase"], cli.rebase_about()),
@@ -952,54 +950,30 @@ fn commit_reports_when_there_is_nothing_to_commit() {
     }
 }
 
-/// リモートが 1 つも無い場合、`gz push` は原因と次の操作を伝えて終了することを確認する。
+/// `gz push` は提供しないことを確認する。
+///
+/// fuzzy finder で「選ぶ」価値のある軸が無いため、素の `git push` に委ねる
+/// （requirements.md「スコープ外」）。
 #[test]
-fn push_reports_when_no_remote_is_configured() {
-    let dir = empty_repository("push-no-remote");
+fn push_is_not_offered_as_a_subcommand() {
+    let dir = empty_repository("push-removed");
 
-    for arguments in [vec!["push"], vec!["push", "-u"]] {
-        let output = gz()
-            .args(&arguments)
-            .current_dir(dir.path())
-            .output()
-            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+    let output = gz()
+        .arg("push")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz push");
 
-        assert!(
-            !output.status.success(),
-            "gz {arguments:?} should exit non-zero without a remote"
-        );
+    assert!(
+        !output.status.success(),
+        "gz push should be rejected as an unknown subcommand"
+    );
 
-        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
-        assert!(
-            stderr.contains("git remote add"),
-            "the next step should be suggested for gz {arguments:?}:\n{stderr}"
-        );
-    }
-}
-
-/// force push は fuzgit のスコープ外であり、オプション自体が存在しないことを確認する。
-#[test]
-fn push_rejects_force_options_because_they_are_out_of_scope() {
-    let dir = empty_repository("push-force");
-
-    for flag in ["--force", "--force-with-lease", "-f", "--force-if-includes"] {
-        let output = gz()
-            .args(["push", flag])
-            .current_dir(dir.path())
-            .output()
-            .expect("failed to run gz push");
-
-        assert!(
-            !output.status.success(),
-            "gz push {flag} should be rejected"
-        );
-
-        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
-        assert!(
-            stderr.contains("unexpected argument"),
-            "the unknown flag should be reported:\n{stderr}"
-        );
-    }
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("unrecognized subcommand"),
+        "the unknown subcommand should be reported:\n{stderr}"
+    );
 }
 
 /// 引数なしの `gz stash` は、どちらかの操作へ倒さずサブコマンド一覧のヘルプを表示することを確認する。
@@ -1156,6 +1130,48 @@ fn the_debug_log_annotates_the_classification_and_the_locale() {
         logged.contains("LC_MESSAGES=C"),
         "the pinned message locale should be logged: {logged}"
     );
+}
+
+/// `FUZGIT_DEBUG=1` のとき、解決された表示言語と決め手になった層が出ることを確認する
+/// （requirements.md FR-25）。
+///
+/// 層 1（`--lang`）と層 2（`FUZGIT_LANG`）は実行環境に左右されずに再現できるため、
+/// 統合テストではこの 2 つを確かめる。層 4・5 は開発者の `~/.gitconfig` に依存しうるので
+/// 行の組み立ての検証は `fuzgit::i18n::resolve` の単体テストが受け持つ。
+#[test]
+fn the_debug_log_reports_the_resolved_language_and_its_layer() {
+    let dir = empty_repository("debug-log-language");
+
+    for (mut command, expected) in [
+        (gz_with("ja"), "language=ja (source: FUZGIT_LANG)"),
+        (
+            {
+                let mut command = gz_with("ja");
+                command.args(["--lang", "en"]);
+                command
+            },
+            "language=en (source: --lang)",
+        ),
+    ] {
+        let output = command
+            .arg("add")
+            .env("FUZGIT_DEBUG", "1")
+            .current_dir(dir.path())
+            .output()
+            .expect("failed to run gz add with FUZGIT_DEBUG=1");
+
+        let stderr = String::from_utf8(output.stderr).expect("debug output should be utf-8");
+        assert!(
+            stderr
+                .lines()
+                .any(|line| line == format!("{DEBUG_PREFIX} {expected}")),
+            "the resolved language should be logged as `{expected}`:\n{stderr}"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "the debug log must not pollute stdout"
+        );
+    }
 }
 
 /// デバッグログは `FUZGIT_DEBUG=1` のときだけ出ることを確認する。
@@ -1631,8 +1647,8 @@ fn pull_reports_when_no_branch_can_follow_an_upstream() {
 
     let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
     assert!(
-        stderr.contains("gz push -u"),
-        "the fuzgit way of setting an upstream should be suggested:\n{stderr}"
+        stderr.contains("git push -u <remote> <branch>"),
+        "the way to push a new branch should be suggested:\n{stderr}"
     );
     assert!(
         stderr.contains("--set-upstream-to"),

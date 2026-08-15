@@ -7,8 +7,8 @@ use super::messages::{
     BranchManageMessages, BranchMessages, CherryPickMessages, CliMessages, CommitMessages,
     CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
     FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, MergeMessages,
-    Messages, PullMessages, PushMessages, RebaseMessages, ReflogMessages, RestoreMessages,
-    RevertMessages, StashMessages, StatusMessages, SyncMessages, TagMessages, WorktreeMessages,
+    Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages, RevertMessages,
+    StashMessages, StatusMessages, SyncMessages, TagMessages, WorktreeMessages,
 };
 use crate::error::{Error, stderr_suffix};
 use crate::git::read::{BRANCH_REF_PREFIX, MalformedOutput, ReadOperation, WORKTREE_LABEL};
@@ -73,10 +73,6 @@ impl Messages for JapaneseMessages {
 
     fn restore(&self) -> &dyn RestoreMessages {
         &JapaneseRestoreMessages
-    }
-
-    fn push(&self) -> &dyn PushMessages {
-        &JapanesePushMessages
     }
 
     fn revert(&self) -> &dyn RevertMessages {
@@ -201,7 +197,7 @@ impl CommonMessages for JapaneseCommonMessages {
     fn upstream_not_configured(&self, branch: &str) -> String {
         format!(
             "`{branch}` に upstream が設定されていません。\
-`gz push -u` で push するか、`git branch --set-upstream-to=<remote>/<branch>` で設定してください"
+`git push -u <remote> <branch>` で push するか、`git branch --set-upstream-to=<remote>/<branch>` で設定してください"
         )
     }
 
@@ -283,9 +279,6 @@ impl ErrorMessages for JapaneseErrorMessages {
                 "現在のブランチ `{branch}` にはまだコミットがありません。\
                  `git commit` で最初のコミットを作成してから実行してください"
             ),
-            Error::DetachedHead => "HEAD がブランチを指していません（detached HEAD）。\
-                 push するブランチが定まらないため、`git switch <ブランチ>` で切り替えてから実行してください"
-                .to_owned(),
             Error::NoWorktree => {
                 "作業ツリーがありません。bare リポジトリでは実行できない操作です".to_owned()
             }
@@ -668,32 +661,6 @@ impl RestoreMessages for JapaneseRestoreMessages {
     }
 }
 
-/// `gz push`（[`crate::commands::push`]）の日本語表示。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JapanesePushMessages;
-
-impl PushMessages for JapanesePushMessages {
-    fn targets_read_failed(&self) -> &'static str {
-        "push 先の候補の取得に失敗しました"
-    }
-
-    fn no_remotes(&self) -> &'static str {
-        "push 先のリモートが登録されていません。`git remote add <名前> <URL>` で追加してください"
-    }
-
-    fn selection_not_found(&self, selected: &str) -> String {
-        format!("選択された push 先 `{selected}` が候補に見つかりません")
-    }
-
-    fn push_failed(&self, target: &str) -> String {
-        format!("{target} への push に失敗しました")
-    }
-
-    fn no_tracking_ref(&self) -> &'static str {
-        "追跡参照なし"
-    }
-}
-
 /// `gz revert`（[`crate::commands::revert`]）の日本語表示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JapaneseRevertMessages;
@@ -1046,7 +1013,7 @@ impl SyncMessages for JapaneseSyncMessages {
         format!(
             "リモート追跡参照 `{reference}` が見つかりません。\
 `{remote}` に `{branch}` の upstream が存在しない可能性があります\
-（`gz push -u` で作成するか、`git branch --set-upstream-to=<remote>/<branch>` で設定し直してください）"
+（`git push -u <remote> <branch>` で作成するか、`git branch --set-upstream-to=<remote>/<branch>` で設定し直してください）"
         )
     }
 
@@ -1055,7 +1022,7 @@ impl SyncMessages for JapaneseSyncMessages {
     }
 
     fn unpushed_commits(&self, count: usize) -> String {
-        format!("push していないコミットが {count} 件あります（`gz push` で push できます）")
+        format!("push していないコミットが {count} 件あります（`git push` で push できます）")
     }
 
     fn integration_failed(&self, reference: &str) -> String {
@@ -1232,7 +1199,7 @@ impl PullMessages for JapanesePullMessages {
     fn no_candidates(&self) -> &'static str {
         "upstream へ追随させられるブランチがありません\
 （upstream が設定され、そのリモートが登録済みのローカルブランチが対象です）。\
-`gz push -u` で push するか、`git branch --set-upstream-to=<remote>/<branch>` で設定してください"
+`git push -u <remote> <branch>` で push するか、`git branch --set-upstream-to=<remote>/<branch>` で設定してください"
     }
 
     fn header(&self) -> &'static str {
@@ -1427,7 +1394,7 @@ impl CliMessages for JapaneseCliMessages {
         "選択したコミットから指定名の新規ブランチを作成する"
     }
 
-    // `gz commit` / `gz push` / `gz fixup`
+    // `gz commit` / `gz fixup`
 
     fn commit_about(&self) -> &'static str {
         "コミットするファイルを選択してコミットする"
@@ -1435,14 +1402,6 @@ impl CliMessages for JapaneseCliMessages {
 
     fn commit_message_help(&self) -> &'static str {
         "コミットメッセージ（省略時は git がエディタを起動する）"
-    }
-
-    fn push_about(&self) -> &'static str {
-        "push 先（リモート × 現在ブランチ）を選択して push する"
-    }
-
-    fn push_set_upstream_help(&self) -> &'static str {
-        "push 先を現在ブランチの upstream として設定する"
     }
 
     fn fixup_about(&self) -> &'static str {

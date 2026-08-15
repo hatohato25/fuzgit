@@ -164,7 +164,6 @@ mod tests {
                 },
                 vec!["main", "git commit"],
             ),
-            (Error::DetachedHead, vec!["git switch"]),
             (Error::NoWorktree, vec![]),
             (
                 Error::NoSiblingScope {

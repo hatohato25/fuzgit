@@ -10,7 +10,6 @@ use crate::commands::diff::DiffMode;
 use crate::commands::fetch::{FetchScope, PruneMode};
 use crate::commands::fixup::FixupKind;
 use crate::commands::merge::MergeMode;
-use crate::commands::push::UpstreamUpdate;
 use crate::commands::restore::RestoreTarget;
 use crate::commands::revert::MessageEditing;
 use crate::commands::stash::{StashAction, UntrackedFiles};
@@ -34,7 +33,6 @@ pub mod in_progress;
 pub mod log;
 pub mod merge;
 pub mod pull;
-pub mod push;
 pub mod rebase;
 pub mod reflog;
 pub mod restore;
@@ -150,14 +148,6 @@ pub fn dispatch(
         }
         Command::Commit { message } => {
             commit::run(language, messages, &repository, message.as_deref())
-        }
-        Command::Push { set_upstream } => {
-            let upstream = if *set_upstream {
-                UpstreamUpdate::Set
-            } else {
-                UpstreamUpdate::Keep
-            };
-            push::run(language, messages, &repository, upstream)
         }
         Command::Fixup { squash } => {
             let kind = if *squash {

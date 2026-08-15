@@ -23,14 +23,24 @@
 //! `crate::git::exec` の `is_debug_enabled` が同じ理由（テストは並列実行されるため
 //! `std::env::set_var` でプロセス全体の環境を書き換えられない）でこの形を採っており、
 //! その既存パターンを踏襲する。
+//!
+//! # デバッグログ
+//!
+//! `FUZGIT_DEBUG=1` のとき、[`resolve_from_environment`] は解決された言語と、それを
+//! 決めた層を標準エラーへ 1 行出力する（`crate::git::exec` の実行ログと同じ接頭辞）。
+//! 行の組み立ては純関数（[`debug_line`]）に分け、出力は取得層である
+//! [`resolve_from_environment`] だけが行う（言語をグローバル状態に置かないため、
+//! 解決結果は従来どおり値として呼び出し側へ返す）。
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::io::Write as _;
 
 use gix::bstr::ByteSlice as _;
 use thiserror::Error;
 
 use super::Language;
+use crate::git::exec::{DEBUG_PREFIX, debug_enabled};
 
 /// 層 2 で参照する環境変数名。
 pub const LANGUAGE_ENV: &str = "FUZGIT_LANG";
@@ -60,6 +70,18 @@ const LANG_FLAG_PREFIX: &str = "--lang=";
 /// 引数列の終端。これ以降は先読みの対象にしない。
 const ARGUMENT_TERMINATOR: &str = "--";
 
+/// 層 4（ロケール環境変数）をデバッグログで示す表記。
+///
+/// [`LOCALE_ENV_KEYS`] のどれが効いたかは [`locale_from_env`] が畳み込んだ後では
+/// 区別できないため、層の名前だけを出す。
+const LOCALE_ORIGIN_DISPLAY: &str = "locale";
+
+/// 層 5（フォールバック）をデバッグログで示す表記。
+const FALLBACK_ORIGIN_DISPLAY: &str = "fallback";
+
+/// 層 5 のフォールバック言語。
+const FALLBACK_LANGUAGE: Language = Language::English;
+
 /// 明示指定（層 1〜3）を与えた取得元。
 ///
 /// エラーメッセージで「どこで指定された値が不正なのか」を示すために持つ。
@@ -81,6 +103,31 @@ impl fmt::Display for LanguageSource {
             Self::Config => "git config fuzgit.lang",
         };
         formatter.write_str(text)
+    }
+}
+
+/// 表示言語を決めた層（FR-25 の層 1〜5）。
+///
+/// 明示指定（層 1〜3）を [`LanguageSource`] の入れ子で表すのは、`--lang` /
+/// `FUZGIT_LANG` / `fuzgit.lang` が「fuzgit への明示的な指定」という同じ性質を持ち、
+/// 層 4・5 とは扱い（不正値でのエラー停止）が異なるため。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LanguageOrigin {
+    /// 層 1〜3: 明示指定。
+    Explicit(LanguageSource),
+    /// 層 4: ロケール環境変数からの自動判定。
+    Locale,
+    /// 層 5: どの層でも決まらなかった場合のフォールバック（`en`）。
+    Fallback,
+}
+
+impl fmt::Display for LanguageOrigin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Explicit(source) => source.fmt(formatter),
+            Self::Locale => formatter.write_str(LOCALE_ORIGIN_DISPLAY),
+            Self::Fallback => formatter.write_str(FALLBACK_ORIGIN_DISPLAY),
+        }
     }
 }
 
@@ -165,7 +212,24 @@ fn parse_explicit(origin: LanguageSource, value: &str) -> Result<ExplicitLanguag
 /// 層 1〜3 に `ja` / `en` / `auto` 以外の値が指定された場合は
 /// [`LanguageError::InvalidValue`] を返す。層 4 は解釈できなくてもエラーにならない。
 pub fn resolve(inputs: &LanguageInputs) -> Result<Language, LanguageError> {
-    for (origin, value) in [
+    let (language, _origin) = resolve_with_origin(inputs)?;
+
+    Ok(language)
+}
+
+/// 入力から表示言語と、それを決めた層を求める（層 1〜5）。
+///
+/// 解決規則は [`resolve`] と同一であり、こちらは決め手になった層
+/// （[`LanguageOrigin`]）を併せて返す。層はデバッグログ（[`log_resolved_language`]）
+/// でのみ用いるため、この関数はモジュール内に閉じている。
+///
+/// # Errors
+///
+/// [`resolve`] と同じ条件で [`LanguageError::InvalidValue`] を返す。
+fn resolve_with_origin(
+    inputs: &LanguageInputs,
+) -> Result<(Language, LanguageOrigin), LanguageError> {
+    for (source, value) in [
         (LanguageSource::Flag, inputs.flag),
         (LanguageSource::Env, inputs.env),
         (LanguageSource::Config, inputs.config),
@@ -174,16 +238,45 @@ pub fn resolve(inputs: &LanguageInputs) -> Result<Language, LanguageError> {
             continue;
         };
 
-        match parse_explicit(origin, value)? {
-            ExplicitLanguage::Fixed(language) => return Ok(language),
+        match parse_explicit(source, value)? {
+            ExplicitLanguage::Fixed(language) => {
+                return Ok((language, LanguageOrigin::Explicit(source)));
+            }
             ExplicitLanguage::Auto => break,
         }
     }
 
-    Ok(inputs
-        .locale
-        .and_then(language_from_locale)
-        .unwrap_or(Language::English))
+    match inputs.locale.and_then(language_from_locale) {
+        Some(language) => Ok((language, LanguageOrigin::Locale)),
+        None => Ok((FALLBACK_LANGUAGE, LanguageOrigin::Fallback)),
+    }
+}
+
+/// デバッグログに出力する 1 行を組み立てる（純関数）。
+///
+/// 書式は `crate::git::exec` の実行ログに合わせ、接頭辞（[`DEBUG_PREFIX`]）と
+/// `key=value` / `(key: value)` の表記を共有する。出力するのは解決結果の言語コードと
+/// 層の名前だけであり、指定された値そのもの（環境変数・設定の中身）は含めない。
+fn debug_line(language: Language, origin: LanguageOrigin) -> String {
+    format!(
+        "{DEBUG_PREFIX} language={code} (source: {origin})",
+        code = language.code()
+    )
+}
+
+/// 言語の解決結果をデバッグログとして標準エラーへ出力する。
+///
+/// 有効・無効の判定は `crate::git::exec` の `debug_enabled` へ委ねる
+/// （`FUZGIT_DEBUG` の解釈を 1 か所に保つため）。標準出力はハッシュ・タグ名の
+/// パイプ用途に使うため、ログは必ず標準エラーへ出す。
+fn log_resolved_language(language: Language, origin: LanguageOrigin) {
+    if !debug_enabled() {
+        return;
+    }
+
+    // ログの書き込み失敗（標準エラーの閉鎖など）で起動を止めたくないため、
+    // ここだけは結果を破棄する（`crate::git::exec` の実行ログと同じ扱い）
+    let _ = writeln!(std::io::stderr(), "{}", debug_line(language, origin));
 }
 
 /// 現在のプロセスの環境・引数列・リポジトリ設定から表示言語を決める（層 1〜5）。
@@ -196,6 +289,9 @@ pub fn resolve(inputs: &LanguageInputs) -> Result<Language, LanguageError> {
 /// `repository` は「リポジトリを開けた場合のみ」渡す。開けなかった場合（リポジトリ外での
 /// 実行・`gz --help`）も言語は決まらなければならないため、`None` を渡してユーザー全体の
 /// 設定から層 3 を引く。
+///
+/// `FUZGIT_DEBUG=1` のときは、解決された言語と決め手になった層を標準エラーへ 1 行出力する
+/// （[`log_resolved_language`]）。
 ///
 /// # 層 3 を先読みしないことについて
 ///
@@ -218,12 +314,16 @@ pub fn resolve_from_environment(
     let config = language_from_config(repository)?;
     let locale = locale_from_env();
 
-    resolve(&LanguageInputs {
+    let (language, origin) = resolve_with_origin(&LanguageInputs {
         flag: flag.as_deref(),
         env: env.as_deref(),
         config: config.as_deref(),
         locale: locale.as_deref(),
-    })
+    })?;
+
+    log_resolved_language(language, origin);
+
+    Ok(language)
 }
 
 /// ロケール文字列を解釈して言語を判定する（層 4）。
@@ -577,6 +677,131 @@ mod tests {
                 language,
                 Language::English,
                 "unexpected result for {locale}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_with_origin_reports_the_layer_that_decided() {
+        for (inputs, expected) in [
+            (
+                LanguageInputs {
+                    flag: Some("en"),
+                    env: Some("ja"),
+                    config: Some("ja"),
+                    locale: Some("ja_JP.UTF-8"),
+                },
+                (
+                    Language::English,
+                    LanguageOrigin::Explicit(LanguageSource::Flag),
+                ),
+            ),
+            (
+                LanguageInputs {
+                    flag: None,
+                    env: Some("ja"),
+                    config: Some("en"),
+                    locale: Some("en_US.UTF-8"),
+                },
+                (
+                    Language::Japanese,
+                    LanguageOrigin::Explicit(LanguageSource::Env),
+                ),
+            ),
+            (
+                LanguageInputs {
+                    flag: None,
+                    env: None,
+                    config: Some("ja"),
+                    locale: Some("en_US.UTF-8"),
+                },
+                (
+                    Language::Japanese,
+                    LanguageOrigin::Explicit(LanguageSource::Config),
+                ),
+            ),
+            (
+                LanguageInputs {
+                    flag: Some("auto"),
+                    env: None,
+                    config: None,
+                    locale: Some("ja_JP.UTF-8"),
+                },
+                (Language::Japanese, LanguageOrigin::Locale),
+            ),
+            (
+                LanguageInputs::default(),
+                (Language::English, LanguageOrigin::Fallback),
+            ),
+        ] {
+            let resolved = resolve_with_origin(&inputs).expect("every input above is valid");
+
+            assert_eq!(resolved, expected, "unexpected result: {inputs:?}");
+        }
+    }
+
+    #[test]
+    fn resolve_with_origin_reports_the_fallback_when_the_locale_is_not_understood() {
+        // 層 4 に値はあるが `ja` ではない場合、決め手は層 5（フォールバック）になる。
+        let resolved = resolve_with_origin(&LanguageInputs {
+            locale: Some("de_DE.UTF-8"),
+            ..LanguageInputs::default()
+        })
+        .expect("the locale layer never fails");
+
+        assert_eq!(resolved, (Language::English, LanguageOrigin::Fallback));
+    }
+
+    #[test]
+    fn debug_line_names_the_language_and_the_layer() {
+        // `crate::git::exec` の実行ログと同じ接頭辞・表記であることを固定する。
+        for (language, origin, expected) in [
+            (
+                Language::Japanese,
+                LanguageOrigin::Explicit(LanguageSource::Flag),
+                "[fuzgit] language=ja (source: --lang)",
+            ),
+            (
+                Language::English,
+                LanguageOrigin::Explicit(LanguageSource::Env),
+                "[fuzgit] language=en (source: FUZGIT_LANG)",
+            ),
+            (
+                Language::Japanese,
+                LanguageOrigin::Explicit(LanguageSource::Config),
+                "[fuzgit] language=ja (source: git config fuzgit.lang)",
+            ),
+            (
+                Language::Japanese,
+                LanguageOrigin::Locale,
+                "[fuzgit] language=ja (source: locale)",
+            ),
+            (
+                Language::English,
+                LanguageOrigin::Fallback,
+                "[fuzgit] language=en (source: fallback)",
+            ),
+        ] {
+            assert_eq!(debug_line(language, origin), expected);
+        }
+    }
+
+    #[test]
+    fn debug_line_covers_every_layer_of_the_resolution() {
+        // 5 層すべてに表記があること（表記の重複が無いこと）を確かめる。
+        let lines = [
+            LanguageOrigin::Explicit(LanguageSource::Flag),
+            LanguageOrigin::Explicit(LanguageSource::Env),
+            LanguageOrigin::Explicit(LanguageSource::Config),
+            LanguageOrigin::Locale,
+            LanguageOrigin::Fallback,
+        ]
+        .map(|origin| debug_line(Language::English, origin));
+
+        for (index, line) in lines.iter().enumerate() {
+            assert!(
+                !lines[index + 1..].contains(line),
+                "every layer needs its own wording: {line}"
             );
         }
     }

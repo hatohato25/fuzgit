@@ -226,9 +226,8 @@
               <h3>Only three commands go online</h3>
               <p>
                 <code>gz fetch</code>, <code>gz pull</code> and
-                <code>gz sync</code> use the network — plus the
-                <code>git push</code> that <code>gz push</code> runs after you
-                decide. Everything else is local.
+                <code>gz sync</code> use the network. Everything else is local
+                — pushing is left to plain <code>git push</code>.
               </p>
             </article>
 
@@ -236,8 +235,8 @@
               <h3>Built not to lose your work</h3>
               <p>
                 Destructive operations confirm first, <code>gz pull</code> is
-                fast-forward only, merge shows a conflict prediction, force push
-                is not offered and history is never rewritten automatically.
+                fast-forward only, merge shows a conflict prediction, pushing is
+                left to git and history is never rewritten automatically.
               </p>
             </article>
 
@@ -436,13 +435,6 @@ gz --lang ja branch                  # one-off, on any subcommand</code></pre>
                   <td><a href="docs.html#commit"><code>gz commit</code></a></td>
                   <td>Pick changed files and commit only those</td>
                   <td>multiple</td>
-                </tr>
-                <tr>
-                  <td><a href="docs.html#push"><code>gz push</code></a></td>
-                  <td>
-                    Pick the push target (remote × current branch) and push
-                  </td>
-                  <td>single</td>
                 </tr>
                 <tr>
                   <td><a href="docs.html#fixup"><code>gz fixup</code></a></td>

@@ -70,7 +70,6 @@
           <li><a href="#tag">gz tag</a></li>
           <li><a href="#reflog">gz reflog</a></li>
           <li><a href="#commit">gz commit</a></li>
-          <li><a href="#push">gz push</a></li>
           <li><a href="#fixup">gz fixup</a></li>
           <li><a href="#merge">gz merge</a></li>
           <li><a href="#rebase">gz rebase</a></li>
@@ -123,8 +122,7 @@
             <p class="muted">
               fuzgit speaks English and Japanese, English being the default
               (see <a href="#language">Language</a>). Console excerpts on this
-              page are shown verbatim, so some of them still show the Japanese
-              display (<code>--lang ja</code>) with an English gloss.
+              page show the default English display.
             </p>
           </div>
           <div lang="ja">
@@ -163,8 +161,8 @@
                 <a href="https://crates.io/crates/gix">gix</a>, but gix does not
                 provide those write operations. If <code>git</code> is not on
                 <code>PATH</code>, fuzgit reports
-                <span class="muted">「git コマンドが見つかりません」</span> (git
-                command not found) and exits.
+                <span class="muted">&ldquo;git was not found. Install git and
+                make sure it is on your PATH&rdquo;</span> and exits.
               </li>
               <li>
                 <strong>Git 2.38 or newer is needed for the conflict prediction
@@ -172,9 +170,10 @@
                 <code>git merge-tree --write-tree</code>. Older git rejects that
                 option, so <strong>only the prediction is skipped and the merge
                 still runs</strong> (the confirmation prompt says
-                <span class="muted">「コンフリクト予測: 省略しました」</span> —
-                conflict prediction: skipped). It never stops with an error. No
-                other feature has a minimum git version.
+                <span class="muted">&ldquo;Conflict prediction: skipped
+                (`git merge-tree --write-tree` could not be run; the prediction
+                needs Git 2.38 or later)&rdquo;</span>). It never stops with an
+                error. No other feature has a minimum git version.
               </li>
               <li>
                 A stable Rust toolchain to build from source (Rust 1.85 or newer
@@ -355,14 +354,6 @@ cargo install --path .</code></pre>
                     <span lang="ja">変更ファイルを選んで、選んだものだけをコミットする</span>
                   </td>
                   <td><span lang="en">multiple</span><span lang="ja">複数</span></td>
-                </tr>
-                <tr>
-                  <td><a href="#push"><code>gz push</code></a></td>
-                  <td>
-                    <span lang="en">Pick the push target (remote &times; current branch) and push</span>
-                    <span lang="ja">push 先（リモート × 現在ブランチ）を選んで push する</span>
-                  </td>
-                  <td><span lang="en">single</span><span lang="ja">単一</span></td>
                 </tr>
                 <tr>
                   <td><a href="#fixup"><code>gz fixup</code></a></td>
@@ -766,10 +757,8 @@ gz branch cleanup          # delete every merged branch in one go</code></pre>
               </li>
               <li>
                 A candidate line is
-                <code>&lt;name&gt;  merged|unmerged  &lt;relative update time&gt;  追跡: &lt;upstream&gt;|追跡なし</code>
-                (<span class="muted">追跡</span> = tracking,
-                <span class="muted">追跡なし</span> = no upstream). Only
-                information that can be gathered for every branch at once is put
+                <code>&lt;name&gt;  merged|unmerged  &lt;relative update time&gt;  tracking: &lt;upstream&gt;|no tracking branch</code>.
+                Only information that can be gathered for every branch at once is put
                 on the line; details of the last commit are in the preview
                 (<code>git log --oneline</code>).
               </li>
@@ -1344,7 +1333,7 @@ gz commit -m "fix authentication"   # give the message directly (no editor)</cod
                 tree content, so the preview shows the difference from HEAD
                 rather than from the index.
               </li>
-              <li>With no changes at all it prints <span class="muted">「選択できる候補がありません」</span> (no candidates to choose from) and exits.</li>
+              <li>With no changes at all it prints <span class="muted">&ldquo;There are no candidates to select from&rdquo;</span> and exits.</li>
             </ul>
 
             <h3>A note about your editor</h3>
@@ -1418,109 +1407,6 @@ gz commit -m "認証を修正する"   # メッセージを直接指定する（
           </div>
         </section>
 
-        <section id="push">
-          <h2>
-            <span lang="en"><code>gz push</code> &mdash; picking the push target</span>
-            <span lang="ja"><code>gz push</code> &mdash; push 先の選択</span>
-            <a class="anchor" href="#push" aria-label="Link to this section">#</a>
-          </h2>
-          <div lang="en">
-            <pre><code>gz push        # pick the target and run git push &lt;remote&gt; &lt;branch&gt;
-gz push -u     # also set the picked target as the upstream of the current branch</code></pre>
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th scope="col">Option</th><th scope="col">Description</th></tr></thead>
-                <tbody>
-                  <tr><td><code>-u</code>, <code>--set-upstream</code></td><td>Set the push target as the upstream of the current branch</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <ul>
-              <li>
-                The branch to push is <strong>fixed to the current branch</strong>;
-                candidates are &ldquo;remote &times; current branch&rdquo;, shown
-                like <code>origin/main  ahead 2 / behind 1  (upstream)</code>.
-              </li>
-              <li>
-                Candidates without a remote-tracking ref yet (never pushed) show
-                <span class="muted">追跡参照なし</span> (no tracking ref). The
-                candidate matching the current branch&rsquo;s upstream is marked
-                <code>(upstream)</code>.
-              </li>
-              <li>
-                The preview is the commits that would be pushed
-                (<code>git log --oneline &lt;tracking ref&gt;..HEAD</code>, up to 50).
-                When there is no tracking ref the push would create it, so the
-                commits reachable from HEAD are shown instead.
-              </li>
-              <li>
-                The candidate list and preview only read local tracking refs, so
-                <strong>they use no network</strong>. The only thing that talks to
-                the remote is the <code>git push</code> after you decide.
-              </li>
-              <li><code>git push</code> runs with inherited stdio, so authentication prompts and progress output are git&rsquo;s own.</li>
-              <li>
-                <strong>Force push (<code>--force</code> /
-                <code>--force-with-lease</code>) is not offered.</strong>
-                Destroying remote history cannot be guaranteed safe by a
-                confirmation prompt alone, so it is deliberately out of scope
-                (use plain <code>git push --force-with-lease</code> when you need
-                it). Passing those flags is rejected as unknown arguments.
-              </li>
-              <li>The upstream is only configured when you pass <code>-u</code>; <code>branch.&lt;name&gt;.remote</code> is never rewritten implicitly.</li>
-              <li>
-                On a detached HEAD there is no branch to push, so fuzgit says so
-                and exits. With no remotes at all it suggests
-                <code>git remote add</code>.
-              </li>
-            </ul>
-          </div>
-          <div lang="ja">
-            <pre><code>gz push        # push 先を選んで git push &lt;remote&gt; &lt;branch&gt;
-gz push -u     # 選んだ push 先を現在ブランチの upstream に設定する</code></pre>
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th scope="col">オプション</th><th scope="col">説明</th></tr></thead>
-                <tbody>
-                  <tr><td><code>-u</code>, <code>--set-upstream</code></td><td>push 先を現在ブランチの upstream として設定する</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <ul>
-              <li>
-                push 対象は<strong>現在のブランチに固定</strong>で、候補は「リモート × 現在のブランチ」です
-                （<code>origin/main  ahead 2 / behind 1  (upstream)</code> のように表示）。
-              </li>
-              <li>
-                リモート追跡参照がまだ無い候補（未 push のリモート）は「追跡参照なし」と表示します。
-                現在のブランチの upstream に対応する候補には <code>(upstream)</code> が付きます。
-              </li>
-              <li>
-                プレビューは push されるコミット（<code>git log --oneline &lt;追跡参照&gt;..HEAD</code>、
-                最大 50 件）。追跡参照が無い候補は push で参照が新規作成されるため、HEAD から
-                辿れるコミットを表示します。
-              </li>
-              <li>
-                候補一覧・プレビューはローカルの追跡参照だけを読むため<strong>ネットワークを使いません</strong>。
-                実際に通信するのは決定後の <code>git push</code> だけです。
-              </li>
-              <li><code>git push</code> は継承 stdio で実行するため、認証プロンプトや進捗表示は git のものがそのまま出ます。</li>
-              <li>
-                <strong>force push（<code>--force</code> / <code>--force-with-lease</code>）は
-                提供しません。</strong>リモート履歴の破壊は確認プロンプトだけでは担保できないため、
-                意図的にスコープ外としています（必要な場合は素の
-                <code>git push --force-with-lease</code> を使ってください）。
-                これらのフラグを渡すと未知の引数として拒否されます。
-              </li>
-              <li>upstream の設定は <code>-u</code> を指定したときだけ行い、暗黙に <code>branch.&lt;name&gt;.remote</code> を書き換えません。</li>
-              <li>
-                detached HEAD では push 対象のブランチが定まらないため、その旨を表示して終了します。
-                リモートが 1 つも無い場合は <code>git remote add</code> を促します。
-              </li>
-            </ul>
-          </div>
-        </section>
-
         <section id="fixup">
           <h2>
             <span lang="en"><code>gz fixup</code> &mdash; picking the target of a fixup commit</span>
@@ -1542,8 +1428,9 @@ gz fixup --squash   # git commit --squash=&lt;picked commit&gt;</code></pre>
               <li>
                 What gets committed is <strong>the staged changes</strong>. With
                 nothing staged, fuzgit prints
-                <span class="muted">「ステージ済みの変更がありません」</span>
-                (there are no staged changes) and exits before starting the
+                <span class="muted">&ldquo;There are no staged changes. A fixup
+                commit needs staged changes, so stage them with `gz add` and run
+                this command again&rdquo;</span> and exits before starting the
                 finder.
               </li>
               <li>Candidates are commits reachable from HEAD (1000 by default, shared with <code>gz log --limit</code>). The preview is <code>git show --color=always</code>.</li>
@@ -1551,10 +1438,9 @@ gz fixup --squash   # git commit --squash=&lt;picked commit&gt;</code></pre>
                 Afterwards the steps to fold the commit into history are printed
                 to stderr. <strong>The rebase is not run automatically</strong>
                 &mdash; rewriting history stays an explicit user action.
-                <pre><code>ヒント: 作成したコミットを履歴へ取り込むには次を実行してください。
+                <pre><code>Hint: run the following to fold the new commit into the history:
   git rebase -i --autosquash &lt;full hash of the picked commit&gt;^</code></pre>
-                (&ldquo;Hint: run the following to fold the new commit into
-                history.&rdquo;) If the picked commit is the very first one (no
+                If the picked commit is the very first one (no
                 parent), <code>&lt;hash&gt;^</code> cannot be resolved, so the
                 starting point becomes <code>--root</code> and the reason is
                 printed with it.
@@ -1630,9 +1516,9 @@ gz merge --ff-only   # merge only when it can fast-forward</code></pre>
                 <code>git merge-tree --write-tree</code>
                 (<strong>Git 2.38 or newer required</strong>). When it cannot be
                 produced (older git, for example) the prompt says
-                <span class="muted">「省略しました」</span> (skipped) and the merge
-                still runs. &ldquo;Could not predict&rdquo; is never treated as
-                &ldquo;will not conflict&rdquo;.
+                <span class="muted">&ldquo;Conflict prediction: skipped&rdquo;</span>
+                and the merge still runs. &ldquo;Could not predict&rdquo; is
+                never treated as &ldquo;will not conflict&rdquo;.
               </li>
               <li>
                 On a conflict, git&rsquo;s message is shown as-is and the exit code
@@ -1943,9 +1829,8 @@ gz revert --no-edit   # エディタを起動せず git の既定メッセージ
                 use of status). In that case the header-equivalent information
                 goes to stderr.
                 <pre><code>$ gz status
-変更はありません（作業ツリーはクリーンです）
+There are no changes (the working tree is clean)
 main  |  staged 0 / unstaged 0 / untracked 0 / stash 0</code></pre>
-                (&ldquo;No changes (the working tree is clean)&rdquo;.)
               </li>
             </ul>
           </div>
@@ -2040,10 +1925,9 @@ gz diff --commit     # pick two commits and compare them</code></pre>
                 <code>--branch</code> / <code>--commit</code> open the fuzzy
                 finder <strong>twice</strong>, for the left then the right side.
                 The header tells you which one you are picking
-                (<code>1/2 比較元のブランチ</code> = &ldquo;1/2 source
-                branch&rdquo;, <code>2/2 比較先のブランチ</code> = &ldquo;2/2
-                target branch&rdquo;). Candidates and previews are shared with
-                <a href="#branch"><code>gz branch</code></a> and
+                (<code>1/2 branch to compare from</code>, then
+                <code>2/2 branch to compare to</code>). Candidates and previews
+                are shared with <a href="#branch"><code>gz branch</code></a> and
                 <a href="#log"><code>gz log</code></a>.
               </li>
               <li>
@@ -2073,9 +1957,7 @@ gz diff --commit     # pick two commits and compare them</code></pre>
                 <strong>When the range contains no changed files it is not an
                 error: it exits with code 0.</strong>
                 <pre><code>$ gz diff
-差分はありません（未ステージの変更: index と作業ツリー）</code></pre>
-                (&ldquo;No differences (unstaged changes: index vs working
-                tree)&rdquo;.)
+There is no difference (Unstaged changes: index and work tree)</code></pre>
               </li>
             </ul>
           </div>
@@ -2165,8 +2047,8 @@ gz fetch --siblings    # pick repositories sitting next to this one and fetch th
               <li>
                 The finder only opens when there is <strong>more than one
                 remote</strong>. Candidates are the registered remote names plus
-                a fixed entry, <span class="muted">「すべてのリモート」</span> (all
-                remotes), which runs <code>git fetch --all</code>.
+                a fixed entry, <span class="muted">all remotes</span>, which
+                runs <code>git fetch --all</code>.
               </li>
               <li>
                 <strong>With exactly one remote the finder does not open and the
@@ -2177,9 +2059,7 @@ gz fetch --siblings    # pick repositories sitting next to this one and fetch th
                 (<code>git fetch</code> can print nothing at all when there are no
                 updates).
                 <pre><code>$ gz fetch
-リモート `origin` から取得します（登録されているリモートが 1 つのため、選択を省略しました）</code></pre>
-                (&ldquo;Fetching from remote <code>origin</code> (only one remote
-                is registered, so the selection was skipped)&rdquo;.)
+Fetching from the remote `origin` (only one remote is registered, so the selection was skipped)</code></pre>
               </li>
               <li>
                 <strong>The preview only shows local information</strong> (two
@@ -2202,15 +2082,10 @@ gz fetch --siblings    # pick repositories sitting next to this one and fetch th
               contain a <code>.git</code>.
             </p>
             <pre><code>$ gz fetch --siblings
-現在のリポジトリを選択済みにしています。Tab: 選択の切替 / Enter: 取得  |  除外 1 件（リモート未登録 / bare）
+The current repository is preselected. Tab: toggle the selection / Enter: fetch  |  1 excluded (no remote / bare)
 &gt;&gt;mike  main  origin
   alpha  main  origin
   zulu  main  origin</code></pre>
-            <p class="muted">
-              Header, in English: &ldquo;the current repository starts selected.
-              Tab: toggle selection / Enter: fetch | 1 excluded (no remote
-              registered / bare)&rdquo;.
-            </p>
             <ul>
               <li>
                 A candidate line is
@@ -2230,10 +2105,9 @@ gz fetch --siblings    # pick repositories sitting next to this one and fetch th
                 somebody else&rsquo;s repository.
                 <pre><code>── origin ──
 git@github.com:example/big-repo.git
-── ブランチの追跡状況 ──
+── Branch tracking status ──
   develop → origin/develop [ahead 2]
 * main → origin/main [behind 4]</code></pre>
-                (The second heading reads &ldquo;branch tracking state&rdquo;.)
                 The working tree state (<code>git status</code>) is deliberately
                 not shown: <code>git status</code> walks the whole working tree
                 (refreshing the index) before printing anything, which can take
@@ -2258,12 +2132,9 @@ git@github.com:example/big-repo.git
                 does not open</strong>; the reason is printed in one line and the
                 fetch runs.
                 <pre><code>$ gz fetch --siblings
-対象が現在のリポジトリ 1 件のため、選択を省略しました
+The current repository is the only target, so the selection was skipped
 [1/1] only
-成功 1 件 / 失敗 0 件</code></pre>
-                (&ldquo;The only target is the current repository, so the
-                selection was skipped&rdquo; / &ldquo;1 succeeded / 0
-                failed&rdquo;.)
+1 succeeded / 0 failed</code></pre>
               </li>
               <li>
                 What runs in each repository is
@@ -2287,18 +2158,15 @@ git@github.com:example/big-repo.git
 [3/3] zulu
 fatal: '/path/to/does-not-exist.git' does not appear to be a git repository
 fatal: Could not read from remote repository.
-成功 2 件 / 失敗 1 件（失敗: zulu）
-エラー: 一部のリポジトリで取得に失敗しました</code></pre>
-                (&ldquo;2 succeeded / 1 failed (failed: zulu)&rdquo; /
-                &ldquo;Error: fetching failed for some repositories&rdquo;.)
+2 succeeded / 1 failed (failed: zulu)
+error: Fetching failed for some repositories</code></pre>
               </li>
               <li><strong>If launching <code>git</code> itself fails (git not installed, for example) the run stops there</strong>, because that is an environment problem rather than a per-repository failure.</li>
               <li>
                 Combined with <code>--prune</code>, the flag
                 <strong>applies to every selected repository</strong>. The finder
                 header says so:
-                <code>--prune: 選択したすべてのリポジトリに適用</code>
-                (&ldquo;--prune: applied to every selected repository&rdquo;).
+                <code>--prune: applies to every selected repository</code>.
               </li>
               <li>
                 If there is no repository that can be fetched at all, it stops
@@ -2311,10 +2179,7 @@ fatal: Could not read from remote repository.
                 repository</strong>, so the range you asked for and the place it
                 contacts can never diverge.
                 <pre><code>$ gz fetch --siblings
-エラー: fetch できるリポジトリがありません（リモートが登録されていないリポジトリと bare リポジトリは対象になりません）</code></pre>
-                (&ldquo;Error: there is no repository that can be fetched
-                (repositories with no remote and bare repositories are not
-                targets)&rdquo;.)
+error: There is no repository to fetch (a repository without a remote and a bare repository are not offered)</code></pre>
               </li>
             </ul>
 
@@ -2523,7 +2388,7 @@ fatal: Could not read from remote repository.
                 offered as usual (unlike <a href="#sync"><code>gz sync</code></a>,
                 this is not an error).
                 <pre><code>$ gz pull
-現在のブランチを選択済みにしています。Tab: 選択の切替 / Enter: fast-forward のみで取り込み  |  除外 2 件（upstream 未設定 / リモート未登録 / 他の worktree で使用中）
+The current branch is preselected. Tab: toggle the selection / Enter: integrate with a fast-forward only  |  2 excluded (no upstream / remote not registered / in use by another worktree)
 &gt;&gt;* main  →  origin/main
     feature-a  →  origin/feature-a</code></pre>
               </li>
@@ -2539,8 +2404,7 @@ fatal: Could not read from remote repository.
               </li>
               <li>
                 The preview is headed
-                <code>── 未取り込みのコミット（前回の fetch 時点） ──</code>
-                (&ldquo;commits not yet integrated (as of the last fetch)&rdquo;)
+                <code>── Commits not integrated yet (as of the last fetch) ──</code>
                 and shows the commits between the branch and its locally stored
                 tracking ref (<code>git log --oneline &lt;branch&gt;..&lt;tracking ref&gt;</code>).
                 The heading states that the information is as of the last fetch:
@@ -2552,15 +2416,13 @@ fatal: Could not read from remote repository.
                 the target and the reason are printed in one line and the run
                 starts.
                 <pre><code>$ gz pull
-`main` を取り込みます（候補が 1 件のため、選択を省略しました）
+Integrating `main` (there is only one candidate, so the selection was skipped)
 [1/1] main
-成功 1 件 / 失敗 0 件</code></pre>
-                (&ldquo;Integrating <code>main</code> (only one candidate, so the
-                selection was skipped)&rdquo;.)
+1 succeeded / 0 failed</code></pre>
               </li>
               <li>
                 With no candidates at all it stops and explains how to set an
-                upstream (<code>gz push -u</code> /
+                upstream (<code>git push -u &lt;remote&gt; &lt;branch&gt;</code> /
                 <code>git branch --set-upstream-to=&lt;remote&gt;/&lt;branch&gt;</code>).
               </li>
               <li>
@@ -2603,14 +2465,10 @@ fatal: Could not read from remote repository.
 [2/4] alpha
 [3/4] diverged
 [4/4] zeta
-成功 3 件 / 失敗 1 件（失敗: diverged）
-fast-forward できなかったブランチは、そのブランチへ切り替えてから `gz sync --rebase` または `gz sync --merge` で取り込めます
-エラー: 一部のブランチで取り込みに失敗しました</code></pre>
-                (&ldquo;3 succeeded / 1 failed (failed: diverged)&rdquo; /
-                &ldquo;branches that could not fast-forward can be integrated by
-                switching to them and running <code>gz sync --rebase</code> or
-                <code>gz sync --merge</code>&rdquo; / &ldquo;Error: integration
-                failed for some branches&rdquo;.) It only points at it &mdash;
+3 succeeded / 1 failed (failed: diverged)
+A branch that could not fast-forward can be integrated with `gz sync --rebase` or `gz sync --merge` after switching to it
+error: Integrating failed for some branches</code></pre>
+                It only points at it &mdash;
                 <strong><code>gz sync</code> is never started
                 automatically</strong>. How history is integrated (rebase or
                 merge) stays an explicit user choice.
@@ -2711,7 +2569,7 @@ fast-forward できなかったブランチは、そのブランチへ切り替�
 成功 1 件 / 失敗 0 件</code></pre>
               </li>
               <li>
-                候補が 1 件も無い場合は、upstream の設定方法（<code>gz push -u</code> /
+                候補が 1 件も無い場合は、upstream の設定方法（<code>git push -u &lt;remote&gt; &lt;branch&gt;</code> /
                 <code>git branch --set-upstream-to=&lt;remote&gt;/&lt;branch&gt;</code>）を案内して停止します。
               </li>
               <li>
@@ -3041,10 +2899,9 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 <strong>The only commands that use the network are
                 <a href="#fetch"><code>gz fetch</code></a>,
                 <a href="#pull"><code>gz pull</code></a> and
-                <a href="#sync"><code>gz sync</code></a></strong> (plus the
-                <code>git push</code> that <a href="#push"><code>gz push</code></a>
-                runs after you decide). Every other command works purely from
-                local repository data.
+                <a href="#sync"><code>gz sync</code></a></strong>. Every other
+                command works purely from local repository data (pushing is left
+                to plain <code>git push</code>).
               </li>
               <li>
                 <strong>Candidate generation and previews never use the
@@ -3071,9 +2928,9 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 network.
               </li>
               <li>
-                The ahead/behind in <code>gz status</code>, the ahead/behind in
-                <code>gz push</code> and the right-hand side of
-                <code>gz diff --upstream</code> all come from reading local
+                The ahead/behind in <code>gz status</code> and the right-hand
+                side of
+                <code>gz diff --upstream</code> both come from reading local
                 remote-tracking refs. Run <code>gz fetch</code> first if you want
                 to compare against the latest state.
               </li>
@@ -3110,9 +2967,8 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
               <li>
                 <strong>ネットワークを使うのは <a href="#fetch"><code>gz fetch</code></a> と
                 <a href="#pull"><code>gz pull</code></a> と <a href="#sync"><code>gz sync</code></a>
-                だけです</strong>（<a href="#push"><code>gz push</code></a> は決定後の
-                <code>git push</code> のみ）。ほかのコマンドはすべてローカルのリポジトリ情報だけで
-                動作します。
+                だけです</strong>。ほかのコマンドはすべてローカルのリポジトリ情報だけで
+                動作します（push は素の <code>git push</code> に委ねます）。
               </li>
               <li>
                 <strong>候補一覧の生成とプレビューではネットワークを使いません。</strong>
@@ -3135,7 +2991,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 自分自身のリポジトリであり、ネットワークへは出ません。
               </li>
               <li>
-                <code>gz status</code> の ahead / behind、<code>gz push</code> の ahead / behind、
+                <code>gz status</code> の ahead / behind と
                 <code>gz diff --upstream</code> の比較先は、いずれもローカルのリモート追跡参照を
                 読んだ結果です。最新の状態と比べたい場合は先に <code>gz fetch</code> を実行してください。
               </li>
@@ -3297,8 +3153,8 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
             </div>
             <p>
               Run outside a git repository, fuzgit prints
-              <span class="muted">「git リポジトリではありません」</span> (this is
-              not a git repository) and exits non-zero.
+              <span class="muted">&ldquo;Not a git repository. Run this command
+              inside a git repository&rdquo;</span> and exits non-zero.
             </p>
           </div>
           <div lang="ja">
@@ -3359,8 +3215,8 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                     </td>
                   </tr>
                   <tr>
-                    <td>Force push (<code>gz push --force</code> / <code>--force-with-lease</code>)</td>
-                    <td>Destroying remote history cannot be guaranteed safe by a confirmation prompt alone</td>
+                    <td>Pushing (<code>gz push</code>)</td>
+                    <td>There is nothing worth picking. The branch is fixed to the current one, and a repository almost always has a single remote, so the finder would open with one candidate every time. Plain <code>git push</code> already does the job. Force push is out of scope on top of that: destroying remote history cannot be guaranteed safe by a confirmation prompt alone</td>
                   </tr>
                   <tr>
                     <td>Reverting a merge commit (<code>git revert -m</code>)</td>
@@ -3473,8 +3329,8 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                     </td>
                   </tr>
                   <tr>
-                    <td>force push（<code>gz push --force</code> / <code>--force-with-lease</code>）</td>
-                    <td>リモート履歴の破壊は確認プロンプトだけでは担保できない</td>
+                    <td>push（<code>gz push</code>）</td>
+                    <td>選ぶ価値のある軸が無い。対象ブランチは現在のブランチに固定され、リモートは 1 つだけのリポジトリがほとんどであるため、候補 1 件の finder が毎回開くだけになる。素の <code>git push</code> で足りる。加えて force push は、リモート履歴の破壊を確認プロンプトだけでは担保できないためスコープ外</td>
                   </tr>
                   <tr>
                     <td>マージコミットの revert（<code>git revert -m</code>）</td>
@@ -3754,7 +3610,7 @@ cargo test</code></pre>
                 commits will come in and the conflict prediction.
               </li>
               <li>History rewriting is never run automatically (<code>gz fixup</code> only prints the autosquash steps; it does not rebase).</li>
-              <li>Force push is not provided (<code>gz push</code> has no <code>--force</code> / <code>--force-with-lease</code>).</li>
+              <li>Pushing is not provided at all, so neither is force push. Use plain <code>git push</code>.</li>
             </ul>
           </div>
           <div lang="ja">
@@ -3807,7 +3663,7 @@ cargo test</code></pre>
                 確認を設け、取り込まれるコミット数とコンフリクト予測を提示します。
               </li>
               <li>履歴改変の自動実行は行いません（<code>gz fixup</code> は autosquash の手順を表示するだけで rebase しません）。</li>
-              <li>force push は提供しません（<code>gz push</code> に <code>--force</code> / <code>--force-with-lease</code> はありません）。</li>
+              <li>push 自体を提供しないため、force push も提供しません。素の <code>git push</code> を使ってください。</li>
             </ul>
           </div>
 

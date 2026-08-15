@@ -649,8 +649,8 @@ mod tests {
             let message = language.messages().pull().no_candidates();
 
             assert!(
-                message.contains("gz push -u"),
-                "the fuzgit way of setting an upstream should be offered: {message}"
+                message.contains("git push -u <remote> <branch>"),
+                "the way to push a new branch should be offered: {message}"
             );
             assert!(
                 message.contains("git branch --set-upstream-to=<remote>/<branch>"),

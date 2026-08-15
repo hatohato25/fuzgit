@@ -146,15 +146,6 @@ pub enum Command {
         message: Option<String>,
     },
 
-    /// Pick where to push (remote × current branch) and push
-    //
-    // force push（`--force` / `--force-with-lease`）は提供しない。
-    Push {
-        /// Set the push target as the upstream of the current branch
-        #[arg(short = 'u', long)]
-        set_upstream: bool,
-    },
-
     /// Pick the commit to amend and create a fixup commit
     Fixup {
         /// Create a squash commit (which joins the messages) instead of a fixup one
@@ -405,13 +396,6 @@ pub fn localized_command(messages: &dyn Messages) -> ClapCommand {
                 .about(cli.commit_about())
                 .mut_arg("message", |argument| {
                     argument.help(cli.commit_message_help())
-                })
-        })
-        .mut_subcommand("push", |command| {
-            command
-                .about(cli.push_about())
-                .mut_arg("set_upstream", |argument| {
-                    argument.help(cli.push_set_upstream_help())
                 })
         })
         .mut_subcommand("fixup", |command| {
@@ -774,31 +758,13 @@ mod tests {
     }
 
     #[test]
-    fn push_takes_the_set_upstream_flag() {
-        for arguments in [["gz", "push", "-u"], ["gz", "push", "--set-upstream"]] {
-            let cli = Cli::try_parse_from(arguments).expect("push should parse");
-            match cli.command {
-                Command::Push { set_upstream } => assert!(set_upstream),
-                other => panic!("unexpected subcommand: {other:?}"),
-            }
-        }
-
-        let cli = Cli::try_parse_from(["gz", "push"]).expect("push should parse bare");
-        match cli.command {
-            Command::Push { set_upstream } => assert!(!set_upstream),
-            other => panic!("unexpected subcommand: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn push_does_not_offer_force_options() {
-        // force push は fuzgit のスコープ外（requirements.md「スコープ外」）
-        for flag in ["--force", "--force-with-lease", "-f"] {
-            assert!(
-                Cli::try_parse_from(["gz", "push", flag]).is_err(),
-                "`gz push {flag}` must be rejected"
-            );
-        }
+    fn push_is_not_offered() {
+        // push は fuzzy finder で選ぶ価値のある軸が無いため提供しない
+        // （requirements.md「スコープ外」）。素の `git push` に委ねる
+        assert!(
+            Cli::try_parse_from(["gz", "push"]).is_err(),
+            "`gz push` must not be a subcommand"
+        );
     }
 
     #[test]

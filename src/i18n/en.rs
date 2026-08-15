@@ -10,8 +10,8 @@ use super::messages::{
     BranchManageMessages, BranchMessages, CherryPickMessages, CliMessages, CommitMessages,
     CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
     FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, MergeMessages,
-    Messages, PullMessages, PushMessages, RebaseMessages, ReflogMessages, RestoreMessages,
-    RevertMessages, StashMessages, StatusMessages, SyncMessages, TagMessages, WorktreeMessages,
+    Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages, RevertMessages,
+    StashMessages, StatusMessages, SyncMessages, TagMessages, WorktreeMessages,
 };
 use crate::error::{Error, stderr_suffix};
 use crate::git::read::{BRANCH_REF_PREFIX, MalformedOutput, ReadOperation, WORKTREE_LABEL};
@@ -76,10 +76,6 @@ impl Messages for EnglishMessages {
 
     fn restore(&self) -> &dyn RestoreMessages {
         &EnglishRestoreMessages
-    }
-
-    fn push(&self) -> &dyn PushMessages {
-        &EnglishPushMessages
     }
 
     fn revert(&self) -> &dyn RevertMessages {
@@ -209,7 +205,7 @@ Switch to a branch with `gz branch` and run the command again"
     fn upstream_not_configured(&self, branch: &str) -> String {
         format!(
             "`{branch}` has no upstream. \
-Push it with `gz push -u`, or set one with `git branch --set-upstream-to=<remote>/<branch>`"
+Push it with `git push -u <remote> <branch>`, or set one with `git branch --set-upstream-to=<remote>/<branch>`"
         )
     }
 
@@ -299,10 +295,6 @@ impl ErrorMessages for EnglishErrorMessages {
                 "The current branch `{branch}` has no commits yet. \
                  Create the first commit with `git commit`, then run this command again"
             ),
-            Error::DetachedHead => "HEAD is not on a branch (detached HEAD). \
-                 The branch to push cannot be determined, so switch to a branch with \
-                 `git switch <branch>`, then run this command again"
-                .to_owned(),
             Error::NoWorktree => {
                 "No worktree is available. This operation cannot run in a bare repository"
                     .to_owned()
@@ -731,34 +723,6 @@ fn files(count: usize) -> &'static str {
     if count == 1 { "file" } else { "files" }
 }
 
-/// `gz push`（[`crate::commands::push`]）の英語表示。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EnglishPushMessages;
-
-impl PushMessages for EnglishPushMessages {
-    fn targets_read_failed(&self) -> &'static str {
-        "Failed to list the push destinations"
-    }
-
-    /// `git remote add` は訳さない（design.md「翻訳しないもの」）。プレースホルダは
-    /// 読み手のための語であるため表示言語に合わせる。
-    fn no_remotes(&self) -> &'static str {
-        "No remote is configured to push to. Add one with `git remote add <name> <url>`"
-    }
-
-    fn selection_not_found(&self, selected: &str) -> String {
-        format!("The selected push destination `{selected}` is not among the candidates")
-    }
-
-    fn push_failed(&self, target: &str) -> String {
-        format!("Failed to push to {target}")
-    }
-
-    fn no_tracking_ref(&self) -> &'static str {
-        "no tracking ref"
-    }
-}
-
 /// `gz revert`（[`crate::commands::revert`]）の英語表示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnglishRevertMessages;
@@ -1148,7 +1112,7 @@ or set the upstream again with `git branch --set-upstream-to=<remote>/<branch>`"
         format!(
             "The remote-tracking reference `{reference}` does not exist. \
 `{remote}` may have no upstream for `{branch}` \
-(create it with `gz push -u`, \
+(create it with `git push -u <remote> <branch>`, \
 or set the upstream again with `git branch --set-upstream-to=<remote>/<branch>`)"
         )
     }
@@ -1159,7 +1123,7 @@ or set the upstream again with `git branch --set-upstream-to=<remote>/<branch>`)
 
     fn unpushed_commits(&self, count: usize) -> String {
         format!(
-            "{count} {noun} {verb} not been pushed yet (`gz push` pushes them)",
+            "{count} {noun} {verb} not been pushed yet (`git push` pushes them)",
             noun = commits(count),
             verb = if count == 1 { "has" } else { "have" }
         )
@@ -1348,12 +1312,12 @@ impl PullMessages for EnglishPullMessages {
         "Failed to collect the branches that could follow an upstream"
     }
 
-    /// コマンド列（`gz push -u` / `git branch --set-upstream-to`）は訳さない
+    /// コマンド列（`git push -u` / `git branch --set-upstream-to`）は訳さない
     /// （design.md「翻訳しないもの」）。
     fn no_candidates(&self) -> &'static str {
         "There is no branch that can follow an upstream \
 (only a local branch with an upstream on a registered remote is offered). \
-Push with `gz push -u`, or set one with `git branch --set-upstream-to=<remote>/<branch>`"
+Push with `git push -u <remote> <branch>`, or set one with `git branch --set-upstream-to=<remote>/<branch>`"
     }
 
     /// キー名（`Tab` / `Enter`）は skim のキー表記であり、`fast-forward` は git の語彙で
@@ -1554,7 +1518,7 @@ impl CliMessages for EnglishCliMessages {
         "Create a new branch with the given name from the picked commit"
     }
 
-    // `gz commit` / `gz push` / `gz fixup`
+    // `gz commit` / `gz fixup`
 
     fn commit_about(&self) -> &'static str {
         "Pick the files to commit and commit them"
@@ -1562,14 +1526,6 @@ impl CliMessages for EnglishCliMessages {
 
     fn commit_message_help(&self) -> &'static str {
         "Commit message (without it, git starts an editor)"
-    }
-
-    fn push_about(&self) -> &'static str {
-        "Pick where to push (remote × current branch) and push"
-    }
-
-    fn push_set_upstream_help(&self) -> &'static str {
-        "Set the push target as the upstream of the current branch"
     }
 
     fn fixup_about(&self) -> &'static str {

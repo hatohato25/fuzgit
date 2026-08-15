@@ -39,7 +39,10 @@ const DEBUG_ENV: &str = "FUZGIT_DEBUG";
 const DEBUG_ENABLED_VALUE: &str = "1";
 
 /// デバッグログの各行に付ける接頭辞。git 自身の出力と区別するために付ける。
-const DEBUG_PREFIX: &str = "[fuzgit]";
+///
+/// `crate::i18n::resolve` の言語解決ログもこの接頭辞を共有する（同じ `FUZGIT_DEBUG=1` で
+/// 出る行の見た目を揃えるため、定義を 2 か所に持たない）。
+pub(crate) const DEBUG_PREFIX: &str = "[fuzgit]";
 
 /// すべてのロケールカテゴリを一括で上書きする環境変数名。
 const LC_ALL_ENV: &str = "LC_ALL";
@@ -231,7 +234,10 @@ fn is_debug_enabled(value: Option<&str>) -> bool {
 /// 現在のプロセスの環境変数からデバッグログの有効・無効を判定する。
 ///
 /// 値が UTF-8 でない場合は [`DEBUG_ENABLED_VALUE`] と一致し得ないため無効とする。
-fn debug_enabled() -> bool {
+///
+/// `crate::i18n::resolve` の言語解決ログも判定をここへ委ねる（`FUZGIT_DEBUG` の
+/// 解釈を [`is_debug_enabled`] の 1 か所に保つため）。
+pub(crate) fn debug_enabled() -> bool {
     is_debug_enabled(std::env::var(DEBUG_ENV).ok().as_deref())
 }
 
