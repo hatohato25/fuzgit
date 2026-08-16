@@ -109,9 +109,9 @@ fuzgit 独自の設定ファイルは持たず、git config の `fuzgit.lang` �
 
 ```
 $ gz branch --all
-> * main
-    feature/login
-    origin/feature/search
+>  * main
+     feature/login
+     origin/feature/search
 ```
 
 **[`gz stash`](https://hatohato25.github.io/fuzgit/docs.html#stash) — stash を検索して復元する**
@@ -126,16 +126,16 @@ $ gz branch --all
 **[`gz fetch -s`](https://hatohato25.github.io/fuzgit/docs.html#fetch) — 隣のリポジトリもまとめて fetch**
 
 `-s` / `--siblings` を付けると、現在の worktree root の親ディレクトリ直下だけを走査して（再帰しません）、
-`.git` を持つディレクトリを候補にします。候補行は `<ディレクトリ名>  <現在のブランチ>  <リモート>` で、
+`.git` を持つディレクトリを候補にします。候補行は `<ディレクトリ名>  <リモート>/<現在のブランチ>` で、
 現在のリポジトリは選択済みで始まります。`Tab` で複数選択すれば、複数リポジトリをまとめて
 fetch できます。fetch できないリポジトリは黙って消さず、除外した件数をヘッダーに示します。
 
 ```
 $ gz fetch --siblings
 現在のリポジトリを選択済みにしています。Tab: 選択の切替 / Enter: 取得  |  除外 1 件（リモート未登録 / bare）
->>mike  main  origin
-  alpha  main  origin
-  zulu  main  origin
+>> mike   origin/main
+   alpha  origin/main
+   zulu   origin/main
 ```
 
 **[`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) — 複数ブランチをまとめて追随させる**

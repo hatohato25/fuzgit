@@ -4,6 +4,7 @@ use std::io::Write as _;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 
+use crate::commands::aligned_candidates;
 use crate::finder::{FinderItem, PreviewSource, select_one};
 use crate::git::exec::run_git;
 use crate::git::read::{TagInfo, tags};
@@ -55,9 +56,9 @@ pub fn run(
 ) -> Result<()> {
     let candidates = tags(repository).context(messages.common().tag_list_read_failed())?;
 
-    let items = candidates
-        .iter()
-        .map(|tag| to_item(language, tag))
+    let items = aligned_candidates(&candidates, cells)
+        .into_iter()
+        .map(|(tag, line)| to_item(language, tag, line))
         .collect();
     let selected = select_one(items)?;
 
@@ -89,13 +90,16 @@ pub fn run(
     Ok(())
 }
 
-/// 一覧に表示する 1 行を組み立てる。この文字列がそのまま絞り込みの対象になる。
+/// 一覧に表示する 1 行を列へ分解する。連結した文字列がそのまま絞り込みの対象になる。
 ///
 /// 名前での絞り込みが主用途のため名前を先頭に置き、annotated tag はメッセージを添える。
-fn display_line(tag: &TagInfo) -> String {
+/// タグ名の長さはまちまちであるため、列として返して [`aligned_candidates`] に幅を
+/// 揃えさせる（メッセージの開始位置がタグごとにずれないように）。
+/// メッセージを持たない lightweight tag は名前だけの 1 列であり、名前の後ろは埋めない。
+fn cells(tag: &TagInfo) -> Vec<String> {
     match &tag.message {
-        Some(message) => format!("{name}  {message}", name = tag.name),
-        None => tag.name.clone(),
+        Some(message) => vec![tag.name.clone(), message.clone()],
+        None => vec![tag.name.clone()],
     }
 }
 
@@ -134,9 +138,11 @@ fn diff_args(tag: &TagInfo) -> Vec<String> {
 }
 
 /// タグを finder の候補へ変換する。
-fn to_item(language: Language, tag: &TagInfo) -> FinderItem {
+///
+/// `line` は [`aligned_candidates`] が候補一覧全体で幅を揃えた表示行。
+fn to_item(language: Language, tag: &TagInfo, line: String) -> FinderItem {
     FinderItem::new(
-        display_line(tag),
+        line,
         tag.name.clone(),
         PreviewSource::Git(preview_args(tag)),
         language.messages(),
@@ -146,8 +152,14 @@ fn to_item(language: Language, tag: &TagInfo) -> FinderItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::COLUMN_SEPARATOR;
 
     const TAG_OBJECT_ID: &str = "1f0c9a4b3d2e5f60718293a4b5c6d7e8f9012345";
+
+    /// 候補 1 件だけの表示行（揃える相手が居ないため列を連結しただけの行）。
+    fn display_line(tag: &TagInfo) -> String {
+        cells(tag).join(COLUMN_SEPARATOR)
+    }
 
     fn lightweight() -> TagInfo {
         TagInfo {
@@ -214,6 +226,27 @@ mod tests {
     }
 
     #[test]
+    fn the_messages_start_at_the_same_column_across_the_list() {
+        let mut long = annotated();
+        long.name = "v1.0.0-release-candidate".to_owned();
+
+        let lines: Vec<String> = aligned_candidates(&[annotated(), long, lightweight()], cells)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect();
+
+        assert_eq!(
+            lines,
+            [
+                "v1.0                      リリース v1.0",
+                "v1.0.0-release-candidate  リリース v1.0",
+                // メッセージを持たないタグは名前が最終列であり、後ろは埋めない
+                "v2.0",
+            ]
+        );
+    }
+
+    #[test]
     fn the_preview_shows_the_tagged_object_and_ends_with_a_path_separator() {
         assert_eq!(
             preview_args(&annotated()),
@@ -239,7 +272,12 @@ mod tests {
 
     #[test]
     fn an_item_keeps_the_tag_name_as_its_key() {
-        assert_eq!(to_item(Language::Japanese, &annotated()).key(), "v1.0");
+        let tag = annotated();
+
+        assert_eq!(
+            to_item(Language::Japanese, &tag, display_line(&tag)).key(),
+            "v1.0"
+        );
     }
 
     #[test]

@@ -223,7 +223,8 @@ fn to_file_item(
         candidate.key.clone(),
         file_preview(repository, change)?,
         language.messages(),
-    ))
+    )
+    .with_highlights(candidate.highlights.clone()))
 }
 
 /// 変更ファイルのプレビュー内容の生成方法を決める。

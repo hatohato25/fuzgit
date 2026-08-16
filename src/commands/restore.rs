@@ -197,6 +197,7 @@ fn to_item(
         PreviewSource::Git(preview_args(target, revision, &candidate.paths)),
         language.messages(),
     )
+    .with_highlights(candidate.highlights.clone())
 }
 
 /// プレビュー用の `git diff` の引数を組み立てる。

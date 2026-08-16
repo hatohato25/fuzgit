@@ -150,7 +150,8 @@ fn to_item(
         candidate.key.clone(),
         preview(repository, change, candidate)?,
         language.messages(),
-    ))
+    )
+    .with_highlights(candidate.highlights.clone()))
 }
 
 /// プレビュー内容の生成方法を決める。

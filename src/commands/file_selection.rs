@@ -5,6 +5,7 @@
 
 use anyhow::{Result, bail};
 
+use crate::finder::{Highlight, HighlightColor};
 use crate::git::read::FileChange;
 use crate::i18n::Messages;
 
@@ -32,6 +33,8 @@ pub struct FileCandidate {
     pub key: String,
     /// git へ渡すパス（作業ツリールート基準）。リネームでは変更元を含むことがある。
     pub paths: Vec<String>,
+    /// 表示文字列のうち色を付ける範囲（状態コードの列）。状態コードを持たない候補では空。
+    pub highlights: Vec<Highlight>,
 }
 
 impl FileCandidate {
@@ -47,6 +50,7 @@ impl FileCandidate {
             display: display_line(change),
             key: change.path.clone(),
             paths,
+            highlights: status_highlights(change),
         }
     }
 
@@ -59,23 +63,82 @@ impl FileCandidate {
             display: path.to_owned(),
             key: path.to_owned(),
             paths: vec![path.to_owned()],
+            // 状態コードが無いので色を付ける対象も無い
+            highlights: Vec::new(),
         }
     }
 }
 
+/// 状態コードの列数。左詰めにしても幅は変えない（パスの開始位置を揃えるため）。
+const STATUS_CODE_WIDTH: usize = 2;
+
+/// 状態コードのうち「その列に変更が無い」ことを表す文字。
+const UNCHANGED_COLUMN: char = ' ';
+
+/// 状態コードを左詰めにした [`STATUS_CODE_WIDTH`] 文字を返す。
+///
+/// 変更の無い列（` `）を落として意味のある文字を先頭へ寄せ、右側を空白で埋める。
+/// ` M` は `M ` に、`M ` / `MM` / `??` / `R ` はそのままになる。
+fn aligned_status_code(change: &FileChange) -> String {
+    let changed: String = change
+        .status_code()
+        .chars()
+        .filter(|column| *column != UNCHANGED_COLUMN)
+        .collect();
+
+    format!("{changed:<STATUS_CODE_WIDTH$}")
+}
+
+/// 状態コードに付ける色を組み立てる。
+///
+/// index 列は緑、作業ツリー列は赤、未追跡（`??`）は 2 文字とも赤。
+/// これは fuzgit が独自に決めた配色ではなく、git 自身の既定の配色
+/// （`git -c color.status=always status --short` の出力で確認）に合わせたもの。
+/// 変更の無い列（` `）は git と同様に色を付けない。
+///
+/// 範囲は [`display_line`] が出力する左詰めの状態コード上の位置である。
+/// index 列に変更が無いときは作業ツリー列の文字が先頭へ寄るため、赤も先頭の 1 文字に付く。
+/// 状態コードは ASCII であり、1 文字が 1 バイトを占める。
+fn status_highlights(change: &FileChange) -> Vec<Highlight> {
+    if change.is_untracked() {
+        return vec![Highlight::new(0, STATUS_CODE_WIDTH, HighlightColor::Red)];
+    }
+
+    let mut highlights = Vec::new();
+    if change.has_staged_change() {
+        highlights.push(Highlight::new(0, 1, HighlightColor::Green));
+    }
+    if change.has_worktree_change() {
+        // 左詰めのため、index 列に変更が無ければ作業ツリー列の文字が先頭へ来る
+        let start = usize::from(change.has_staged_change());
+        highlights.push(Highlight::new(start, start + 1, HighlightColor::Red));
+    }
+    highlights
+}
+
 /// 一覧に表示する 1 行を組み立てる。この文字列がそのまま絞り込みの対象になる。
 ///
-/// `git status` と同じ状態コードを前置し、リネーム・コピーは変更元も併記する。
+/// 状態コードを前置し、リネーム・コピーは変更元も併記する。
+///
+/// 状態コードは git の `--porcelain` と同じ 2 文字だが、表記は**意図的に外している**。
+/// git は 1 文字目を index 列、2 文字目を作業ツリー列に固定し、変更の無い列を空白にするため、
+/// 作業ツリーだけの変更は ` M` と先頭が空白になる。fuzgit ではこれを左詰めにして `M ` と表示し、
+/// 状態コードが行の先頭から始まるようにする（列幅は 2 のまま保つ）。
+///
+/// この結果、`M ` が staged（index 側）なのか unstaged（作業ツリー側）なのかを
+/// **文字の位置では区別できなくなる**。区別は [`status_highlights`] が付ける色だけが担う
+/// （staged は緑、unstaged は赤）。したがって色を使えない環境
+/// （`NO_COLOR`、パイプ経由、色覚特性など）では両者が同じ見た目になる。
 fn display_line(change: &FileChange) -> String {
     match &change.original_path {
         Some(original) => format!(
             "{code} {original} -> {path}",
-            code = change.status_code(),
+            code = aligned_status_code(change),
             path = change.path
         ),
         None => format!(
             "{code} {path}",
-            code = change.status_code(),
+            code = aligned_status_code(change),
             path = change.path
         ),
     }
@@ -196,11 +259,39 @@ mod tests {
     #[test]
     fn a_line_shows_the_status_code_before_the_path() {
         assert_eq!(display_line(&change("src/main.rs", "M ")), "M  src/main.rs");
-        assert_eq!(display_line(&change("src/main.rs", " M")), " M src/main.rs");
+        assert_eq!(display_line(&change("src/main.rs", "MM")), "MM src/main.rs");
         assert_eq!(
             display_line(&change("new file.txt", "??")),
             "?? new file.txt"
         );
+    }
+
+    #[test]
+    fn a_worktree_only_change_shows_its_status_code_left_aligned() {
+        // git の ` M` と違い、意味のある文字を先頭へ寄せる
+        assert_eq!(display_line(&change("src/main.rs", " M")), "M  src/main.rs");
+        assert_eq!(
+            display_line(&rename("new.txt", "old.txt", " R")),
+            "R  old.txt -> new.txt"
+        );
+    }
+
+    #[test]
+    fn the_status_code_always_takes_two_columns() {
+        // パスの開始位置が揃うよう、左詰めにしても幅は 2 のまま
+        for code in ["M ", " M", "MM", "??", "R "] {
+            let line = display_line(&change("a.txt", code));
+
+            assert_eq!(
+                &line[..STATUS_CODE_WIDTH],
+                &aligned_status_code(&change("a.txt", code))
+            );
+            assert_eq!(
+                line.find("a.txt"),
+                Some(STATUS_CODE_WIDTH + 1),
+                "the path must start at the same column for {code:?}"
+            );
+        }
     }
 
     #[test]
@@ -209,6 +300,57 @@ mod tests {
             display_line(&rename("new.txt", "old.txt", "R ")),
             "R  old.txt -> new.txt"
         );
+    }
+
+    #[test]
+    fn the_index_column_is_green_and_the_worktree_column_is_red() {
+        // git 自身の `status --short` の配色に合わせる
+        assert_eq!(
+            FileCandidate::from_change(&change("a.txt", "M "), RenameOrigin::Exclude).highlights,
+            [Highlight::new(0, 1, HighlightColor::Green)]
+        );
+        assert_eq!(
+            FileCandidate::from_change(&change("a.txt", "MM"), RenameOrigin::Exclude).highlights,
+            [
+                Highlight::new(0, 1, HighlightColor::Green),
+                Highlight::new(1, 2, HighlightColor::Red)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_worktree_only_change_is_red_on_the_first_column() {
+        // 左詰めで作業ツリー列の文字が先頭へ来るため、色も先頭へ付ける
+        // （範囲を追随させないと、色が空白の側に付いて何も見えなくなる）
+        let candidate = FileCandidate::from_change(&change("a.txt", " M"), RenameOrigin::Exclude);
+
+        assert_eq!(candidate.display, "M  a.txt");
+        assert_eq!(
+            candidate.highlights,
+            [Highlight::new(0, 1, HighlightColor::Red)]
+        );
+    }
+
+    #[test]
+    fn an_untracked_file_is_red_on_both_columns() {
+        assert_eq!(
+            FileCandidate::from_change(&change("new.txt", "??"), RenameOrigin::Exclude).highlights,
+            [Highlight::new(0, 2, HighlightColor::Red)]
+        );
+    }
+
+    #[test]
+    fn a_renamed_file_is_coloured_on_the_index_column() {
+        assert_eq!(
+            FileCandidate::from_change(&rename("new.txt", "old.txt", "R "), RenameOrigin::Include)
+                .highlights,
+            [Highlight::new(0, 1, HighlightColor::Green)]
+        );
+    }
+
+    #[test]
+    fn a_revision_file_has_no_colour_because_it_has_no_status_code() {
+        assert!(FileCandidate::from_path("a.txt").highlights.is_empty());
     }
 
     #[test]

@@ -21,6 +21,7 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 
+use crate::commands::aligned_candidates;
 use crate::error::Error;
 use crate::finder::{
     FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with, select_one,
@@ -49,9 +50,6 @@ const HEADER_SEPARATOR: &str = "  |  ";
 
 /// HEAD がブランチを指していない兄弟リポジトリの表示。
 const DETACHED_LABEL: &str = "detached HEAD";
-
-/// 候補行の要素の区切り。
-const FIELD_SEPARATOR: &str = "  ";
 
 /// 任意のロックを取らずに git を実行するオプション。
 ///
@@ -225,14 +223,13 @@ fn run_siblings(
             scan.candidates.iter().collect()
         }
         SiblingsDecision::Choose => {
+            // 候補行と事前選択は同じ組み立て結果から作る。事前選択は表示文字列の完全一致で
+            // 判定される（`crate::finder::FinderOptions`）一方、列の幅は候補一覧全体で決まるため
+            let lines = aligned_candidates(&scan.candidates, sibling_cells);
             let options = FinderOptions::new(SelectionMode::Multi)
                 .with_header(sibling_header(messages, &scan, prune))
-                // 事前選択は表示文字列の完全一致で判定される（`crate::finder::FinderOptions`）
-                .with_preselect(preselect(&scan.candidates));
-            let selected = select_many_with(
-                sibling_items(language, messages, &scan.candidates)?,
-                &options,
-            )?;
+                .with_preselect(preselect(&lines));
+            let selected = select_many_with(sibling_items(language, messages, &lines)?, &options)?;
 
             // skim は選択した順に返すため、候補一覧の順序（現在のリポジトリが先頭、
             // 以降は名前順）へ揃え直したうえで、キーが候補に含まれることを検証する
@@ -307,25 +304,48 @@ fn sibling_header(messages: &dyn Messages, scan: &SiblingScan, prune: PruneMode)
     sections.join(HEADER_SEPARATOR)
 }
 
-/// 兄弟リポジトリ 1 件分の候補行を組み立てる。
-fn sibling_display_line(candidate: &SiblingRepository) -> String {
-    [
-        candidate.name.clone(),
-        candidate
-            .current_branch
-            .clone()
-            .unwrap_or_else(|| DETACHED_LABEL.to_owned()),
-        candidate.remotes.join(", "),
-    ]
-    .join(FIELD_SEPARATOR)
+/// 兄弟リポジトリ 1 件分の候補行を列へ分解する。
+///
+/// ディレクトリ名の長さは候補ごとにまちまちであるため、列として返して
+/// [`aligned_candidates`] に幅を揃えさせる（右の列の開始位置が候補ごとにずれないように）。
+///
+/// ブランチがある場合はリモートごとに `<リモート>/<ブランチ>` を組み立て、プレビューの
+/// 「ブランチの追跡状況」と同じ見え方に寄せる。
+///
+/// ただし `SiblingRepository` はリモートとブランチの対応情報を持たないため、`origin/master`
+/// という表示は追跡参照 `refs/remotes/origin/master` が実在することを意味しない
+/// （そのリモートに同名ブランチが無い場合や、別のリモートを追跡している場合がある）。
+/// 実際の追跡状況を示すのはプレビューの「ブランチの追跡状況」セクションであり、
+/// ここでの `/` は識別と絞り込みのための整形にすぎない。
+fn sibling_cells(candidate: &SiblingRepository) -> Vec<String> {
+    let Some(branch) = candidate.current_branch.as_deref() else {
+        // detached HEAD には対にするブランチが無いため、リモート一覧と状態をそのまま並べる。
+        return vec![
+            candidate.name.clone(),
+            candidate.remotes.join(", "),
+            DETACHED_LABEL.to_owned(),
+        ];
+    };
+
+    let branches = candidate
+        .remotes
+        .iter()
+        .map(|remote| format!("{remote}/{branch}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    vec![candidate.name.clone(), branches]
 }
 
 /// 起動時に選択済みにする候補の表示文字列を集める。
-fn preselect(candidates: &[SiblingRepository]) -> Vec<String> {
+///
+/// 受け取るのは [`aligned_candidates`] が組み立てた候補と表示行の対であり、
+/// finder へ渡す候補行と同じ文字列がそのまま事前選択になる。
+fn preselect(candidates: &[(&SiblingRepository, String)]) -> Vec<String> {
     candidates
         .iter()
-        .filter(|candidate| candidate.is_current)
-        .map(sibling_display_line)
+        .filter(|(candidate, _)| candidate.is_current)
+        .map(|(_, line)| line.clone())
         .collect()
 }
 
@@ -338,13 +358,13 @@ fn preselect(candidates: &[SiblingRepository]) -> Vec<String> {
 fn sibling_items(
     language: Language,
     messages: &dyn Messages,
-    candidates: &[SiblingRepository],
+    candidates: &[(&SiblingRepository, String)],
 ) -> Result<Vec<FinderItem>> {
     candidates
         .iter()
-        .map(|candidate| {
+        .map(|(candidate, line)| {
             Ok(FinderItem::new(
-                sibling_display_line(candidate),
+                line.clone(),
                 sibling_key(messages, candidate)?.to_owned(),
                 sibling_preview_source(messages, candidate),
                 language.messages(),
@@ -699,7 +719,10 @@ fn fetch_args(target: &FetchTarget, prune: PruneMode) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use skim::prelude::SkimItem as _;
+
     use super::*;
+    use crate::commands::COLUMN_SEPARATOR;
 
     /// 既定（日本語）の文言一式。文言そのものを固定するテスト以外はこれを使う。
     fn messages() -> &'static dyn Messages {
@@ -993,6 +1016,11 @@ mod tests {
         ]
     }
 
+    /// 候補 1 件だけの表示行（揃える相手が居ないため列を連結しただけの行）。
+    fn sibling_line(candidate: &SiblingRepository) -> String {
+        sibling_cells(candidate).join(COLUMN_SEPARATOR)
+    }
+
     /// 走査結果を組み立てる。
     fn scan(candidates: Vec<SiblingRepository>, excluded: usize) -> SiblingScan {
         SiblingScan {
@@ -1036,13 +1064,23 @@ mod tests {
     }
 
     #[test]
-    fn a_candidate_line_shows_the_directory_the_branch_and_the_remotes() {
+    fn a_candidate_line_pairs_every_remote_with_the_branch() {
         let mut candidate = sibling("alpha", false);
         candidate.remotes = vec!["origin".to_owned(), "upstream".to_owned()];
 
-        let line = sibling_display_line(&candidate);
+        let line = sibling_line(&candidate);
 
-        assert_eq!(line, "alpha  main  origin, upstream");
+        assert_eq!(line, "alpha  origin/main, upstream/main");
+    }
+
+    #[test]
+    fn a_candidate_line_shows_the_directory_and_the_remote_branch() {
+        let mut candidate = sibling("advent-calendar", false);
+        candidate.current_branch = Some("master".to_owned());
+
+        let line = sibling_line(&candidate);
+
+        assert_eq!(line, "advent-calendar  origin/master");
     }
 
     #[test]
@@ -1050,12 +1088,14 @@ mod tests {
         let mut candidate = sibling("alpha", false);
         candidate.current_branch = None;
 
-        let line = sibling_display_line(&candidate);
+        let line = sibling_line(&candidate);
 
         assert!(
             line.contains(DETACHED_LABEL),
             "a detached HEAD should be named: {line}"
         );
+        // 対にするブランチが無いため、リモートは単独で並べる
+        assert_eq!(line, "alpha  origin  detached HEAD");
     }
 
     #[test]
@@ -1130,9 +1170,43 @@ mod tests {
 
     #[test]
     fn only_the_current_repository_is_preselected() {
+        let candidates = siblings();
+        let lines = aligned_candidates(&candidates, sibling_cells);
+
         assert_eq!(
-            preselect(&siblings()),
-            vec![sibling_display_line(&sibling("mike", true))]
+            preselect(&lines),
+            vec!["mike   origin/main".to_owned()],
+            "選択済みにするのは現在のリポジトリだけ: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_preselected_line_is_the_very_line_shown_in_the_list() {
+        // 事前選択は表示文字列の完全一致で判定されるため、列を揃えたあとの行と
+        // 一致していなければ機能しない（`crate::finder::FinderOptions::preselect`）
+        let candidates = vec![sibling("mike", true), sibling("advent-calendar", false)];
+        let lines = aligned_candidates(&candidates, sibling_cells);
+
+        let items = sibling_items(Language::Japanese, messages(), &lines)
+            .expect("a utf-8 path should be usable as a key");
+        let displayed: Vec<String> = items.iter().map(|item| item.text().into_owned()).collect();
+
+        let preselected = preselect(&lines);
+        assert_eq!(
+            preselected.len(),
+            1,
+            "unexpected preselection: {preselected:?}"
+        );
+        for line in &preselected {
+            assert!(
+                displayed.contains(line),
+                "the preselection must be one of the listed lines: {line:?} / {displayed:?}"
+            );
+        }
+        // 列を揃える前の行では一致しないこと（＝別々に組み立てると壊れること）も確かめる
+        assert!(
+            !preselected.contains(&sibling_line(&candidates[0])),
+            "the padding is what makes the two ways differ: {preselected:?}"
         );
     }
 
@@ -1140,7 +1214,9 @@ mod tests {
     fn a_candidate_is_keyed_by_its_normalized_path() {
         let candidates = siblings();
 
-        let items = sibling_items(Language::Japanese, messages(), &candidates)
+        let lines = aligned_candidates(&candidates, sibling_cells);
+
+        let items = sibling_items(Language::Japanese, messages(), &lines)
             .expect("a utf-8 path should be usable as a key");
 
         assert_eq!(

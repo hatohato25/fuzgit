@@ -18,6 +18,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 
 use crate::cli::WorktreeCommand;
 use crate::commands::confirmation::confirm;
+use crate::commands::{COLUMN_SEPARATOR, aligned_candidates};
 use crate::finder::{FinderItem, PreviewSource, select_one};
 use crate::git::exec::{capture_git_stderr_in, run_git};
 use crate::git::read::{
@@ -238,9 +239,9 @@ fn choose<'a>(
     messages: &dyn Messages,
     candidates: &[&'a WorktreeInfo],
 ) -> Result<&'a WorktreeInfo> {
-    let items = candidates
-        .iter()
-        .map(|worktree| to_item(language, worktree))
+    let items = aligned_candidates(candidates, |worktree| cells(worktree))
+        .into_iter()
+        .map(|(worktree, line)| to_item(language, worktree, line))
         .collect();
     let selected = select_one(items)?;
 
@@ -287,29 +288,39 @@ fn available_branches<'a>(
         .collect()
 }
 
-/// 一覧に表示する 1 行を組み立てる。この文字列がそのまま絞り込みの対象になる。
+/// 一覧に表示する 1 行を列へ分解する。連結した文字列がそのまま絞り込みの対象になる。
 ///
 /// パスを先頭に置くのは、`cd` 先を探す用途では絞り込みの手掛かりがパスになるため。
+/// パスの長さは worktree ごとにまちまちであるため、列として返して
+/// [`aligned_candidates`] に幅を揃えさせる（種別の開始位置がずれないように）。
+/// 種別は候補が main だけでも桁が動かないよう [`KIND_WIDTH`] で先に揃えておく。
 /// locked / prunable は該当する場合のみ印を付ける（該当しない旨は並べない）。
-fn display_line(worktree: &WorktreeInfo) -> String {
-    let mut line = format!(
-        "{path}  {kind:<width$}  {state}",
-        path = worktree.path,
-        kind = kind_label(worktree),
-        width = KIND_WIDTH,
-        state = state_label(worktree)
-    );
+fn cells(worktree: &WorktreeInfo) -> Vec<String> {
+    let mut cells = vec![
+        worktree.path.clone(),
+        format!(
+            "{kind:<width$}",
+            kind = kind_label(worktree),
+            width = KIND_WIDTH
+        ),
+        state_label(worktree),
+    ];
 
     if worktree.is_locked {
-        line.push_str("  ");
-        line.push_str(LOCKED_MARK);
+        cells.push(LOCKED_MARK.to_owned());
     }
     if worktree.prunable {
-        line.push_str("  ");
-        line.push_str(PRUNABLE_MARK);
+        cells.push(PRUNABLE_MARK.to_owned());
     }
 
-    line
+    cells
+}
+
+/// 候補 1 件だけを示す 1 行を組み立てる（確認プロンプト用）。
+///
+/// 揃える相手が居ないため、列をそのまま連結する。
+fn display_line(worktree: &WorktreeInfo) -> String {
+    cells(worktree).join(COLUMN_SEPARATOR)
 }
 
 /// main worktree かどうかの表示。
@@ -336,9 +347,11 @@ fn state_label(worktree: &WorktreeInfo) -> String {
 }
 
 /// worktree を finder のアイテムへ変換する。
-fn to_item(language: Language, worktree: &WorktreeInfo) -> FinderItem {
+///
+/// `line` は [`aligned_candidates`] が候補一覧全体で幅を揃えた表示行。
+fn to_item(language: Language, worktree: &WorktreeInfo, line: String) -> FinderItem {
     FinderItem::new(
-        display_line(worktree),
+        line,
         worktree.path.clone(),
         preview_source(worktree),
         language.messages(),
@@ -671,6 +684,28 @@ Removing worktrees/old: gitdir file points to non-existent location\n";
     }
 
     #[test]
+    fn the_kind_starts_at_the_same_column_across_the_list() {
+        let lines: Vec<String> = aligned_candidates(
+            &[
+                worktree("/repo", Some("main"), true),
+                worktree("/repo/../feature-login", Some("feature/login"), false),
+            ],
+            cells,
+        )
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect();
+
+        assert_eq!(
+            lines,
+            [
+                "/repo                   main    main",
+                "/repo/../feature-login  linked  feature/login",
+            ]
+        );
+    }
+
+    #[test]
     fn a_detached_worktree_is_shown_as_such() {
         let mut detached = worktree("/repo/detached", None, false);
         detached.branch = None;
@@ -707,10 +742,8 @@ Removing worktrees/old: gitdir file points to non-existent location\n";
     #[test]
     fn an_item_keeps_the_path_as_its_key() {
         // 決定時に標準出力へ出すのは表示行ではなくパスそのもの
-        let item = to_item(
-            Language::Japanese,
-            &worktree("/repo/../feature", Some("feature"), false),
-        );
+        let candidate = worktree("/repo/../feature", Some("feature"), false);
+        let item = to_item(Language::Japanese, &candidate, display_line(&candidate));
 
         assert_eq!(item.key(), "/repo/../feature");
     }

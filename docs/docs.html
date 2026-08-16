@@ -267,6 +267,32 @@ cargo install --path .</code></pre>
             </p>
           </div>
 
+          <div lang="en">
+            <p>
+              <strong>An option gets a short form only when git itself spells it
+              the same way</strong> &mdash; <code>gz restore -S</code>
+              (<code>git restore -S</code>), <code>gz fetch -p</code>
+              (<code>git fetch -p</code>), <code>gz sync -r</code>
+              (<code>git pull -r</code>), <code>gz branch delete -f</code>
+              (<code>git branch -f</code>) and so on. fuzgit-specific options are
+              long-only, and a letter git already uses for something else is
+              never reused: <code>gz tag --diff</code> has no <code>-d</code>
+              because <code>git tag -d</code> deletes a tag.
+            </p>
+          </div>
+          <div lang="ja">
+            <p>
+              <strong>オプションの短縮形は、git 本体に同じ意味の綴りがあるものだけに
+              付けています</strong>（<code>gz restore -S</code> =
+              <code>git restore -S</code>、<code>gz fetch -p</code> =
+              <code>git fetch -p</code>、<code>gz sync -r</code> =
+              <code>git pull -r</code>、<code>gz branch delete -f</code> =
+              <code>git branch -f</code> など）。fuzgit 固有のオプションは長い綴りだけとし、
+              git が別の意味で使っている文字は流用しません。<code>gz tag --diff</code> に
+              <code>-d</code> が無いのは、<code>git tag -d</code> がタグの削除だからです。
+            </p>
+          </div>
+
           <div class="table-wrap">
             <table>
               <thead>
@@ -744,7 +770,7 @@ gz branch cleanup          # delete every merged branch in one go</code></pre>
               <table>
                 <thead><tr><th scope="col">Option</th><th scope="col">Description</th></tr></thead>
                 <tbody>
-                  <tr><td><code>--force</code></td><td>Delete branches that are not merged either (<code>git branch -D</code>)</td></tr>
+                  <tr><td><code>-f</code>, <code>--force</code></td><td>Delete branches that are not merged either (<code>git branch -D</code>)</td></tr>
                   <tr><td><code>--into &lt;BRANCH&gt;</code></td><td>Branch used as the merged/unmerged baseline (defaults to HEAD)</td></tr>
                 </tbody>
               </table>
@@ -875,7 +901,7 @@ gz branch cleanup          # merged なブランチを一括で削除する</cod
               <table>
                 <thead><tr><th scope="col">オプション</th><th scope="col">説明</th></tr></thead>
                 <tbody>
-                  <tr><td><code>--force</code></td><td>merged でないブランチも削除する（<code>git branch -D</code>）</td></tr>
+                  <tr><td><code>-f</code>, <code>--force</code></td><td>merged でないブランチも削除する（<code>git branch -D</code>）</td></tr>
                   <tr><td><code>--into &lt;BRANCH&gt;</code></td><td>merged 判定の基準ブランチ（既定は HEAD）</td></tr>
                 </tbody>
               </table>
@@ -1050,12 +1076,15 @@ gz restore --source HEAD~1       # overwrite with the content of a revision (wit
                 <thead><tr><th scope="col">Option</th><th scope="col">Description</th></tr></thead>
                 <tbody>
                   <tr><td><code>-s</code>, <code>--source &lt;REV&gt;</code></td><td>Revision to restore from; the file list of that commit becomes the candidate list</td></tr>
-                  <tr><td><code>--staged</code></td><td>Unstage staged changes</td></tr>
+                  <tr><td><code>-S</code>, <code>--staged</code></td><td>Unstage staged changes</td></tr>
                 </tbody>
               </table>
             </div>
             <ul>
-              <li><kbd>Tab</kbd> selects several files. Candidates carry the same status codes as <code>git status</code>.</li>
+              <li>
+                <kbd>Tab</kbd> selects several files. Candidates carry the same
+                status codes as <code>git status</code>. The two status characters are <strong>left-aligned</strong>: a change that only exists in the working tree reads <code>M&nbsp;</code> where git writes <code>&nbsp;M</code>, and the column stays two characters wide so the paths still line up. They are coloured the way git colours them: green for the index (staged) column, red for the working-tree column, and red for both characters of an untracked file (<code>??</code>). Because of the left alignment, <strong>the colour is the only thing that tells a staged change from an unstaged one</strong> &mdash; where colour is unavailable (<code>NO_COLOR</code>, a pipe) the two look alike.
+              </li>
               <li>The preview is the diff of the file (with <code>--staged</code>, the diff between HEAD and the index).</li>
               <li>
                 <strong>Anything that rewrites the working tree shows a
@@ -1074,12 +1103,15 @@ gz restore --source HEAD~1       # 指定リビジョンの内容で上書きす
                 <thead><tr><th scope="col">オプション</th><th scope="col">説明</th></tr></thead>
                 <tbody>
                   <tr><td><code>-s</code>, <code>--source &lt;REV&gt;</code></td><td>復元元のリビジョン。指定するとそのコミットのファイル一覧が候補になる</td></tr>
-                  <tr><td><code>--staged</code></td><td>ステージ済みの変更をアンステージする</td></tr>
+                  <tr><td><code>-S</code>, <code>--staged</code></td><td>ステージ済みの変更をアンステージする</td></tr>
                 </tbody>
               </table>
             </div>
             <ul>
-              <li><kbd>Tab</kbd> で複数選択できます。候補には <code>git status</code> と同じ状態コードが付きます。</li>
+              <li>
+                <kbd>Tab</kbd> で複数選択できます。候補には <code>git status</code> と
+                同じ状態コードが付きます。状態コードの 2 文字は<strong>左詰め</strong>で表示します（作業ツリーだけの変更は git の <code>&nbsp;M</code> ではなく <code>M&nbsp;</code>。列幅は 2 文字のままなのでパスの開始位置は揃います）。配色は git と同じで、index（staged）列は緑、作業ツリー列は赤、未追跡（<code>??</code>）は 2 文字とも赤です。左詰めにしたため、<strong>staged と unstaged の区別は色だけが担います</strong>（<code>NO_COLOR</code> やパイプ経由など色の付かない環境では両者が同じ見た目になります）。
+              </li>
               <li>プレビューは対象ファイルの差分（<code>--staged</code> 指定時は HEAD とインデックスの差分）。</li>
               <li>
                 <strong>作業ツリーを書き換える操作は実行前に確認プロンプト（<code>[y/N]</code>）を
@@ -1099,14 +1131,22 @@ gz restore --source HEAD~1       # 指定リビジョンの内容で上書きす
           <pre><code>gz add</code></pre>
           <div lang="en">
             <ul>
-              <li>Candidates are unstaged changes and untracked files (files that are already staged with no remaining difference do not appear).</li>
+              <li>
+                Candidates are unstaged changes and untracked files (files that
+                are already staged with no remaining difference do not appear),
+                each line prefixed with the same status code as
+                <code>git status</code>. The two status characters are <strong>left-aligned</strong>: a change that only exists in the working tree reads <code>M&nbsp;</code> where git writes <code>&nbsp;M</code>, and the column stays two characters wide so the paths still line up. They are coloured the way git colours them: green for the index (staged) column, red for the working-tree column, and red for both characters of an untracked file (<code>??</code>). Because of the left alignment, <strong>the colour is the only thing that tells a staged change from an unstaged one</strong> &mdash; where colour is unavailable (<code>NO_COLOR</code>, a pipe) the two look alike.
+              </li>
               <li><kbd>Tab</kbd> selects several files.</li>
               <li>The preview is the diff for tracked files, and the file content (up to the first 64&nbsp;KiB) for untracked files.</li>
             </ul>
           </div>
           <div lang="ja">
             <ul>
-              <li>候補は未ステージの変更と未追跡ファイル（既にステージ済みで差分の無いファイルは出ません）。</li>
+              <li>
+                候補は未ステージの変更と未追跡ファイル（既にステージ済みで差分の無いファイルは
+                出ません）で、行頭には <code>git status</code> と同じ状態コードが付きます。状態コードの 2 文字は<strong>左詰め</strong>で表示します（作業ツリーだけの変更は git の <code>&nbsp;M</code> ではなく <code>M&nbsp;</code>。列幅は 2 文字のままなのでパスの開始位置は揃います）。配色は git と同じで、index（staged）列は緑、作業ツリー列は赤、未追跡（<code>??</code>）は 2 文字とも赤です。左詰めにしたため、<strong>staged と unstaged の区別は色だけが担います</strong>（<code>NO_COLOR</code> やパイプ経由など色の付かない環境では両者が同じ見た目になります）。
+              </li>
               <li><kbd>Tab</kbd> で複数選択できます。</li>
               <li>プレビューは追跡ファイルは差分、未追跡ファイルはファイルの内容（先頭 64KiB まで）。</li>
             </ul>
@@ -1314,7 +1354,11 @@ gz commit -m "fix authentication"   # give the message directly (no editor)</cod
               </table>
             </div>
             <ul>
-              <li>Candidates are staged, unstaged and untracked changes in <strong>one single list</strong>, each line prefixed with the same status code as <code>git status</code>.</li>
+              <li>
+                Candidates are staged, unstaged and untracked changes in
+                <strong>one single list</strong>, each line prefixed with the same
+                status code as <code>git status</code>. The two status characters are <strong>left-aligned</strong>: a change that only exists in the working tree reads <code>M&nbsp;</code> where git writes <code>&nbsp;M</code>, and the column stays two characters wide so the paths still line up. They are coloured the way git colours them: green for the index (staged) column, red for the working-tree column, and red for both characters of an untracked file (<code>??</code>). Because of the left alignment, <strong>the colour is the only thing that tells a staged change from an unstaged one</strong> &mdash; where colour is unavailable (<code>NO_COLOR</code>, a pipe) the two look alike.
+              </li>
               <li>
                 <strong>Files with staged changes start out selected.</strong>
                 <kbd>Tab</kbd> deselects them, and a deselected entry never comes
@@ -1369,7 +1413,7 @@ gz commit -m "認証を修正する"   # メッセージを直接指定する（
             <ul>
               <li>
                 候補はステージ済み・未ステージ・未追跡の変更を<strong>1 つの一覧</strong>にしたもので、
-                行頭には <code>git status</code> と同じ状態コードが付きます。
+                行頭には <code>git status</code> と同じ状態コードが付きます。状態コードの 2 文字は<strong>左詰め</strong>で表示します（作業ツリーだけの変更は git の <code>&nbsp;M</code> ではなく <code>M&nbsp;</code>。列幅は 2 文字のままなのでパスの開始位置は揃います）。配色は git と同じで、index（staged）列は緑、作業ツリー列は赤、未追跡（<code>??</code>）は 2 文字とも赤です。左詰めにしたため、<strong>staged と unstaged の区別は色だけが担います</strong>（<code>NO_COLOR</code> やパイプ経由など色の付かない環境では両者が同じ見た目になります）。
               </li>
               <li>
                 <strong>ステージ済みの変更があるファイルは起動時から選択済み</strong>です。
@@ -1788,7 +1832,12 @@ gz revert --no-edit   # エディタを起動せず git の既定メッセージ
             </p>
             <h3>1. File selection (multi-select)</h3>
             <ul>
-              <li>Candidates are staged, unstaged and untracked changes in one list (the same candidate generation as <code>gz commit</code>), each line prefixed with the same status code as <code>git status</code>.</li>
+              <li>
+                Candidates are staged, unstaged and untracked changes in one list
+                (the same candidate generation as <code>gz commit</code>), each
+                line prefixed with the same status code as
+                <code>git status</code>. The two status characters are <strong>left-aligned</strong>: a change that only exists in the working tree reads <code>M&nbsp;</code> where git writes <code>&nbsp;M</code>, and the column stays two characters wide so the paths still line up. They are coloured the way git colours them: green for the index (staged) column, red for the working-tree column, and red for both characters of an untracked file (<code>??</code>). Because of the left alignment, <strong>the colour is the only thing that tells a staged change from an unstaged one</strong> &mdash; where colour is unavailable (<code>NO_COLOR</code>, a pipe) the two look alike.
+              </li>
               <li>
                 The header summarises the current state in one line:
                 <pre><code>main  |  ahead 2 / behind 1  |  staged 2 / unstaged 2 / untracked 1 / stash 1</code></pre>
@@ -1843,7 +1892,7 @@ main  |  staged 0 / unstaged 0 / untracked 0 / stash 0</code></pre>
               <li>
                 候補はステージ済み・未ステージ・未追跡の変更を 1 つの一覧にしたもの
                 （<code>gz commit</code> と同じ候補生成）で、行頭には <code>git status</code> と
-                同じ状態コードが付きます。
+                同じ状態コードが付きます。状態コードの 2 文字は<strong>左詰め</strong>で表示します（作業ツリーだけの変更は git の <code>&nbsp;M</code> ではなく <code>M&nbsp;</code>。列幅は 2 文字のままなのでパスの開始位置は揃います）。配色は git と同じで、index（staged）列は緑、作業ツリー列は赤、未追跡（<code>??</code>）は 2 文字とも赤です。左詰めにしたため、<strong>staged と unstaged の区別は色だけが担います</strong>（<code>NO_COLOR</code> やパイプ経由など色の付かない環境では両者が同じ見た目になります）。
               </li>
               <li>
                 ヘッダーに現在の状態を 1 行で表示します。
@@ -2030,7 +2079,7 @@ gz fetch --siblings    # pick repositories sitting next to this one and fetch th
               <table>
                 <thead><tr><th scope="col">Option</th><th scope="col">Description</th></tr></thead>
                 <tbody>
-                  <tr><td><code>--prune</code></td><td>Delete tracking refs for branches deleted on the remote (<code>git fetch --prune</code>)</td></tr>
+                  <tr><td><code>-p</code>, <code>--prune</code></td><td>Delete tracking refs for branches deleted on the remote (<code>git fetch --prune</code>)</td></tr>
                   <tr><td><code>-s</code>, <code>--siblings</code></td><td>Also target repositories sitting at the same level as the current one (multi-select)</td></tr>
                 </tbody>
               </table>
@@ -2083,18 +2132,22 @@ Fetching from the remote `origin` (only one remote is registered, so the selecti
             </p>
             <pre><code>$ gz fetch --siblings
 The current repository is preselected. Tab: toggle the selection / Enter: fetch  |  1 excluded (no remote / bare)
-&gt;&gt;mike  main  origin
-  alpha  main  origin
-  zulu  main  origin</code></pre>
+&gt;&gt; mike   origin/main
+   alpha  origin/main
+   zulu   origin/main</code></pre>
             <ul>
               <li>
                 A candidate line is
-                <code>&lt;directory name&gt;  &lt;current branch&gt;  &lt;remotes&gt;</code>.
-                Repositories whose HEAD does not point at a branch show
-                <code>detached HEAD</code>. Information that would need one
-                <code>git</code> process per repository (ahead/behind, for
-                example) is kept out of the list and moved to the preview, to keep
-                the first paint fast.
+                <code>&lt;directory name&gt;  &lt;remote&gt;/&lt;current branch&gt;</code>,
+                with one such pair per remote. Repositories whose HEAD does not
+                point at a branch have no branch to pair and show
+                <code>&lt;directory name&gt;  &lt;remotes&gt;  detached HEAD</code>.
+                Directory names vary in length, so each column is padded to the
+                widest value in the list and the column to its right starts at the
+                same place on every line.
+                Information that would need one <code>git</code> process per
+                repository (ahead/behind, for example) is kept out of the list and
+                moved to the preview, to keep the first paint fast.
               </li>
               <li><strong>The current repository starts selected</strong> (<kbd>Tab</kbd> deselects it). The others start unselected.</li>
               <li>
@@ -2198,7 +2251,7 @@ gz fetch --siblings    # 隣に並ぶリポジトリを選んでまとめて fet
               <table>
                 <thead><tr><th scope="col">オプション</th><th scope="col">説明</th></tr></thead>
                 <tbody>
-                  <tr><td><code>--prune</code></td><td>リモートで削除されたブランチの追跡参照を削除する（<code>git fetch --prune</code>）</td></tr>
+                  <tr><td><code>-p</code>, <code>--prune</code></td><td>リモートで削除されたブランチの追跡参照を削除する（<code>git fetch --prune</code>）</td></tr>
                   <tr><td><code>-s</code>, <code>--siblings</code></td><td>現在のリポジトリと同じ階層に並ぶリポジトリも対象に含める（複数選択）</td></tr>
                 </tbody>
               </table>
@@ -2243,13 +2296,16 @@ gz fetch --siblings    # 隣に並ぶリポジトリを選んでまとめて fet
             </p>
             <pre><code>$ gz fetch --siblings
 現在のリポジトリを選択済みにしています。Tab: 選択の切替 / Enter: 取得  |  除外 1 件（リモート未登録 / bare）
-&gt;&gt;mike  main  origin
-  alpha  main  origin
-  zulu  main  origin</code></pre>
+&gt;&gt; mike   origin/main
+   alpha  origin/main
+   zulu   origin/main</code></pre>
             <ul>
               <li>
-                候補行は <code>ディレクトリ名  現在のブランチ  リモート</code> です。HEAD がブランチを
-                指していないリポジトリは <code>detached HEAD</code> と表示します。ahead / behind のように
+                候補行は <code>ディレクトリ名  リモート/現在のブランチ</code> です（リモートが複数あれば
+                その数だけ並べます）。HEAD がブランチを指していないリポジトリは対にするブランチが無いため、
+                <code>ディレクトリ名  リモート  detached HEAD</code> と表示します。
+                ディレクトリ名の長さはまちまちであるため、各列は候補一覧の中で最も長いものに合わせて
+                空白で埋め、右の列の開始位置をすべての行で揃えます。ahead / behind のように
                 1 リポジトリあたり git の起動が必要な情報は候補一覧に載せず、プレビューへ回しています
                 （初期表示を速く保つため）。
               </li>
@@ -2389,8 +2445,8 @@ fatal: Could not read from remote repository.
                 this is not an error).
                 <pre><code>$ gz pull
 The current branch is preselected. Tab: toggle the selection / Enter: integrate with a fast-forward only  |  2 excluded (no upstream / remote not registered / in use by another worktree)
-&gt;&gt;* main  →  origin/main
-    feature-a  →  origin/feature-a</code></pre>
+&gt;&gt; * main       →  origin/main
+     feature-a  →  origin/feature-a</code></pre>
               </li>
               <li>
                 A candidate line is
@@ -2543,8 +2599,8 @@ error: Integrating failed for some branches</code></pre>
                 違いエラーにはしません）。
                 <pre><code>$ gz pull
 現在のブランチを選択済みにしています。Tab: 選択の切替 / Enter: fast-forward のみで取り込み  |  除外 2 件（upstream 未設定 / リモート未登録 / 他の worktree で使用中）
-&gt;&gt;* main  →  origin/main
-    feature-a  →  origin/feature-a</code></pre>
+&gt;&gt; * main       →  origin/main
+     feature-a  →  origin/feature-a</code></pre>
               </li>
               <li>
                 候補行は <code>&lt;マーク&gt;&lt;ブランチ名&gt;  →  &lt;upstream の短縮名&gt;</code> です。
@@ -2663,7 +2719,7 @@ gz sync --merge    # fetch, then merge the upstream</code></pre>
               <table>
                 <thead><tr><th scope="col">Option</th><th scope="col">Description</th></tr></thead>
                 <tbody>
-                  <tr><td><code>--rebase</code></td><td>Integrate by rebasing onto the upstream (rewrites history)</td></tr>
+                  <tr><td><code>-r</code>, <code>--rebase</code></td><td>Integrate by rebasing onto the upstream (rewrites history)</td></tr>
                   <tr><td><code>--merge</code></td><td>Integrate by merging the upstream</td></tr>
                 </tbody>
               </table>
@@ -2718,7 +2774,7 @@ gz sync --merge    # fetch → upstream を merge</code></pre>
               <table>
                 <thead><tr><th scope="col">オプション</th><th scope="col">説明</th></tr></thead>
                 <tbody>
-                  <tr><td><code>--rebase</code></td><td>upstream の上へ rebase して取り込む（履歴改変）</td></tr>
+                  <tr><td><code>-r</code>, <code>--rebase</code></td><td>upstream の上へ rebase して取り込む（履歴改変）</td></tr>
                   <tr><td><code>--merge</code></td><td>upstream を merge して取り込む</td></tr>
                 </tbody>
               </table>

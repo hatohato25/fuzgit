@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context as _, Result, anyhow, bail};
 
 use crate::cli::BranchCommand;
+use crate::commands::aligned_candidates;
 use crate::commands::confirmation::confirm;
 use crate::finder::{
     FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with, select_one,
@@ -352,10 +353,7 @@ fn delete(
         bail!(messages.branch_manage().no_delete_candidates());
     }
 
-    let items = candidates
-        .iter()
-        .map(|candidate| to_delete_item(language, messages, candidate))
-        .collect();
+    let items = to_delete_items(language, &display_lines(messages, &references(&candidates)));
     let options = FinderOptions::new(SelectionMode::Multi)
         .with_header(messages.branch_manage().delete_header().to_owned());
     let selected = select_many_with(items, &options)?;
@@ -391,21 +389,14 @@ fn cleanup(
         bail!(messages.branch_manage().no_cleanup_candidates());
     }
 
-    let items = candidates
-        .iter()
-        .map(|candidate| to_delete_item(language, messages, candidate))
-        .collect();
+    // 候補行と事前選択は同じ組み立て結果から作る。事前選択は表示文字列の完全一致で
+    // 判定される（`crate::finder::FinderOptions`）一方、列の幅は候補一覧全体で決まるため
+    let lines = display_lines(messages, &references(&candidates));
     let options = FinderOptions::new(SelectionMode::Multi)
         .with_header(messages.branch_manage().cleanup_header().to_owned())
-        // 事前選択は表示文字列の完全一致で判定される（`crate::finder::FinderOptions`）
-        .with_preselect(
-            candidates
-                .iter()
-                .map(|candidate| display_line(messages, candidate))
-                .collect(),
-        );
+        .with_preselect(preselect(&lines));
 
-    let selected = select_many_with(items, &options)?;
+    let selected = select_many_with(to_delete_items(language, &lines), &options)?;
     let selected = in_candidate_order(messages, &candidates, &selected)?;
 
     execute_delete(language, messages, DeleteMode::MergedOnly, &selected, &[])
@@ -426,9 +417,9 @@ fn execute_delete(
 ) -> Result<()> {
     // 削除は取り消せないため、対象を全件列挙したうえで明示的な同意を求める。
     // 一覧と同じ行を見せることで、merged / 最終更新日時ごと確認できる
-    let lines: Vec<String> = selected
-        .iter()
-        .map(|candidate| display_line(messages, candidate))
+    let lines: Vec<String> = display_lines(messages, selected)
+        .into_iter()
+        .map(|(_, line)| line)
         .collect();
     let targets: Vec<&str> = lines.iter().map(String::as_str).collect();
     confirm(messages, &confirm_header(messages, unmerged), &targets)?;
@@ -541,43 +532,83 @@ fn build_candidates(
         .collect()
 }
 
-/// 一覧に表示する 1 行を組み立てる。この文字列がそのまま絞り込みの対象になる。
+/// 一覧に表示する 1 行を列へ分解する。連結した文字列がそのまま絞り込みの対象になる。
 ///
 /// 削除の判断に必要な情報（取り込み済みか・いつ更新されたか・リモート側に残るか）を
 /// 一覧の時点で並べる。いずれも全件を一括取得できる情報に限る
 /// （最終コミットの詳細はプレビューに委ねる。requirements.md FR-20）。
-fn display_line(messages: &dyn Messages, candidate: &DeleteCandidate) -> String {
-    format!(
-        "{name}  {state}  {date}  {tracking}",
-        name = candidate.name,
-        state = if candidate.is_merged {
-            MERGED_LABEL
-        } else {
-            UNMERGED_LABEL
-        },
-        date = candidate
-            .relative_date
-            .as_deref()
-            .unwrap_or_else(|| messages.branch_manage().unknown_date()),
-        tracking = match &candidate.tracking {
-            Some(tracking) => messages.branch_manage().tracking(tracking),
-            None => messages.branch_manage().no_tracking().to_owned(),
-        }
-    )
+///
+/// ブランチ名・更新日時の長さは候補ごとにまちまちであるため、列として返して
+/// [`aligned_candidates`] に幅を揃えさせる（右の列の開始位置が候補ごとにずれないように）。
+fn cells(messages: &dyn Messages, candidate: &DeleteCandidate) -> Vec<String> {
+    let state = if candidate.is_merged {
+        MERGED_LABEL
+    } else {
+        UNMERGED_LABEL
+    };
+    let date = candidate
+        .relative_date
+        .as_deref()
+        .unwrap_or_else(|| messages.branch_manage().unknown_date());
+    let tracking = match &candidate.tracking {
+        Some(tracking) => messages.branch_manage().tracking(tracking),
+        None => messages.branch_manage().no_tracking().to_owned(),
+    };
+
+    vec![
+        candidate.name.clone(),
+        state.to_owned(),
+        date.to_owned(),
+        tracking,
+    ]
+}
+
+/// 候補一覧を参照の並びへ移し替える。
+///
+/// 表示行の組み立ては、finder へ渡す全候補と確認プロンプトに載せる選択済みの候補
+/// （既に `&DeleteCandidate` の並び）の双方から呼ばれるため、入口を 1 つに保つ。
+fn references(candidates: &[DeleteCandidate]) -> Vec<&DeleteCandidate> {
+    candidates.iter().collect()
+}
+
+/// 候補と、列の幅を候補一覧全体で揃えた表示行の対を組み立てる。
+///
+/// 候補一覧・事前選択・確認プロンプトのいずれもこの 1 つの入口から作り、同じ候補集合には
+/// 常に同じ行を示す。
+fn display_lines<'a>(
+    messages: &dyn Messages,
+    candidates: &[&'a DeleteCandidate],
+) -> Vec<(&'a DeleteCandidate, String)> {
+    aligned_candidates(candidates, |candidate| cells(messages, candidate))
+        .into_iter()
+        .map(|(candidate, line)| (*candidate, line))
+        .collect()
+}
+
+/// 起動時に選択済みにする候補の表示文字列を集める（`cleanup` は候補全件が対象）。
+///
+/// 受け取るのは [`display_lines`] が組み立てた候補と表示行の対であり、
+/// finder へ渡す候補行と同じ文字列がそのまま事前選択になる。
+fn preselect(candidates: &[(&DeleteCandidate, String)]) -> Vec<String> {
+    candidates.iter().map(|(_, line)| line.clone()).collect()
 }
 
 /// 削除候補を finder のアイテムへ変換する。
-fn to_delete_item(
+fn to_delete_items(
     language: Language,
-    messages: &dyn Messages,
-    candidate: &DeleteCandidate,
-) -> FinderItem {
-    FinderItem::new(
-        display_line(messages, candidate),
-        candidate.name.clone(),
-        PreviewSource::Git(log_preview_args(&candidate.name)),
-        language.messages(),
-    )
+    candidates: &[(&DeleteCandidate, String)],
+) -> Vec<FinderItem> {
+    candidates
+        .iter()
+        .map(|(candidate, line)| {
+            FinderItem::new(
+                line.clone(),
+                candidate.name.clone(),
+                PreviewSource::Git(log_preview_args(&candidate.name)),
+                language.messages(),
+            )
+        })
+        .collect()
 }
 
 /// `--into` の指定を merged 判定の基準リビジョンへ解決する。
@@ -690,7 +721,10 @@ fn delete_args(mode: DeleteMode, names: &[&str]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use skim::prelude::SkimItem as _;
+
     use super::*;
+    use crate::commands::COLUMN_SEPARATOR;
 
     const TAG_OBJECT_ID: &str = "1f0c9a4b3d2e5f60718293a4b5c6d7e8f9012345";
 
@@ -733,6 +767,11 @@ mod tests {
             .iter()
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
             .collect()
+    }
+
+    /// 候補 1 件だけの表示行（揃える相手が居ないため列を連結しただけの行）。
+    fn display_line(messages: &dyn Messages, candidate: &DeleteCandidate) -> String {
+        cells(messages, candidate).join(COLUMN_SEPARATOR)
     }
 
     fn candidate_names(candidates: &[DeleteCandidate]) -> Vec<&str> {
@@ -1064,14 +1103,15 @@ mod tests {
             &HashMap::new(),
         );
 
+        let messages = Language::Japanese.messages();
+        let items = to_delete_items(
+            Language::Japanese,
+            &display_lines(messages, &references(&candidates)),
+        );
+
         assert_eq!(
-            to_delete_item(
-                Language::Japanese,
-                Language::Japanese.messages(),
-                &candidates[0]
-            )
-            .key(),
-            "feature/login"
+            items.iter().map(FinderItem::key).collect::<Vec<_>>(),
+            ["feature/login"]
         );
     }
 
@@ -1099,14 +1139,44 @@ mod tests {
         );
 
         assert_eq!(
-            candidates
-                .iter()
-                .map(|candidate| display_line(Language::Japanese.messages(), candidate))
+            display_lines(Language::Japanese.messages(), &references(&candidates))
+                .into_iter()
+                .map(|(_, line)| line)
                 .collect::<Vec<_>>(),
             [
-                "done  merged  3 days ago  追跡: origin/done",
-                "wip  unmerged  10 minutes ago  追跡なし",
+                "done  merged    3 days ago      追跡: origin/done",
+                "wip   unmerged  10 minutes ago  追跡なし",
             ]
+        );
+    }
+
+    #[test]
+    fn every_preselected_line_is_the_very_line_shown_in_the_list() {
+        // 事前選択は表示文字列の完全一致で判定されるため、列を揃えたあとの行と
+        // 一致していなければ機能しない（`crate::finder::FinderOptions::preselect`）
+        let messages = Language::Japanese.messages();
+        let candidates = build_candidates(
+            &[local("done"), local("feature/very-long-name")],
+            &set(&["done", "feature/very-long-name"]),
+            &map(&[
+                ("done", "3 days ago"),
+                ("feature/very-long-name", "10 minutes ago"),
+            ]),
+            &HashSet::new(),
+            &map(&[("done", "origin/done")]),
+        );
+        let lines = display_lines(messages, &references(&candidates));
+
+        let displayed: Vec<String> = to_delete_items(Language::Japanese, &lines)
+            .iter()
+            .map(|item| item.text().into_owned())
+            .collect();
+
+        assert_eq!(preselect(&lines), displayed);
+        // 列を揃える前の行では一致しないこと（＝別々に組み立てると壊れること）も確かめる
+        assert!(
+            !preselect(&lines).contains(&display_line(messages, &candidates[0])),
+            "the padding is what makes the two ways differ: {displayed:?}"
         );
     }
 

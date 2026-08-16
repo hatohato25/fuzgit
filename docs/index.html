@@ -73,9 +73,9 @@
             <figure class="term">
               <div class="term-bar">gz branch --all — switching</div>
               <pre><code><span class="prompt">$</span> <span class="cmd">gz branch --all</span>
-<span class="sel">&gt; * main</span>
-    feature/login
-    origin/feature/search</code></pre>
+<span class="sel">&gt;  * main</span>
+     feature/login
+     origin/feature/search</code></pre>
               <figcaption>
                 You never type a branch name: you filter the list until the one
                 you meant is in front of you. The current branch carries the
@@ -91,8 +91,8 @@
             <figure class="term">
               <div class="term-bar">gz stash apply — searching stashes</div>
               <pre><code><span class="prompt">$</span> <span class="cmd">gz stash apply</span>
-<span class="sel">&gt; stash@{0}: On main: half-done auth refactor</span>
-  stash@{1}: On feature/search: draft of the search form</code></pre>
+<span class="sel">&gt;  stash@{0}: On main: half-done auth refactor</span>
+   stash@{1}: On feature/search: draft of the search form</code></pre>
               <figcaption>
                 Candidates for <code>apply</code> / <code>pop</code> /
                 <code>drop</code> are <code>stash@{n}: &lt;message&gt;</code>, so
@@ -107,9 +107,9 @@
           <figure class="term spaced">
             <div class="term-bar">gz stash push — stash only what you picked</div>
             <pre><code><span class="prompt">$</span> <span class="cmd">gz stash push -m "half-done auth refactor"</span>
-<span class="sel">&gt;&gt; M src/auth.rs</span>
- &gt;  M src/session.rs
-    M README.md</code></pre>
+<span class="sel">&gt;&gt; M  src/auth.rs</span>
+ &gt; M  src/session.rs
+   M  README.md</code></pre>
             <figcaption>
               <code>push</code> picks <em>files</em> rather than a stash.
               <kbd>Tab</kbd> selects several of them and <b>only the files you
@@ -138,15 +138,15 @@
               <div class="term-bar">gz fetch --siblings — the repositories next door</div>
               <pre><code><span class="prompt">$</span> <span class="cmd">gz fetch --siblings</span>
 <span class="hint">The current repository is preselected. Tab: toggle the selection / Enter: fetch  |  1 excluded (no remote / bare)</span>
-<span class="sel">&gt;&gt;mike  main  origin</span>
-  alpha  main  origin
-  zulu  main  origin</code></pre>
+<span class="sel">&gt;&gt; mike   origin/main</span>
+   alpha  origin/main
+   zulu   origin/main</code></pre>
               <figcaption>
                 <code>-s</code> (<code>--siblings</code>)
                 scans the parent directory of the current worktree root
                 <b>one level deep only</b> and offers every directory that
                 contains a <code>.git</code>; a line reads
-                <code>&lt;directory&gt;  &lt;current branch&gt;  &lt;remotes&gt;</code>.
+                <code>&lt;directory&gt;  &lt;remote&gt;/&lt;current branch&gt;</code>.
                 Repositories that cannot be fetched are excluded, never silently
                 — the number skipped is in the header.
               </figcaption>
@@ -156,8 +156,8 @@
               <div class="term-bar">gz pull — selection</div>
               <pre><code><span class="prompt">$</span> <span class="cmd">gz pull</span>
 <span class="hint">The current branch is preselected. Tab: toggle the selection / Enter: integrate with a fast-forward only  |  2 excluded (no upstream / remote not registered / in use by another worktree)</span>
-<span class="sel">&gt;&gt;* main  →  origin/main</span>
-    feature-a  →  origin/feature-a</code></pre>
+<span class="sel">&gt;&gt; * main       →  origin/main</span>
+     feature-a  →  origin/feature-a</code></pre>
               <figcaption>
                 It asks only <em>which local branches should
                 follow their upstream</em> — the destination is fixed to each

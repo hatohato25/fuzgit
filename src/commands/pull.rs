@@ -16,6 +16,7 @@
 
 use anyhow::{Context as _, Result, bail};
 
+use crate::commands::aligned_candidates;
 use crate::commands::in_progress;
 use crate::commands::sync::{SyncMode, integrate_args as sync_integrate_args};
 use crate::error::Error;
@@ -41,7 +42,9 @@ const CURRENT_MARK: &str = "* ";
 const OTHER_MARK: &str = "  ";
 
 /// 候補行でブランチと upstream をつなぐ矢印（`git branch -vv` と同じ向き）。
-const UPSTREAM_ARROW: &str = "  →  ";
+///
+/// 前後の空白は列の区切り（`crate::commands::COLUMN_SEPARATOR`）が担うため含めない。
+const UPSTREAM_ARROW: &str = "→";
 
 /// リモート追跡参照の接頭辞。表示用の短縮名（`origin/main`）を得るために取り除く。
 const TRACKING_PREFIX: &str = "refs/remotes/";
@@ -115,11 +118,13 @@ pub fn run(
             targets
         }
         PullDecision::Choose => {
+            // 候補行と事前選択は同じ組み立て結果から作る。事前選択は表示文字列の完全一致で
+            // 判定される（`crate::finder::FinderOptions`）一方、列の幅は候補一覧全体で決まるため
+            let lines = aligned_candidates(&scan.targets, cells);
             let options = FinderOptions::new(SelectionMode::Multi)
                 .with_header(pull_header(messages, &scan))
-                // 事前選択は表示文字列の完全一致で判定される（`crate::finder::FinderOptions`）
-                .with_preselect(preselect(&scan.targets));
-            let selected = select_many_with(items(language, messages, &scan.targets), &options)?;
+                .with_preselect(preselect(&lines));
+            let selected = select_many_with(items(language, messages, &lines), &options)?;
 
             // skim は選択した順に返すため、候補一覧の順序（現在のブランチが先頭、
             // 以降は名前順）へ揃え直したうえで、キーが候補に含まれることを検証する
@@ -140,23 +145,26 @@ pub fn run(
     Ok(())
 }
 
-/// 一覧に表示する 1 行を組み立てる。この文字列がそのまま絞り込みの対象になる。
+/// 一覧に表示する 1 行を列へ分解する。連結した文字列がそのまま絞り込みの対象になる。
+///
+/// ブランチ名の長さは候補ごとにまちまちであるため、列として返して
+/// [`aligned_candidates`] に幅を揃えさせる（矢印と upstream の桁が候補ごとにずれないように）。
 ///
 /// ahead / behind は**載せない**。候補生成の時点で分かるのは前回の fetch までに取得済みの
 /// 追跡参照との差であり、これから fetch して取り込む本数とは一致しない。古い件数を
 /// 添えると「2 件だけ入る」と読めてしまうため、件数は取り込み後に git 自身が示すものに委ねる。
-fn display_line(target: &PullTarget) -> String {
+fn cells(target: &PullTarget) -> Vec<String> {
     let mark = if target.is_current {
         CURRENT_MARK
     } else {
         OTHER_MARK
     };
 
-    format!(
-        "{mark}{branch}{UPSTREAM_ARROW}{upstream}",
-        branch = target.branch,
-        upstream = tracking_name(target)
-    )
+    vec![
+        format!("{mark}{branch}", branch = target.branch),
+        UPSTREAM_ARROW.to_owned(),
+        tracking_name(target).to_owned(),
+    ]
 }
 
 /// 候補行に示す upstream の短縮名（`origin/main`）を返す。
@@ -191,23 +199,30 @@ fn pull_header(messages: &dyn Messages, scan: &PullScan) -> String {
 ///
 /// 現在のブランチは最も取り込みたい対象である一方、他のブランチと違って作業ツリーごと
 /// 更新される。選択済みで始めつつ、Tab で外せる形にする。
-fn preselect(targets: &[PullTarget]) -> Vec<String> {
+///
+/// 受け取るのは [`aligned_candidates`] が組み立てた候補と表示行の対であり、
+/// finder へ渡す候補行と同じ文字列がそのまま事前選択になる。
+fn preselect(targets: &[(&PullTarget, String)]) -> Vec<String> {
     targets
         .iter()
-        .filter(|target| target.is_current)
-        .map(display_line)
+        .filter(|(target, _)| target.is_current)
+        .map(|(_, line)| line.clone())
         .collect()
 }
 
 /// 取り込み対象を finder の候補へ変換する。
 ///
 /// 照合キーはブランチ名（[`pull_targets`] が列挙した値であり、ユーザーの自由入力ではない）。
-fn items(language: Language, messages: &dyn Messages, targets: &[PullTarget]) -> Vec<FinderItem> {
+fn items(
+    language: Language,
+    messages: &dyn Messages,
+    targets: &[(&PullTarget, String)],
+) -> Vec<FinderItem> {
     targets
         .iter()
-        .map(|target| {
+        .map(|(target, line)| {
             FinderItem::new(
-                display_line(target),
+                line.clone(),
                 target.branch.clone(),
                 preview_source(messages, target),
                 language.messages(),
@@ -548,7 +563,10 @@ fn report_target(
 
 #[cfg(test)]
 mod tests {
+    use skim::prelude::SkimItem as _;
+
     use super::*;
+    use crate::commands::COLUMN_SEPARATOR;
 
     /// 既定（日本語）の文言一式。文言そのものを固定するテスト以外はこれを使う。
     fn messages() -> &'static dyn Messages {
@@ -577,6 +595,11 @@ mod tests {
             target("alpha", false),
             target("zulu", false),
         ]
+    }
+
+    /// 候補 1 件だけの表示行（揃える相手が居ないため列を連結しただけの行）。
+    fn display_line(target: &PullTarget) -> String {
+        cells(target).join(COLUMN_SEPARATOR)
     }
 
     /// 走査結果を組み立てる。
@@ -756,9 +779,44 @@ mod tests {
 
     #[test]
     fn only_the_current_branch_is_preselected() {
+        let candidates = targets();
+        let lines = aligned_candidates(&candidates, cells);
+
         assert_eq!(
-            preselect(&targets()),
-            vec![display_line(&target("main", true))]
+            preselect(&lines),
+            vec!["* main   →  origin/main".to_owned()],
+            "選択済みにするのは現在のブランチだけ: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_preselected_line_is_the_very_line_shown_in_the_list() {
+        // 事前選択は表示文字列の完全一致で判定されるため、列を揃えたあとの行と
+        // 一致していなければ機能しない（`crate::finder::FinderOptions::preselect`）
+        let candidates = targets();
+        let lines = aligned_candidates(&candidates, cells);
+
+        let displayed: Vec<String> = items(Language::Japanese, messages(), &lines)
+            .iter()
+            .map(|item| item.text().into_owned())
+            .collect();
+
+        let preselected = preselect(&lines);
+        assert_eq!(
+            preselected.len(),
+            1,
+            "unexpected preselection: {preselected:?}"
+        );
+        for line in &preselected {
+            assert!(
+                displayed.contains(line),
+                "the preselection must be one of the listed lines: {line:?} / {displayed:?}"
+            );
+        }
+        // 列を揃える前の行では一致しないこと（＝別々に組み立てると壊れること）も確かめる
+        assert!(
+            !preselected.contains(&display_line(&target("main", true))),
+            "the padding is what makes the two ways differ: {preselected:?}"
         );
     }
 
@@ -766,13 +824,17 @@ mod tests {
     fn nothing_is_preselected_on_a_detached_head() {
         // detached HEAD では現在のブランチが無い（`pull_targets` はエラーにしない）
         let candidates = vec![target("alpha", false), target("zulu", false)];
+        let lines = aligned_candidates(&candidates, cells);
 
-        assert!(preselect(&candidates).is_empty());
+        assert!(preselect(&lines).is_empty());
     }
 
     #[test]
     fn a_candidate_is_keyed_by_its_branch_name() {
-        let items = items(Language::Japanese, messages(), &targets());
+        let candidates = targets();
+        let lines = aligned_candidates(&candidates, cells);
+
+        let items = items(Language::Japanese, messages(), &lines);
 
         assert_eq!(
             items.iter().map(FinderItem::key).collect::<Vec<_>>(),

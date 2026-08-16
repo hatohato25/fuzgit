@@ -15,6 +15,8 @@ use std::collections::HashSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 use skim::prelude::*;
 
 use crate::error::{Error, Result};
@@ -183,6 +185,136 @@ fn read_preview(messages: &dyn Messages, path: &Path) -> std::io::Result<String>
     Ok(text)
 }
 
+/// 候補の表示文字列の一部に付ける前景色。
+///
+/// 端末のテーマ（配色設定）へ追随させるため、扱うのは基本 16 色（ANSI）のみとし、
+/// 256 色 (`Color::Indexed`) や truecolor (`Color::Rgb`) は仮定しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HighlightColor {
+    /// 緑（ANSI 32）。
+    Green,
+    /// 赤（ANSI 31）。
+    Red,
+}
+
+impl HighlightColor {
+    /// 描画に用いる ratatui の色へ変換する。
+    fn to_color(self) -> Color {
+        match self {
+            Self::Green => Color::Green,
+            Self::Red => Color::Red,
+        }
+    }
+}
+
+/// 表示文字列のうち一部分を色付けする指定。
+///
+/// 範囲は [`FinderItem`] の表示文字列に対するバイト位置の半開区間 `[start, end)`。
+/// 絞り込み対象の文字列（[`SkimItem::text`]）そのものは変えず、描画時にだけ色を乗せるため、
+/// 色を持たせても絞り込み・事前選択の挙動は変わらない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Highlight {
+    /// 色を付ける範囲の開始バイト位置（この位置を含む）。
+    start: usize,
+    /// 色を付ける範囲の終端バイト位置（この位置を含まない）。
+    end: usize,
+    /// 前景色。
+    color: HighlightColor,
+}
+
+impl Highlight {
+    /// 色付けする範囲を作る。
+    #[must_use]
+    pub fn new(start: usize, end: usize, color: HighlightColor) -> Self {
+        Self { start, end, color }
+    }
+
+    /// バイト位置 `index` がこの範囲に含まれるか。
+    fn contains(self, index: usize) -> bool {
+        self.start <= index && index < self.end
+    }
+
+    /// バイト範囲 `[start, end)` と重なりを持つか。
+    fn overlaps(self, start: usize, end: usize) -> bool {
+        self.start < end && start < self.end
+    }
+}
+
+/// `highlights` で指定された範囲の前景色を `line` へ乗せる。
+///
+/// `base_style` は [`DisplayContext::base_style`]、すなわち「クエリにマッチしていない部分」の
+/// 装飾。マッチ部分は `base_style` に `matched_style` が重ねられた別の装飾を持つため、
+/// **装飾が `base_style` のままの span にだけ**色を乗せ、マッチのハイライトは書き換えない
+/// （利用者が今入力しているクエリへの反応の方が、状態コードの色より優先度が高いため）。
+fn apply_highlights<'a>(line: Line<'a>, base_style: Style, highlights: &[Highlight]) -> Line<'a> {
+    if highlights.is_empty() {
+        return line;
+    }
+
+    let mut spans: Vec<Span<'a>> = Vec::with_capacity(line.spans.len());
+    let mut offset = 0;
+    for span in line.spans {
+        let length = span.content.len();
+        if span.style == base_style {
+            spans.extend(split_span(span, offset, highlights));
+        } else {
+            spans.push(span);
+        }
+        offset += length;
+    }
+
+    // span 以外（行全体の装飾・寄せ）は skim が決めたものをそのまま保つ
+    Line {
+        spans,
+        style: line.style,
+        alignment: line.alignment,
+    }
+}
+
+/// 1 つの span を、色の指定ごとの span へ分割する。
+///
+/// `offset` は行頭から数えたこの span の開始バイト位置。分割位置は文字単位で走査して求める
+/// （バイト位置で直接スライスすると、マルチバイト文字の途中で切って panic し得るため）。
+fn split_span<'a>(span: Span<'a>, offset: usize, highlights: &[Highlight]) -> Vec<Span<'a>> {
+    if !highlights
+        .iter()
+        .any(|highlight| highlight.overlaps(offset, offset + span.content.len()))
+    {
+        return vec![span];
+    }
+
+    let mut pieces: Vec<Span<'a>> = Vec::new();
+    let mut text = String::new();
+    let mut current: Option<HighlightColor> = None;
+    for (index, character) in span.content.char_indices() {
+        let color = highlights
+            .iter()
+            .find(|highlight| highlight.contains(offset + index))
+            .map(|highlight| highlight.color);
+        if color != current && !text.is_empty() {
+            pieces.push(Span::styled(
+                std::mem::take(&mut text),
+                highlighted_style(span.style, current),
+            ));
+        }
+        current = color;
+        text.push(character);
+    }
+    if !text.is_empty() {
+        pieces.push(Span::styled(text, highlighted_style(span.style, current)));
+    }
+
+    pieces
+}
+
+/// 前景色だけを差し替えた装飾を返す。色の指定が無い部分は元の装飾のまま。
+fn highlighted_style(style: Style, color: Option<HighlightColor>) -> Style {
+    match color {
+        None => style,
+        Some(color) => style.fg(color.to_color()),
+    }
+}
+
 /// fuzzy finder に渡す汎用の候補アイテム。
 #[derive(Debug, Clone)]
 pub struct FinderItem {
@@ -202,6 +334,11 @@ pub struct FinderItem {
     /// （未設定を許すと、その場合に何語で出すかという暗黙のフォールバックが生まれるため）。
     /// 実体はフィールドを持たない ZST への `&'static` 参照であり、`Clone` のコストは変わらない。
     messages: &'static dyn Messages,
+    /// 表示文字列のうち色を付ける範囲。色を付けない候補では空。
+    ///
+    /// 色は描画時（[`SkimItem::display`]）にだけ乗せ、絞り込み対象の文字列は
+    /// [`FinderItem::display`] のままにしておく。
+    highlights: Vec<Highlight>,
 }
 
 impl FinderItem {
@@ -221,7 +358,15 @@ impl FinderItem {
             key,
             preview,
             messages,
+            highlights: Vec::new(),
         }
+    }
+
+    /// 表示文字列の一部に付ける色を設定する。
+    #[must_use]
+    pub fn with_highlights(mut self, highlights: Vec<Highlight>) -> Self {
+        self.highlights = highlights;
+        self
     }
 
     /// 決定時に返される値を取得する。
@@ -234,6 +379,13 @@ impl FinderItem {
 impl SkimItem for FinderItem {
     fn text(&self) -> Cow<'_, str> {
         Cow::Borrowed(&self.display)
+    }
+
+    fn display(&self, context: DisplayContext) -> Line<'_> {
+        // `to_line` は context を消費するため、先に控えておく
+        let base_style = context.base_style;
+
+        apply_highlights(context.to_line(self.text()), base_style, &self.highlights)
     }
 
     fn output(&self) -> Cow<'_, str> {
@@ -362,6 +514,19 @@ fn build_options(options: &FinderOptions) -> Result<SkimOptions> {
     builder
         .multi(options.mode == SelectionMode::Multi)
         .reverse(true)
+        // カーソル行を行末まで塗る。既定では文字のある範囲しか色が変わらず、
+        // どの行にカーソルがあるのか候補が詰まっているほど分かりにくい。
+        // **これはカーソル行にだけ効く**（skim の `tui/item_renderer.rs` は
+        // `highlight_line && is_current` で判定する）。Tab で選択した行の見え方は変わらない
+        .highlight_line(true)
+        // マーカー列と本文の間に余白を作る。skim は [selector 列][marker 列][本文] を
+        // 区切り無しで並べるため（`tui/item_renderer.rs`）、既定の ">" のままだと
+        // `>>mike   origin/main` のようにマーカーと本文がくっついて読みにくい。
+        // 余白専用のオプションは無く、本文の行頭に空白を足すと列揃えや事前選択の一致に
+        // 影響するため、マーカーの字形は変えずに末尾へ空白を 1 つ足す。
+        // marker が描画されない行でも同じ幅の空白が確保されるので、単一選択も含め
+        // 全コマンドで接頭辞が 3 桁に揃う
+        .multi_select_icon("> ")
         // skim はプレビュー用のグローバルコマンドが未設定だとプレビュー枠自体を描画せず、
         // SkimItem::preview() も呼ばない。ここではアイテム側が常に AnsiText / Text を返すため、
         // グローバルコマンドは空文字（実行されないダミー）で足りる
@@ -502,6 +667,197 @@ mod tests {
         assert_eq!(item.text(), "* main");
         assert_eq!(item.output(), "main");
         assert_eq!(item.key(), "main");
+    }
+
+    /// マッチしていない部分の装飾（skim が渡す `base_style` 相当）。
+    fn base_style() -> Style {
+        Style::default()
+    }
+
+    /// マッチ部分の装飾（`base_style` と区別できるよう別の色を与える）。
+    fn matched_style() -> Style {
+        Style::default().fg(Color::Blue)
+    }
+
+    /// 行を「本文, 前景色」の組へ落として比較しやすくする。
+    fn spans(line: &Line<'_>) -> Vec<(String, Option<Color>)> {
+        line.spans
+            .iter()
+            .map(|span| (span.content.to_string(), span.style.fg))
+            .collect()
+    }
+
+    #[test]
+    fn a_highlight_splits_the_span_it_covers_partially() {
+        let line = Line::from(vec![Span::styled("M  src/main.rs", base_style())]);
+
+        let highlighted = apply_highlights(
+            line,
+            base_style(),
+            &[Highlight::new(0, 1, HighlightColor::Green)],
+        );
+
+        assert_eq!(
+            spans(&highlighted),
+            [
+                ("M".to_string(), Some(Color::Green)),
+                ("  src/main.rs".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_highlights_colour_their_own_ranges() {
+        let line = Line::from(vec![Span::styled("MM src/main.rs", base_style())]);
+
+        let highlighted = apply_highlights(
+            line,
+            base_style(),
+            &[
+                Highlight::new(0, 1, HighlightColor::Green),
+                Highlight::new(1, 2, HighlightColor::Red),
+            ],
+        );
+
+        assert_eq!(
+            spans(&highlighted),
+            [
+                ("M".to_string(), Some(Color::Green)),
+                ("M".to_string(), Some(Color::Red)),
+                (" src/main.rs".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_highlight_may_start_after_the_beginning_of_the_line() {
+        let line = Line::from(vec![Span::styled(" M src/main.rs", base_style())]);
+
+        let highlighted = apply_highlights(
+            line,
+            base_style(),
+            &[Highlight::new(1, 2, HighlightColor::Red)],
+        );
+
+        assert_eq!(
+            spans(&highlighted),
+            [
+                (" ".to_string(), None),
+                ("M".to_string(), Some(Color::Red)),
+                (" src/main.rs".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_without_highlights_is_left_untouched() {
+        let line = Line::from(vec![Span::styled("?? new.txt", base_style())]);
+
+        let highlighted = apply_highlights(line.clone(), base_style(), &[]);
+
+        assert_eq!(highlighted, line);
+    }
+
+    #[test]
+    fn a_matched_span_keeps_the_match_highlighting() {
+        // skim が「M」をクエリのマッチとして色付けした状態
+        let line = Line::from(vec![
+            Span::styled("M", base_style().patch(matched_style())),
+            Span::styled("  src/main.rs", base_style()),
+        ]);
+
+        let highlighted = apply_highlights(
+            line,
+            base_style(),
+            &[Highlight::new(0, 1, HighlightColor::Green)],
+        );
+
+        assert_eq!(
+            spans(&highlighted),
+            [
+                ("M".to_string(), matched_style().fg),
+                ("  src/main.rs".to_string(), None),
+            ],
+            "クエリへのマッチ表示は状態コードの色より優先する"
+        );
+    }
+
+    #[test]
+    fn a_highlight_after_a_matched_span_is_still_applied() {
+        // 先頭がマッチ済みでも、続く base_style の部分には色が乗る
+        let line = Line::from(vec![
+            Span::styled("M", base_style().patch(matched_style())),
+            Span::styled("M src/main.rs", base_style()),
+        ]);
+
+        let highlighted = apply_highlights(
+            line,
+            base_style(),
+            &[
+                Highlight::new(0, 1, HighlightColor::Green),
+                Highlight::new(1, 2, HighlightColor::Red),
+            ],
+        );
+
+        assert_eq!(
+            spans(&highlighted),
+            [
+                ("M".to_string(), matched_style().fg),
+                ("M".to_string(), Some(Color::Red)),
+                (" src/main.rs".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_multibyte_character_is_not_split_in_the_middle() {
+        // 状態コードは ASCII だが、範囲がマルチバイト文字に掛かっても壊れないことを保つ
+        let line = Line::from(vec![Span::styled("??日本語.txt", base_style())]);
+
+        let highlighted = apply_highlights(
+            line,
+            base_style(),
+            &[Highlight::new(0, 3, HighlightColor::Red)],
+        );
+
+        assert_eq!(
+            spans(&highlighted),
+            [
+                ("??日".to_string(), Some(Color::Red)),
+                ("本語.txt".to_string(), None),
+            ],
+            "文字の途中では分割せず、その文字ごと色を付ける"
+        );
+    }
+
+    #[test]
+    fn the_displayed_line_is_coloured_but_the_matching_text_is_not() {
+        let item = FinderItem::new(
+            "M  src/main.rs".to_string(),
+            "src/main.rs".to_string(),
+            PreviewSource::None,
+            Language::Japanese.messages(),
+        )
+        .with_highlights(vec![Highlight::new(0, 1, HighlightColor::Green)]);
+
+        let context = DisplayContext {
+            base_style: base_style(),
+            matched_style: matched_style(),
+            ..DisplayContext::default()
+        };
+
+        assert_eq!(
+            spans(&item.display(context)),
+            [
+                ("M".to_string(), Some(Color::Green)),
+                ("  src/main.rs".to_string(), None),
+            ]
+        );
+        assert_eq!(
+            item.text(),
+            "M  src/main.rs",
+            "絞り込みと事前選択の対象となる文字列は色を含めない"
+        );
     }
 
     /// プレビュー生成の呼び出しに必要な最小限のコンテキスト。
@@ -850,10 +1206,42 @@ mod tests {
         // preview がセットされていないと skim は SkimItem::preview() を呼ばない
         assert!(single.preview.is_some());
         assert!(single.reverse);
+        assert!(single.highlight_line, "カーソル行を行末まで塗る");
 
         let multi =
             build_options(&FinderOptions::new(SelectionMode::Multi)).expect("options should build");
         assert!(multi.multi);
+    }
+
+    #[test]
+    fn the_marker_ends_with_a_space_so_it_does_not_touch_the_candidate_text() {
+        // skim は [selector 列][marker 列][本文] を区切り無しで並べるため、マーカーが
+        // 末尾に空白を持たないと `>>mike   origin/main` のように本文とくっついて見える
+        for mode in [SelectionMode::Single, SelectionMode::Multi] {
+            let options = build_options(&FinderOptions::new(mode)).expect("options should build");
+
+            assert_eq!(
+                options.multi_select_icon, "> ",
+                "{mode:?} のマーカーは字形を変えず末尾に空白を 1 つ持つ"
+            );
+            assert_eq!(
+                options.selector_icon, ">",
+                "{mode:?} のカーソル記号は既定のまま"
+            );
+        }
+    }
+
+    #[test]
+    fn the_marker_is_the_same_in_both_selection_modes() {
+        // marker が描画されない行でも同じ幅の空白が確保されるため、片方のモードにだけ
+        // 空白を足すと接頭辞の幅がモードによって変わってしまう
+        let single = build_options(&FinderOptions::new(SelectionMode::Single))
+            .expect("options should build");
+        let multi =
+            build_options(&FinderOptions::new(SelectionMode::Multi)).expect("options should build");
+
+        assert_eq!(single.multi_select_icon, multi.multi_select_icon);
+        assert_eq!(single.selector_icon, multi.selector_icon);
     }
 
     #[test]

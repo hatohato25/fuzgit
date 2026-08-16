@@ -900,8 +900,10 @@ dependencies = [
  "assert_cmd",
  "clap",
  "gix",
+ "ratatui",
  "skim",
  "thiserror 2.0.19",
+ "unicode-width",
 ]
 
 [[package]]

@@ -4,6 +4,7 @@
 //! 直列オーケストレーションのみを担う。
 
 use anyhow::Result;
+use unicode_width::UnicodeWidthStr as _;
 
 use crate::cli::{Command, StashCommand};
 use crate::commands::diff::DiffMode;
@@ -42,6 +43,94 @@ pub mod status;
 pub mod sync;
 pub mod tag;
 pub mod worktree;
+
+/// 候補一覧の列を区切る空白。
+///
+/// 候補一覧の体裁をコマンド間で揃えるため、区切りはこの 1 か所だけに持つ。
+pub(crate) const COLUMN_SEPARATOR: &str = "  ";
+
+/// 候補と、列の幅を候補一覧全体で揃えた表示行の対を組み立てる。
+///
+/// `cells` は候補 1 件を列の並びへ分解する。返るのは候補とその表示行の**対**であり、
+/// finder へ渡す候補行（[`crate::finder::FinderItem`] の `display`）と事前選択
+/// （[`crate::finder::FinderOptions::preselect`]）を必ず同じ値から作れる。
+/// 事前選択は表示文字列の完全一致で判定される一方、列の幅は候補一覧全体に依存するため、
+/// 両者を別々に組み立てると幅がずれた瞬間に一致しなくなる。
+pub(crate) fn aligned_candidates<T>(
+    candidates: &[T],
+    cells: impl Fn(&T) -> Vec<String>,
+) -> Vec<(&T, String)> {
+    let rows: Vec<Vec<String>> = candidates.iter().map(cells).collect();
+
+    // `align_columns` は行数を変えないため、対応関係は候補の並びのまま保たれる
+    candidates.iter().zip(align_columns(&rows)).collect()
+}
+
+/// 行ごとの列を、列ごとの最大表示幅に合わせて空白で埋めながら連結する。
+///
+/// 幅は文字数ではなく端末上の表示幅で測る（全角文字は 2 セル幅を占めるため、
+/// 文字数で埋めると日本語を含む候補で桁が合わない）。
+/// 各行の**最終列は埋めない**（行末に意味のない空白を残さないため）。
+fn align_columns(rows: &[Vec<String>]) -> Vec<String> {
+    let widths = column_widths(rows);
+
+    rows.iter().map(|row| join_row(row, &widths)).collect()
+}
+
+/// 後続の列を持つ列について、列ごとの最大表示幅を求める。
+///
+/// 幅は「次の列の開始位置を揃える」ためだけに必要であるため、最終列は測らない。
+fn column_widths(rows: &[Vec<String>]) -> Vec<usize> {
+    let mut widths: Vec<usize> = Vec::new();
+
+    for row in rows {
+        let Some((_last, leading)) = row.split_last() else {
+            continue;
+        };
+
+        for (index, cell) in leading.iter().enumerate() {
+            let width = cell.width();
+            match widths.get_mut(index) {
+                Some(current) => *current = (*current).max(width),
+                // 列は先頭から順に見るため、未知の列は必ず末尾への追加になる
+                None => widths.push(width),
+            }
+        }
+    }
+
+    widths
+}
+
+/// 1 行分の列を、与えられた幅に合わせて連結する。
+///
+/// `widths` は [`column_widths`] が同じ行集合から求めた値であり、各行の最終列を除く
+/// すべての列を必ず覆う。
+fn join_row(row: &[String], widths: &[usize]) -> String {
+    let Some((last, leading)) = row.split_last() else {
+        // 列を 1 つも持たない候補は空行になる
+        return String::new();
+    };
+
+    let mut line = String::new();
+    for (cell, width) in leading.iter().zip(widths) {
+        line.push_str(&pad(cell, *width));
+        line.push_str(COLUMN_SEPARATOR);
+    }
+    line.push_str(last);
+
+    line
+}
+
+/// 表示幅が `width` になるまで右側を空白で埋める。
+///
+/// `width` は同じ列の最大幅であるため `cell` の幅を下回らないが、下回った場合に
+/// 引き算で破綻させないよう飽和演算で扱う（埋めないだけで内容は削らない）。
+fn pad(cell: &str, width: usize) -> String {
+    let mut padded = cell.to_owned();
+    padded.push_str(&" ".repeat(width.saturating_sub(cell.width())));
+
+    padded
+}
 
 /// これから実行する git コマンドを表示用の 1 行に整形する。
 ///
@@ -212,5 +301,112 @@ pub fn dispatch(
         Command::Worktree { command } => {
             worktree::run(language, messages, &repository, command.as_ref())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 列の並びを行として組み立てる。
+    fn row(cells: &[&str]) -> Vec<String> {
+        cells.iter().map(|cell| (*cell).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_column_is_padded_to_the_widest_value_in_the_list() {
+        let lines = align_columns(&[
+            row(&["fuzgit", "origin/main"]),
+            row(&["advent-calendar", "origin/master"]),
+            row(&["book-viewer", "hatohato25/main"]),
+        ]);
+
+        assert_eq!(
+            lines,
+            [
+                "fuzgit           origin/main",
+                "advent-calendar  origin/master",
+                "book-viewer      hatohato25/main",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_full_width_value_is_measured_by_how_wide_it_looks_not_by_how_many_characters_it_has() {
+        // 「リリース」は 4 文字だが端末では 8 セルを占める。文字数で埋めると桁が合わない
+        let lines = align_columns(&[row(&["リリース", "v1.0"]), row(&["release", "v2.0"])]);
+
+        assert_eq!(lines, ["リリース  v1.0", "release   v2.0"]);
+    }
+
+    #[test]
+    fn the_last_column_is_never_padded() {
+        let lines = align_columns(&[row(&["a", "short"]), row(&["b", "much longer value"])]);
+
+        for line in &lines {
+            assert_eq!(line.trim_end(), line, "行末に空白を残さない: {line:?}");
+        }
+    }
+
+    #[test]
+    fn a_row_that_ends_early_does_not_widen_the_column_it_ends_in() {
+        // タグ一覧のように、メッセージを持たない候補は名前が最終列になる
+        let lines = align_columns(&[row(&["v1.0", "リリース v1.0"]), row(&["v2.0-lightweight"])]);
+
+        assert_eq!(lines, ["v1.0  リリース v1.0", "v2.0-lightweight"]);
+    }
+
+    #[test]
+    fn a_row_with_more_columns_than_the_others_is_aligned_up_to_its_last_column() {
+        let lines = align_columns(&[
+            row(&["alpha", "origin/main"]),
+            row(&["bravo", "origin, upstream", "detached HEAD"]),
+            row(&["charlie", "origin", "detached HEAD"]),
+        ]);
+
+        assert_eq!(
+            lines,
+            [
+                "alpha    origin/main",
+                "bravo    origin, upstream  detached HEAD",
+                "charlie  origin            detached HEAD",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_candidate_is_left_as_it_is() {
+        assert_eq!(
+            align_columns(&[row(&["only", "origin/main"])]),
+            ["only  origin/main"]
+        );
+    }
+
+    #[test]
+    fn an_empty_list_produces_no_line() {
+        assert!(align_columns(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_candidate_without_any_column_produces_an_empty_line() {
+        assert_eq!(align_columns(&[Vec::new()]), [""]);
+    }
+
+    #[test]
+    fn every_candidate_keeps_its_own_line() {
+        let candidates = ["mike", "advent-calendar"];
+
+        let aligned = aligned_candidates(&candidates, |name| row(&[name, "origin/main"]));
+
+        assert_eq!(
+            aligned,
+            [
+                (&"mike", "mike             origin/main".to_owned()),
+                (
+                    &"advent-calendar",
+                    "advent-calendar  origin/main".to_owned()
+                ),
+            ]
+        );
     }
 }

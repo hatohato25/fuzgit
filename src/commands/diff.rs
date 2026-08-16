@@ -449,6 +449,7 @@ fn to_item(language: Language, range: &DiffRange, candidate: &FileCandidate) -> 
         PreviewSource::Git(file_preview_args(range, &candidate.key)),
         language.messages(),
     )
+    .with_highlights(candidate.highlights.clone())
 }
 
 /// `git diff <範囲> -- <pathspec>...` の引数を組み立てる。

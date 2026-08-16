@@ -110,9 +110,9 @@ through git's DWIM behavior.
 
 ```
 $ gz branch --all
-> * main
-    feature/login
-    origin/feature/search
+>  * main
+     feature/login
+     origin/feature/search
 ```
 
 **[`gz stash`](https://hatohato25.github.io/fuzgit/docs.html#stash) — search stashes and restore them**
@@ -128,16 +128,16 @@ confirmation (`[y/N]`) before running. `gz stash push` supports multi-select wit
 
 With `-s` / `--siblings`, fuzgit scans only the directory directly above the current worktree root
 (no recursion) and offers every directory containing a `.git` as a candidate. Each line is
-`<directory name>  <current branch>  <remote>`, and the current repository starts out selected.
+`<directory name>  <remote>/<current branch>`, and the current repository starts out selected.
 Multi-select with `Tab` to fetch several repositories at once. Repositories that can't be fetched are
 not silently dropped — the number excluded is shown in the header.
 
 ```
 $ gz fetch --siblings
 The current repository is preselected. Tab: toggle the selection / Enter: fetch  |  1 excluded (no remote / bare)
->>mike  main  origin
-  alpha  main  origin
-  zulu  main  origin
+>> mike   origin/main
+   alpha  origin/main
+   zulu   origin/main
 ```
 
 **[`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) — bring several branches up to date at once**

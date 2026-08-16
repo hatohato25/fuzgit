@@ -305,6 +305,7 @@ fn to_conflict_item(language: Language, candidate: &FileCandidate) -> FinderItem
         PreviewSource::Git(preview_args(&candidate.key)),
         language.messages(),
     )
+    .with_highlights(candidate.highlights.clone())
 }
 
 /// プレビュー用の `git diff` の引数を組み立てる。

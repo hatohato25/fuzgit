@@ -106,7 +106,10 @@ pub enum Command {
         source: Option<String>,
 
         /// Unstage the staged changes
-        #[arg(long)]
+        //
+        // `-S` は `git restore -S` と同じ綴り。同コマンドの `-s`（`--source`）との
+        // 大文字小文字の組み合わせまで git と一致する
+        #[arg(short = 'S', long)]
         staged: bool,
     },
 
@@ -211,7 +214,9 @@ pub enum Command {
     // リモートが 1 つだけの場合は選択の余地が無いため、finder を起動せず即座に取得する。
     Fetch {
         /// Also clean up the tracking refs of branches deleted on the remote
-        #[arg(long)]
+        //
+        // `-p` は `git fetch -p` と同じ綴り
+        #[arg(short, long)]
         prune: bool,
 
         /// Include the repositories next to this one and fetch them all at once
@@ -232,7 +237,10 @@ pub enum Command {
     // git のエラーをそのまま表示して停止し、暗黙に merge / rebase へ倒さない。
     Sync {
         /// Integrate by rebasing onto the upstream (rewrites history)
-        #[arg(long, conflicts_with_all = ["merge"])]
+        //
+        // `-r` は `git pull -r` と同じ綴り。`--merge` に短縮形を付けないのは、
+        // `git pull` に対応する綴りが無く、git 全体では `-m` が `--message` を指すため
+        #[arg(short, long, conflicts_with_all = ["merge"])]
         rebase: bool,
 
         /// Integrate by merging the upstream
@@ -268,7 +276,9 @@ pub enum BranchCommand {
     /// Pick a branch and delete it
     Delete {
         /// Delete a branch even when it is not merged (`git branch -D`)
-        #[arg(long)]
+        //
+        // `-f` は `git branch -f` と同じ綴り
+        #[arg(short, long)]
         force: bool,
 
         /// Branch that `merged` is judged against (defaults to HEAD)
@@ -984,11 +994,76 @@ mod tests {
     }
 
     #[test]
-    fn fetch_takes_the_prune_flag() {
-        let cli = Cli::try_parse_from(["gz", "fetch", "--prune"]).expect("fetch should parse");
+    fn the_short_options_follow_git() {
+        // 短縮形は git 本体に同じ意味の綴りがあるものだけに付ける。
+        // `gz restore` は `-s`（`--source`）と `-S`（`--staged`）の大文字小文字の
+        // 組み合わせまで `git restore` と一致する
+        let cli =
+            Cli::try_parse_from(["gz", "restore", "-S"]).expect("`gz restore -S` should parse");
         match cli.command {
-            Command::Fetch { prune, .. } => assert!(prune),
+            Command::Restore { staged, source } => {
+                assert!(staged, "-S should mean --staged");
+                assert_eq!(source, None, "-S must not be mistaken for --source");
+            }
             other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["gz", "restore", "-s", "HEAD~1"])
+            .expect("`gz restore -s` should still take a value");
+        match cli.command {
+            Command::Restore { staged, source } => {
+                assert_eq!(source.as_deref(), Some("HEAD~1"));
+                assert!(!staged, "-s must not enable --staged");
+            }
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        // `git pull -r` と同じ綴り
+        let cli = Cli::try_parse_from(["gz", "sync", "-r"]).expect("`gz sync -r` should parse");
+        match cli.command {
+            Command::Sync { rebase, merge } => assert_eq!((rebase, merge), (true, false)),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        // `git branch -f` と同じ綴り
+        let cli = Cli::try_parse_from(["gz", "branch", "delete", "-f"])
+            .expect("`gz branch delete -f` should parse");
+        match cli.command {
+            Command::Branch {
+                command: Some(BranchCommand::Delete { force, .. }),
+                ..
+            } => assert!(force),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_options_without_a_git_counterpart_have_no_short_form() {
+        // `git tag -d` はタグ削除、`git tag -s` は GPG 署名、`git commit -s` は signoff。
+        // 同じ綴りに別の意味を与えると誤操作を招くため、これらには短縮形を付けない
+        for arguments in [
+            ["gz", "tag", "-d"],
+            ["gz", "tag", "-s"],
+            ["gz", "fixup", "-s"],
+            ["gz", "sync", "-m"],
+        ] {
+            assert!(
+                Cli::try_parse_from(arguments).is_err(),
+                "{arguments:?} must not be accepted as a short form"
+            );
+        }
+    }
+
+    #[test]
+    fn fetch_takes_the_prune_flag() {
+        // 短縮形は `git fetch -p` と同じ綴り
+        for argument in ["--prune", "-p"] {
+            let cli = Cli::try_parse_from(["gz", "fetch", argument])
+                .unwrap_or_else(|err| panic!("`gz fetch {argument}` should parse: {err}"));
+            match cli.command {
+                Command::Fetch { prune, .. } => assert!(prune, "`{argument}` should enable it"),
+                other => panic!("unexpected subcommand: {other:?}"),
+            }
         }
 
         let cli = Cli::try_parse_from(["gz", "fetch"]).expect("fetch should parse bare");
