@@ -1,0 +1,177 @@
+name: Tag and Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  create-release:
+    name: Determine Version and Create Release
+    runs-on: ubuntu-slim
+    outputs:
+      next_tag: ${{ steps.version.outputs.next_tag }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Determine next version
+        id: version
+        run: |
+          # 直前のタグを取得。存在しない場合は空文字のままにする
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "Previous tag: ${PREV_TAG:-(none)}"
+
+          if [ -n "$PREV_TAG" ]; then
+            BASE_VERSION="${PREV_TAG#v}"
+            # 前回タグから HEAD までを対象にする
+            COMMIT_RANGE="${PREV_TAG}..HEAD"
+          else
+            # 初回リリースではタグが実在しないため "v0.0.0..HEAD" は fatal になる。
+            # バージョンの起点だけ 0.0.0 とし、コミットの対象は全履歴にする
+            BASE_VERSION="0.0.0"
+            COMMIT_RANGE="HEAD"
+          fi
+
+          # semver の各コンポーネントを抽出
+          MAJOR=$(echo "$BASE_VERSION" | cut -d. -f1)
+          MINOR=$(echo "$BASE_VERSION" | cut -d. -f2)
+          PATCH=$(echo "$BASE_VERSION" | cut -d. -f3)
+
+          # 対象範囲のコミットメッセージを取得
+          COMMITS=$(git log $COMMIT_RANGE --format="%s")
+
+          # BREAKING CHANGE または '!:' を含む場合はメジャーバージョンアップ
+          if echo "$COMMITS" | grep -qE '(BREAKING CHANGE|!:)'; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+          # feat: を含む場合はマイナーバージョンアップ（"mod feat:" のようなプレフィックス付きも対象）
+          elif echo "$COMMITS" | grep -qE '(^|[[:space:]])feat(\(.+\))?:'; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+          else
+            PATCH=$((PATCH + 1))
+          fi
+
+          NEXT_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "Next tag: $NEXT_TAG"
+          echo "prev_tag=$PREV_TAG" >> "$GITHUB_OUTPUT"
+          echo "commit_range=$COMMIT_RANGE" >> "$GITHUB_OUTPUT"
+          echo "next_tag=$NEXT_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          PREV_TAG="${{ steps.version.outputs.prev_tag }}"
+          COMMIT_RANGE="${{ steps.version.outputs.commit_range }}"
+          NEXT_TAG="${{ steps.version.outputs.next_tag }}"
+
+          # コミット一覧を取得（短縮ハッシュ + サブジェクト）
+          COMMITS=$(git log $COMMIT_RANGE --format="%h %s")
+
+          FEATURES=""
+          BUGFIXES=""
+          CICD=""
+          OTHER=""
+
+          while IFS= read -r line; do
+            # 対象コミットが 0 件のときに空行を項目化しないよう読み飛ばす
+            [ -z "$line" ] && continue
+
+            HASH=$(echo "$line" | cut -d' ' -f1)
+            MSG=$(echo "$line" | cut -d' ' -f2-)
+
+            if echo "$MSG" | grep -qE '(^|[[:space:]])feat(\(.+\))?[!]?:'; then
+              FEATURES="${FEATURES}- ${MSG} (${HASH})\n"
+            elif echo "$MSG" | grep -qE '(^|[[:space:]])fix(\(.+\))?[!]?:'; then
+              BUGFIXES="${BUGFIXES}- ${MSG} (${HASH})\n"
+            elif echo "$MSG" | grep -qE '(^|[[:space:]])(ci|cd)(\(.+\))?[!]?:'; then
+              CICD="${CICD}- ${MSG} (${HASH})\n"
+            else
+              OTHER="${OTHER}- ${MSG} (${HASH})\n"
+            fi
+          done <<< "$COMMITS"
+
+          # リリースノートを組み立てる
+          NOTES="## What's Changed\n\n"
+
+          if [ -n "$FEATURES" ]; then
+            NOTES="${NOTES}### Features\n${FEATURES}\n"
+          fi
+
+          if [ -n "$BUGFIXES" ]; then
+            NOTES="${NOTES}### Bug Fixes\n${BUGFIXES}\n"
+          fi
+
+          if [ -n "$CICD" ]; then
+            NOTES="${NOTES}### CI/CD\n${CICD}\n"
+          fi
+
+          if [ -n "$OTHER" ]; then
+            NOTES="${NOTES}### Other Changes\n${OTHER}\n"
+          fi
+
+          REPO="hatohato25/fuzgit"
+          if [ -n "$PREV_TAG" ]; then
+            NOTES="${NOTES}**Full Changelog**: https://github.com/${REPO}/compare/${PREV_TAG}...${NEXT_TAG}"
+          else
+            # 前タグが無い初回リリースでは compare URL が成立しないため、タグまでのコミット一覧を指す
+            NOTES="${NOTES}**Full Changelog**: https://github.com/${REPO}/commits/${NEXT_TAG}"
+          fi
+
+          # 複数行の値を GITHUB_OUTPUT に安全に書き出す
+          {
+            echo "body<<RELEASE_NOTES_EOF"
+            printf "%b" "$NOTES"
+            echo ""
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update Cargo.toml version
+        run: |
+          NEXT_TAG="${{ steps.version.outputs.next_tag }}"
+          VERSION="${NEXT_TAG#v}"
+          sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml
+
+          # Cargo.toml が既に次バージョンの場合（初回リリースの 0.1.0 など）は差分が出ない。
+          # 空コミットは git commit が非ゼロ終了してジョブを落とすため、差分があるときだけコミットする
+          if git diff --cached --quiet; then
+            echo "Cargo.toml is already at ${VERSION}; skipping the bump commit"
+          else
+            git commit -m "chore: bump version to ${VERSION}"
+            git push origin HEAD
+          fi
+
+      - name: Create and push tag
+        run: |
+          NEXT_TAG="${{ steps.version.outputs.next_tag }}"
+          git tag "$NEXT_TAG"
+          git push origin "$NEXT_TAG"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ steps.version.outputs.next_tag }}
+          name: ${{ steps.version.outputs.next_tag }}
+          body: ${{ steps.notes.outputs.body }}
+          draft: false
+          prerelease: false
+
+  build-and-publish:
+    name: Build and Publish
+    needs: create-release
+    uses: ./.github/workflows/build-and-publish.yml
+    with:
+      tag_name: ${{ needs.create-release.outputs.next_tag }}
+    secrets:
+      HOMEBREW_GITHUB_TOKEN: ${{ secrets.HOMEBREW_GITHUB_TOKEN }}
+    permissions:
+      contents: write

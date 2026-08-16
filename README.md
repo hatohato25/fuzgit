@@ -32,6 +32,29 @@ documentation site.**
 
 ## Installation
 
+### Homebrew (recommended)
+
+```sh
+brew install hatohato25/fuzgit/fuzgit
+```
+
+Or tap first, then install:
+
+```sh
+brew tap hatohato25/fuzgit
+brew install fuzgit
+```
+
+The formula is named `fuzgit`, but **the installed command is `gz`**.
+
+```sh
+gz --version
+```
+
+Prebuilt binaries are provided for macOS (Apple Silicon / Intel) and Linux (x86_64).
+
+### From source
+
 The crate is not published on crates.io yet, so clone the repository and install locally.
 
 ```sh

@@ -1,0 +1,130 @@
+name: Build and Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_call:
+    inputs:
+      tag_name:
+        description: 'Tag name to build (e.g. v0.1.0)'
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_GITHUB_TOKEN:
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    env:
+      # workflow_call 経由では inputs.tag_name、タグ push 経由では github.ref_name を使う
+      TAG_NAME: ${{ inputs.tag_name != '' && inputs.tag_name || github.ref_name }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.tag_name != '' && inputs.tag_name || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Install musl-tools
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Create tarball
+        id: tarball
+        run: |
+          # パッケージ名は fuzgit だが、生成されるバイナリは gz（Cargo.toml の [[bin]] name）
+          TARBALL="fuzgit-${TAG_NAME}-${{ matrix.target }}.tar.gz"
+          tar -czf "$TARBALL" -C target/${{ matrix.target }}/release gz
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            sha256sum "$TARBALL" > "$TARBALL.sha256"
+          else
+            shasum -a 256 "$TARBALL" > "$TARBALL.sha256"
+          fi
+          echo "name=$TARBALL" >> $GITHUB_OUTPUT
+
+      - name: Upload to GitHub Releases
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ env.TAG_NAME }}
+          files: |
+            ${{ steps.tarball.outputs.name }}
+            ${{ steps.tarball.outputs.name }}.sha256
+
+  update-formula:
+    name: Update Homebrew Formula
+    needs: build
+    runs-on: ubuntu-slim
+    steps:
+      - name: Checkout homebrew-fuzgit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: hatohato25/homebrew-fuzgit
+          token: ${{ secrets.HOMEBREW_GITHUB_TOKEN }}
+
+      - name: Download sha256 files from release
+        run: |
+          VERSION="${{ inputs.tag_name != '' && inputs.tag_name || github.ref_name }}"
+          BASE_URL="https://github.com/hatohato25/fuzgit/releases/download/${VERSION}"
+
+          # リリースアセットの反映にはラグがあるため、取得できるまでリトライする
+          fetch_sha256() {
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
+              "${BASE_URL}/fuzgit-${VERSION}-$1.tar.gz.sha256" | awk '{print $1}'
+          }
+
+          # sha256ファイルの形式は "<sha256値>  <ファイル名>" のため awk で先頭フィールドを取得する
+          AARCH64_DARWIN_SHA256=$(fetch_sha256 aarch64-apple-darwin)
+          X86_64_DARWIN_SHA256=$(fetch_sha256 x86_64-apple-darwin)
+          X86_64_LINUX_SHA256=$(fetch_sha256 x86_64-unknown-linux-musl)
+
+          echo "AARCH64_DARWIN_SHA256=$AARCH64_DARWIN_SHA256" >> $GITHUB_ENV
+          echo "X86_64_DARWIN_SHA256=$X86_64_DARWIN_SHA256" >> $GITHUB_ENV
+          echo "X86_64_LINUX_SHA256=$X86_64_LINUX_SHA256" >> $GITHUB_ENV
+          echo "VERSION=${VERSION#v}" >> $GITHUB_ENV
+
+      - name: Update Formula
+        run: |
+          FORMULA="Formula/fuzgit.rb"
+
+          # Formula 側の各行末に付けた "# <target>" をアンカーにして置換する。
+          # 出現順に依存する grep -m1 / tail -1 方式はターゲットが増えると壊れるため使わない。
+          sed -i -E "s|^( *)version \".*\"|\1version \"${VERSION}\"|" "$FORMULA"
+          sed -i -E "s|sha256 \".*\" # aarch64-apple-darwin|sha256 \"${AARCH64_DARWIN_SHA256}\" # aarch64-apple-darwin|" "$FORMULA"
+          sed -i -E "s|sha256 \".*\" # x86_64-apple-darwin|sha256 \"${X86_64_DARWIN_SHA256}\" # x86_64-apple-darwin|" "$FORMULA"
+          sed -i -E "s|sha256 \".*\" # x86_64-unknown-linux-musl|sha256 \"${X86_64_LINUX_SHA256}\" # x86_64-unknown-linux-musl|" "$FORMULA"
+
+          echo "Updated: version=${VERSION}"
+          echo "  aarch64-apple-darwin=${AARCH64_DARWIN_SHA256}"
+          echo "  x86_64-apple-darwin=${X86_64_DARWIN_SHA256}"
+          echo "  x86_64-unknown-linux-musl=${X86_64_LINUX_SHA256}"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/fuzgit.rb
+          git commit -m "Update fuzgit to v${VERSION}"
+          git push

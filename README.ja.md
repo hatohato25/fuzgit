@@ -31,6 +31,29 @@ fuzzy finder で「選ぶ」「探す」「辿る」ことを軸にした git �
 
 ## インストール
 
+### Homebrew（推奨）
+
+```sh
+brew install hatohato25/fuzgit/fuzgit
+```
+
+先に tap を追加してからでも構いません。
+
+```sh
+brew tap hatohato25/fuzgit
+brew install fuzgit
+```
+
+Formula 名は `fuzgit` ですが、**インストールされるコマンドは `gz`** です。
+
+```sh
+gz --version
+```
+
+ビルド済みバイナリは macOS（Apple Silicon / Intel）と Linux（x86_64）向けに提供しています。
+
+### ソースからインストール
+
 crates.io へは未公開のため、リポジトリを取得してローカルからインストールします。
 
 ```sh

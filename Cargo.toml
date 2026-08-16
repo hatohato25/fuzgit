@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "fuzzy finder で「選ぶ」「探す」「辿る」git 操作 CLI ツール"
 license = "MIT"
-repository = "https://github.com/nasu-hayato/fuzgit"
+repository = "https://github.com/hatohato25/fuzgit"
+homepage = "https://hatohato25.github.io/fuzgit/"
 
 [lib]
 name = "fuzgit"
