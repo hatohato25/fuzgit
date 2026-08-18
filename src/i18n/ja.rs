@@ -294,6 +294,10 @@ impl ErrorMessages for JapaneseErrorMessages {
                 operation = filesystem_operation_text(*operation),
                 path = path.display()
             ),
+            Error::InvalidFetchJobs { value } => format!(
+                "git config `fuzgit.fetchJobs` の値 `{value}` は同時実行数として使えません。\
+                 1 以上の整数を設定するか、設定を削除して既定値に戻してください"
+            ),
             Error::Cancelled => "選択が中断されました".to_owned(),
             Error::NoCandidates => "選択できる候補がありません".to_owned(),
             Error::FinderFailed { message } => {
@@ -1180,6 +1184,12 @@ impl FetchMessages for JapaneseFetchMessages {
 
     fn sibling_start_failed(&self, name: &str) -> String {
         format!("`{name}` の取得を開始できませんでした")
+    }
+
+    fn serial_fallback(&self, count: usize) -> String {
+        format!(
+            "並列での取得に失敗した {count} 件を、認証情報を入力できる形で 1 件ずつ実行し直します"
+        )
     }
 
     fn partial_failure(&self) -> &'static str {

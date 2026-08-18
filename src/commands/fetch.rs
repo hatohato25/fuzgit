@@ -7,8 +7,9 @@
 //! 1 件ずつ取得する経路（[`run_siblings`]）を持つ。
 //!
 //! fuzgit で初めてネットワークを伴うコマンドだが、ネットワークへ出るのは
-//! 対象が決まったあとに継承 stdio で実行する `git fetch` だけである
-//! （`--siblings` では選択件数分を直列に実行する）。
+//! 対象が決まったあとに実行する `git fetch` だけである（`--siblings` では選択件数分を
+//! 並列に実行し、対話が必要になって失敗したものだけを継承 stdio で実行し直す。
+//! [`fetch_each`]）。
 //! 候補生成とプレビューはローカル情報（`.git/config` の URL と保存済みの
 //! リモート追跡参照）のみを読む（design.md「候補生成・プレビューでネットワーク
 //! アクセスを行わない」）。プレビューは選択項目ごとに都度実行されるため、
@@ -17,16 +18,20 @@
 //! タイムアウト・リトライ・認証情報の取り扱いは行わない。到達不能・認証拒否は
 //! git の標準メッセージのまま非ゼロ終了する。
 
+use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use gix::bstr::ByteSlice as _;
 
 use crate::commands::aligned_candidates;
 use crate::error::Error;
 use crate::finder::{
     FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with, select_one,
 };
-use crate::git::exec::{run_git, run_git_in};
+use crate::git::exec::{CapturedRun, capture_git_noninteractive_in, run_git, run_git_in};
 use crate::git::read::{branch_tracking_args, remote_tracking_refs_args, remote_url_args, remotes};
 use crate::git::siblings::{self, SiblingRepository, SiblingScan};
 use crate::i18n::{Language, Messages};
@@ -56,6 +61,29 @@ const DETACHED_LABEL: &str = "detached HEAD";
 /// プレビューは他人のリポジトリに対して選択項目ごとに実行されるため、
 /// 他のプロセスが動作中でも干渉しないよう、ロックを要する操作を行わせない（man git）。
 const NO_OPTIONAL_LOCKS: &str = "--no-optional-locks";
+
+/// `gz fetch --siblings` の同時実行数を上書きする git config のキー（FR-28）。
+///
+/// CLI フラグ（`--jobs`）は設けない。同時実行数は「毎回選ぶ」性質の値ではなく、恒久的な
+/// 調整は設定で足りるためである。置き場所を `fuzgit.*` に揃えているのは、fuzgit の設定を
+/// 1 つの名前空間から辿れるようにするため（`fuzgit.lang` と同じ方針）。
+///
+/// **この設定を読むのは `gz fetch --siblings` だけ**である。`gz pull` / `gz sync` /
+/// `--siblings` の無い `gz fetch` は直列・継承 stdio のままであり、同時実行数という概念を
+/// 持たない（design.md「設定の読み取り」）。
+const FETCH_JOBS_CONFIG_KEY: &str = "fuzgit.fetchJobs";
+
+/// 同時実行数の既定値（4）。
+///
+/// CPU 数に比例させない。fetch は I/O バウンドであり、CPU 数は通信先が受け入れられる
+/// 同時接続数とは無関係だからである。同一ホストへ集中しがちな用途であることと、
+/// `git fetch` 1 件につき補助プロセス（`git-remote-https` / `ssh` / `index-pack`）が
+/// 立つことを踏まえた値（design.md「同時実行数の既定値と上書き手段」）。
+///
+/// `const` で `NonZeroUsize` を組み立てるために [`NonZeroUsize::MIN`]（＝1）からの加算で
+/// 書く。`NonZeroUsize::new(4)` は `Option` を返すため、ここで取り出そうとすると
+/// 本番コードに `unwrap` が現れてしまう。
+const DEFAULT_FETCH_JOBS: NonZeroUsize = NonZeroUsize::MIN.saturating_add(3);
 
 /// リモートで削除されたブランチの追跡参照を掃除するかどうか。
 ///
@@ -199,7 +227,7 @@ fn run_current(
     Ok(())
 }
 
-/// 兄弟リポジトリを選び、選択された順ではなく候補順に 1 件ずつ `git fetch --all` を実行する。
+/// 兄弟リポジトリを選び、選択された順ではなく候補順に `git fetch --all` を実行する（[`fetch_each`]）。
 ///
 /// 通信先が複数になるため、対象は必ずユーザーの選択（または「現在のリポジトリ 1 件のみ」という
 /// 選択の余地が無い状況）で決まる。
@@ -237,11 +265,16 @@ fn run_siblings(
         }
     };
 
+    // 同時実行数は 1 件も実行しないうちに解決する（不正な設定のまま通信を始めない）
+    let jobs = fetch_jobs(repository)?;
+
     let summary = fetch_each(
         messages,
         &targets,
         prune,
+        jobs,
         &mut std::io::stderr(),
+        |directory, arguments| capture_git_noninteractive_in(language, directory, arguments),
         |directory, arguments| run_git_in(language, directory, arguments),
     )?;
     report_line(
@@ -472,12 +505,18 @@ fn has_key(candidate: &SiblingRepository, key: &str) -> bool {
     candidate.workdir == Path::new(key)
 }
 
-/// 直列実行の結果。
+/// 2 フェーズ実行（並列 → 失敗分の直列）の集計。
+///
+/// 対象ごとの成否は「その対象を**最後に**実行したフェーズの結果」であり、並列で失敗して
+/// 直列で成功した対象は成功として 1 回だけ数える。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct FetchSummary {
     /// 取得に成功したリポジトリの件数。
     succeeded: usize,
-    /// 取得に失敗したリポジトリのディレクトリ名（実行順）。
+    /// 取得に失敗したリポジトリのディレクトリ名（候補一覧の順）。
+    ///
+    /// 実行順ではなく候補順で並べる。並列フェーズの実行順は決まらないため、実行順で並べると
+    /// 同じ入力から違う表示が出る。
     failed: Vec<String>,
 }
 
@@ -488,40 +527,145 @@ impl FetchSummary {
     }
 }
 
-/// 選択されたリポジトリへ 1 件ずつ `git fetch` を実行する。
+/// `gz fetch --siblings` の同時実行数を解決する。
 ///
-/// 並列化しない（git 自身も複数リモートの fetch を既定で逐次実行する。man git-fetch）。
-/// 認証プロンプトが出た場合にどのリポジトリのものか分かるよう、実行前に進捗を書き出す。
+/// **`git` プロセスを起動しない。**`gix` のプロセス内読み取り（`config_snapshot`）で
+/// 現在のリポジトリの設定（system / global / local / worktree の階層がそのまま効く）から
+/// 引く。兄弟ごとに設定を変えられるようにはしない。1 回の起動で実行方法は 1 つに定める
+/// （design.md「設定の読み取り」）。
 ///
-/// 実行そのものを引数で受け取るのは、ネットワークや git の有無に依存せず
-/// 集計と中断の判断を単体テストできるようにするため（本番は表示言語を束ねた [`run_git_in`] を渡す）。
+/// 値の解釈は純関数（[`parse_fetch_jobs`]）へ分けてあり、この関数は設定を読むだけである
+/// （`i18n::resolve` の「純関数と取得層の分離」と同じ形。解釈規則を環境に依存せず
+/// 単体テストできるようにするため）。
+///
+/// # Errors
+///
+/// `fuzgit.fetchJobs` に 0・負数・整数でない値が設定されている場合は
+/// [`Error::InvalidFetchJobs`]。呼び出し側は**実行を始める前に**これを解決し、
+/// 不正な設定のまま通信を始めないようにする。
+pub fn fetch_jobs(repository: &gix::Repository) -> crate::error::Result<NonZeroUsize> {
+    parse_fetch_jobs(fetch_jobs_setting(repository).as_deref())
+}
+
+/// `git config fuzgit.fetchJobs` の値をそのまま読む（取得層）。
+///
+/// 空文字も整数でない値も**ここでは落とさない**。「未設定として扱う」「不正値として停止する」
+/// という判断はすべて [`parse_fetch_jobs`] が持ち、この関数は読み取りだけを担う
+/// （判断を 2 か所に分けると、どちらを直せばよいのか分からなくなるため）。
+///
+/// UTF-8 でない値も「未設定」へ倒さず、ロッシー変換した文字列を不正値として解釈側へ渡す
+/// （`fuzgit.lang` の層 3 と同じ扱い）。
+fn fetch_jobs_setting(repository: &gix::Repository) -> Option<String> {
+    repository
+        .config_snapshot()
+        .string(FETCH_JOBS_CONFIG_KEY)
+        .map(|value| value.to_str_lossy().into_owned())
+}
+
+/// `fuzgit.fetchJobs` の値を同時実行数として解釈する（純関数）。
+///
+/// 未設定（`None`）と空文字は [`DEFAULT_FETCH_JOBS`] とする。空文字を「未設定」とみなすのは
+/// `FUZGIT_LANG` / `fuzgit.lang` の扱いと揃えるためで、`git config fuzgit.fetchJobs ""` が
+/// 言語設定では規定動作になるのにここだけ停止する、という食い違いを作らない。
+///
+/// # Errors
+///
+/// 0・負数・整数でない値は [`Error::InvalidFetchJobs`] で停止する。既定値へ黙って倒すと、
+/// 利用者が指定したつもりの同時実行数と実際の動作が食い違ったまま通信が始まる
+/// （暗黙のフォールバック禁止。`fuzgit.lang` の明示指定と同じ扱い）。
+fn parse_fetch_jobs(value: Option<&str>) -> crate::error::Result<NonZeroUsize> {
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Ok(DEFAULT_FETCH_JOBS);
+    };
+
+    // 0・負数・整数でない値を [`NonZeroUsize`] への解釈でまとめて弾く。3 者を区別しないのは、
+    // どれも「1 以上の整数を書く」という同じ直し方に収束し、区別しても次の操作が変わらないため
+    value.parse().map_err(|_| Error::InvalidFetchJobs {
+        value: value.to_owned(),
+    })
+}
+
+/// 選択されたリポジトリを並列で取得し、失敗したものだけを直列で実行し直す（FR-28）。
+///
+/// # 並列化しない、という判断を覆した理由
+///
+/// 以前は「git 自身も複数リモートの fetch を既定で逐次実行する（man git-fetch）」ことを根拠に
+/// 並列化しないと決めていた。この根拠が語っているのは**1 つのリポジトリの複数リモート**の話で
+/// あり、`--siblings` の対象は**別々のリポジトリ**であって同じ `.git` を書かない
+/// （[`siblings::discover`] が同じワークツリーを重複して返さない）。所要時間は通信の往復に
+/// 支配され対象数に比例して伸びるため、ここでは並列化する。覆したのはこの 1 点だけであり、
+/// `gz pull` の取り込み（同一リポジトリへの書き込み）と `--siblings` を伴わない `gz fetch`
+/// （対象が実質 1 つ）は直列のままである。
+///
+/// # 2 フェーズ実行
+///
+/// 1. **並列フェーズ**: 同時に `jobs` 件まで実行する。複数の git の出力が端末で混ざると
+///    どのリポジトリのものか読み取れないため、出力は対象ごとにキャプチャして受け取り、
+///    進捗行と本文を 1 回のロックでまとめて書き出す。対話（認証情報の入力）はこのフェーズでは
+///    構造的に禁じてあるため、passphrase や資格情報を要する対象はここで失敗する
+/// 2. **直列フェーズ**: 並列フェーズで失敗した対象**だけ**を、端末を継承した従来どおりの実行で
+///    1 件ずつ実行し直す。プロンプトが出ても直前の進捗行でどのリポジトリのものか分かる。
+///    **リトライではなく実行は 1 回だけ**であり、自動再試行はしない。並列フェーズでの失敗理由を
+///    ここで再掲しないのは、実行し直した git 自身がその場で理由を出すためである（二重に並べない）
+///
+/// 対象の最終的な成否は「その対象を**最後に**実行したフェーズの結果」であり、二重に数えない。
+/// 失敗した対象の一覧は実行順ではなく候補一覧の順に並ぶ（並列フェーズの実行順は決まらないため、
+/// 実行順で並べると同じ入力から違う表示が出る）。
+///
+/// 実行そのものを引数で受け取るのは、ネットワークや git の有無に依存せず集計と中断の判断を
+/// 単体テストできるようにするため（本番は表示言語を束ねた
+/// [`capture_git_noninteractive_in`] / [`run_git_in`] を渡す）。`parallel` は複数のワーカーから
+/// 同時に呼ばれるため `Fn + Sync`、`serial` は 1 本の流れでしか呼ばれないため `FnMut` でよい。
 ///
 /// # Errors
 ///
 /// git の起動自体に失敗した場合（[`Error::GitNotFound`] / [`Error::GitSpawnFailed`]）は
-/// 環境の問題でありリポジトリごとの失敗ではないため、残りを実行せずその場で返す。
+/// 環境の問題でありリポジトリごとの失敗ではないため、**未着手の対象を実行せず**その場で返す
+/// （既に走っている git は完了を待つ。強制終了する経路は作らない）。
 /// 進捗の書き込みに失敗した場合も同様。
 fn fetch_each(
     messages: &dyn Messages,
     targets: &[&SiblingRepository],
     prune: PruneMode,
-    writer: &mut impl std::io::Write,
-    mut fetch: impl FnMut(&Path, &[&str]) -> crate::error::Result<()>,
+    jobs: NonZeroUsize,
+    writer: &mut (impl std::io::Write + Send),
+    parallel: impl Fn(&Path, &[&str]) -> crate::error::Result<CapturedRun> + Sync,
+    mut serial: impl FnMut(&Path, &[&str]) -> crate::error::Result<()>,
 ) -> Result<FetchSummary> {
     let arguments = sibling_fetch_args(prune);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
 
+    let outcomes = fetch_in_parallel(messages, targets, &arguments, jobs, writer, parallel)?;
+
     let mut summary = FetchSummary::default();
-    for (index, target) in targets.iter().enumerate() {
-        // git fetch の更新表も stderr に出るため、この区切りが無いとどのリポジトリの
-        // 出力なのか読み取れない（man git-fetch OUTPUT 節）
+    let mut retries: Vec<&SiblingRepository> = Vec::new();
+    for (target, outcome) in targets.iter().copied().zip(&outcomes) {
+        match outcome {
+            Some(Outcome::Succeeded) => summary.succeeded += 1,
+            // 結果を残せなかった対象（`None`）も直列フェーズへ回す。中断した場合は上で
+            // エラーを返しているためここには来ないが、結果の無いものを成功へ倒さない
+            Some(Outcome::Failed) | None => retries.push(target),
+        }
+    }
+
+    if !retries.is_empty() {
+        // 黙って実行し直さない。同じ対象の出力が二度出る理由と、ここから先は対話し得ることを示す
         report_line(
             messages,
             writer,
-            &progress_line(index, targets.len(), target),
+            &messages.fetch().serial_fallback(retries.len()),
+        )?;
+    }
+
+    for (index, target) in retries.iter().enumerate() {
+        // 認証プロンプトが出た場合にどのリポジトリのものか分かるよう、実行の前に書き出す
+        report_line(
+            messages,
+            writer,
+            &progress_line(index, retries.len(), target),
         )?;
 
-        match fetch(&target.workdir, &arguments) {
+        match serial(&target.workdir, &arguments) {
             Ok(()) => summary.succeeded += 1,
             // 個々のリポジトリの失敗（到達不能・認証拒否など）は記録して次へ進む。
             // git 自身が理由をその場で表示済みであり、ここでは再掲しない
@@ -534,6 +678,195 @@ fn fetch_each(
     }
 
     Ok(summary)
+}
+
+/// 並列フェーズ。対象を候補順に取り出して同時に `jobs` 件まで実行し、対象ごとの結果を返す。
+///
+/// 戻り値は候補一覧と同じ添字で、`None` は「結果を残せなかった対象」を表す
+/// （中断した場合はエラーを返すため、呼び出し側が `None` を受け取ることは無い）。
+///
+/// # Errors
+///
+/// [`Error::GitNotFound`] / [`Error::GitSpawnFailed`] を最初に観測したものを、
+/// どのリポジトリで起きたかの文脈を添えて返す。進捗の書き込みに失敗した場合も同様。
+fn fetch_in_parallel<W: std::io::Write + Send>(
+    messages: &dyn Messages,
+    targets: &[&SiblingRepository],
+    arguments: &[&str],
+    jobs: NonZeroUsize,
+    writer: &mut W,
+    parallel: impl Fn(&Path, &[&str]) -> crate::error::Result<CapturedRun> + Sync,
+) -> Result<Vec<Option<Outcome>>> {
+    let total = targets.len();
+    let shared = Mutex::new(ParallelPhase {
+        writer,
+        completed: 0,
+        outcomes: vec![None; total],
+        stopped: false,
+        failure: None,
+    });
+
+    // 次に取る対象は共有のカウンタで決める。あらかじめ配らずに取りに行かせることで、
+    // 対象ごとの所要時間の偏り（通信量が違う）がそのまま待ち時間にならない
+    let next = AtomicUsize::new(0);
+
+    // 対象より多くのワーカーを立てても何も取れないまま終わるだけなので、対象数で頭打ちにする
+    let workers = jobs.get().min(total);
+
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    // 添字で取り出すことで、範囲の判定と対象の取得を 1 か所に閉じる
+                    let Some(target) = targets.get(index) else {
+                        break;
+                    };
+
+                    // 中断が決まっていれば新しい対象は取らない。ここで止まるのは
+                    // **未着手の対象**だけであり、既に走っている git は完了を待つ
+                    if locked(&shared).stopped {
+                        break;
+                    }
+
+                    let result = parallel(&target.workdir, arguments);
+                    locked(&shared).record(messages, index, total, target, result);
+                }
+            });
+        }
+    });
+
+    let phase = shared
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match phase.failure {
+        Some(failure) => Err(failure),
+        None => Ok(phase.outcomes),
+    }
+}
+
+/// 並列フェーズにおける対象 1 件分の結果。
+///
+/// 「まだ実行していない」はこの列挙に含めず `Option` の `None` で表す。実行していないことと
+/// 失敗したことを同じ型で表すと、直列フェーズへ回す判断で取り違えるため。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// `git fetch` が正常終了した。
+    Succeeded,
+    /// `git fetch` が非ゼロ終了した（到達不能・認証拒否・対話が必要になった等）。
+    Failed,
+}
+
+/// 並列フェーズのワーカーが共有する状態。
+///
+/// 書き出し先・完了件数・結果・中断の判断を**1 つの [`Mutex`] にまとめて**守る。
+/// ロックを分けると進捗行と本文の間に他の対象の出力が割り込み得るため、
+/// 「1 対象分の出力は他の対象の出力と混ざらない」という不変条件を構造で担保できなくなる。
+struct ParallelPhase<'writer, W> {
+    /// 進捗行と git の出力の書き出し先。
+    writer: &'writer mut W,
+    /// 並列フェーズを終えた対象の件数（成否を問わない）。進捗行の分子になる。
+    completed: usize,
+    /// 対象ごとの結果（候補一覧と同じ添字）。
+    outcomes: Vec<Option<Outcome>>,
+    /// 新しい対象を取るのをやめるかどうか。
+    stopped: bool,
+    /// 最初に観測した中断の理由。
+    failure: Option<anyhow::Error>,
+}
+
+impl<W: std::io::Write> ParallelPhase<'_, W> {
+    /// 対象 1 件の結果を記録し、進捗行と git の出力を続けて書き出す。
+    ///
+    /// 書き出しをこの 1 か所に閉じ、呼び出し側がロックを取ったまま 1 回だけ呼ぶことで、
+    /// 進捗行と本文の間に他の対象の出力が割り込む余地を無くす。
+    fn record(
+        &mut self,
+        messages: &dyn Messages,
+        index: usize,
+        total: usize,
+        target: &SiblingRepository,
+        result: crate::error::Result<CapturedRun>,
+    ) {
+        let run = match result {
+            Ok(run) => Some(run),
+            // 個々のリポジトリの失敗は直列フェーズへ回す。理由はそこで git 自身が示すため、
+            // このフェーズでは画面へ出さない（[`Error::GitRunFailed`] は出力を持たない）
+            Err(Error::GitRunFailed { .. }) => None,
+            // 環境の問題はリポジトリごとの失敗ではないため、未着手の対象を実行せずに止める
+            Err(error) => {
+                self.stop(
+                    anyhow::Error::from(error)
+                        .context(messages.fetch().sibling_start_failed(&target.name)),
+                );
+                return;
+            }
+        };
+
+        self.completed += 1;
+        let outcome = match run {
+            Some(_) => Outcome::Succeeded,
+            None => Outcome::Failed,
+        };
+        // 添字は必ず範囲内（ワーカーは `targets.get` で取れた添字しか渡さない）。`[]` で書くと
+        // 範囲外が panic になるため、結果を落として直列フェーズへ回す形にしてある
+        if let Some(slot) = self.outcomes.get_mut(index) {
+            *slot = Some(outcome);
+        }
+
+        let line = progress_line(self.completed - 1, total, target);
+        if let Err(failure) = self.write_block(messages, &line, run.as_ref()) {
+            self.stop(failure);
+        }
+    }
+
+    /// 進捗行と git の出力を続けて書き出す。
+    ///
+    /// # Errors
+    ///
+    /// 書き込みに失敗した場合にエラーを返す。
+    fn write_block(
+        &mut self,
+        messages: &dyn Messages,
+        line: &str,
+        run: Option<&CapturedRun>,
+    ) -> Result<()> {
+        report_line(messages, self.writer, line)?;
+
+        if let Some(run) = run {
+            // 中身を解釈せずそのまま渡す（fuzgit は git の出力を読まない）。標準出力と
+            // 標準エラーの相対順序は保てないが、`git fetch` の更新表は実質すべて標準エラーへ
+            // 出るため、読み手には 1 続きの本文に見える
+            self.writer
+                .write_all(&run.stdout)
+                .and_then(|()| self.writer.write_all(&run.stderr))
+                .context(messages.common().stderr_write_failed())?;
+        }
+
+        Ok(())
+    }
+
+    /// 中断を決める。理由は最初に観測したものだけを残す。
+    ///
+    /// 上書きしないのは、後から観測した理由が「最初の中断に巻き込まれた結果」であり得るため
+    /// （git を起動できない環境では、走っている対象の数だけ同じエラーが並ぶ）。
+    fn stop(&mut self, failure: anyhow::Error) {
+        self.stopped = true;
+        if self.failure.is_none() {
+            self.failure = Some(failure);
+        }
+    }
+}
+
+/// 並列フェーズの共有状態のロックを取る。
+///
+/// ロックが毒されている（ワーカーの内側で panic した）場合も中身をそのまま使う。守っているのは
+/// 書き出し先と集計だけであり、途中で panic しても解釈できない状態は残らない。ここで panic を
+/// 重ねると、[`std::thread::scope`] が本来伝播させる最初の panic を覆い隠してしまう。
+fn locked<T>(shared: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// `git fetch [--prune] --all` の引数を組み立てる。
@@ -549,7 +882,12 @@ fn sibling_fetch_args(prune: PruneMode) -> Vec<String> {
     args
 }
 
-/// 実行前に示す進捗の 1 行を組み立てる。
+/// 進捗の 1 行（`[<位置>/<全体>] <名前>`）を組み立てる。
+///
+/// `index` は 0 起点の位置であり、フェーズによって何番目かの意味が変わる。並列フェーズでは
+/// **完了した件数 − 1**（実行の開始順は決まらないため、完了した順に番号を振る）、直列フェーズでは
+/// 実行の前に書き出すため**これから実行する対象の位置**である。書式はどちらも同じで、
+/// 読み手には「全体のうち何件目か」だけが見える。
 fn progress_line(index: usize, total: usize, target: &SiblingRepository) -> String {
     format!(
         "[{position}/{total}] {name}",
@@ -734,6 +1072,117 @@ mod tests {
             .into_iter()
             .map(str::to_owned)
             .collect()
+    }
+
+    /// 開発者の `~/.gitconfig` に影響されずに検証するため、リポジトリ内の設定だけを
+    /// 読み込む形でリポジトリを開く（`i18n::resolve` の設定テストと同じ方針）。
+    fn open_isolated(path: &Path) -> gix::Repository {
+        gix::open_opts(path, gix::open::Options::isolated())
+            .expect("initialized repository must be openable")
+    }
+
+    #[test]
+    fn the_default_number_of_jobs_is_four() {
+        // CPU 数に比例させない固定値であるため、値そのものを固定して意図しない変更を検出する
+        assert_eq!(DEFAULT_FETCH_JOBS.get(), 4);
+    }
+
+    #[test]
+    fn an_unset_fetch_jobs_setting_falls_back_to_the_default() {
+        assert_eq!(
+            parse_fetch_jobs(None).expect("an unset value must be accepted"),
+            DEFAULT_FETCH_JOBS
+        );
+    }
+
+    #[test]
+    fn an_empty_fetch_jobs_setting_is_treated_as_unset() {
+        // 空文字の扱いは `FUZGIT_LANG` / `fuzgit.lang` と揃える
+        assert_eq!(
+            parse_fetch_jobs(Some("")).expect("an empty value must be treated as unset"),
+            DEFAULT_FETCH_JOBS
+        );
+    }
+
+    #[test]
+    fn a_positive_fetch_jobs_setting_is_used_as_written() {
+        for (value, expected) in [("1", 1), ("8", 8)] {
+            let jobs = parse_fetch_jobs(Some(value)).expect("a positive integer must be accepted");
+            assert_eq!(jobs.get(), expected, "{value} must be used as written");
+        }
+    }
+
+    #[test]
+    fn zero_jobs_is_rejected_instead_of_falling_back_to_the_default() {
+        // 0 を既定値へ倒すと、指定したつもりの同時実行数と実際の動作が食い違ったまま通信が始まる
+        let error = parse_fetch_jobs(Some("0")).expect_err("zero must stop the command");
+
+        match error {
+            Error::InvalidFetchJobs { value } => assert_eq!(value, "0"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_negative_fetch_jobs_setting_is_rejected() {
+        let error =
+            parse_fetch_jobs(Some("-1")).expect_err("a negative value must stop the command");
+
+        match error {
+            Error::InvalidFetchJobs { value } => assert_eq!(value, "-1"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fetch_jobs_setting_that_is_not_an_integer_is_rejected() {
+        let error = parse_fetch_jobs(Some("abc")).expect_err("a non-integer must stop the command");
+
+        match error {
+            // 読み取った値をそのまま保持する（何を直せばよいかを示せるようにするため）
+            Error::InvalidFetchJobs { value } => assert_eq!(value, "abc"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_number_of_jobs_is_read_from_the_repository_configuration() {
+        use crate::test_support::{TempDir, git_in, init_repository};
+
+        let dir = TempDir::new("fetch-jobs-config");
+        init_repository(dir.path());
+        git_in(dir.path(), &["config", FETCH_JOBS_CONFIG_KEY, "8"]);
+
+        let jobs = fetch_jobs(&open_isolated(dir.path())).expect("the setting should be readable");
+
+        assert_eq!(jobs.get(), 8);
+    }
+
+    #[test]
+    fn an_unset_configuration_key_is_reported_as_absent() {
+        use crate::test_support::{TempDir, init_repository};
+
+        let dir = TempDir::new("fetch-jobs-unset");
+        init_repository(dir.path());
+
+        assert_eq!(fetch_jobs_setting(&open_isolated(dir.path())), None);
+    }
+
+    #[test]
+    fn an_invalid_configured_value_stops_before_anything_runs() {
+        use crate::test_support::{TempDir, git_in, init_repository};
+
+        let dir = TempDir::new("fetch-jobs-invalid");
+        init_repository(dir.path());
+        git_in(dir.path(), &["config", FETCH_JOBS_CONFIG_KEY, "0"]);
+
+        let error = fetch_jobs(&open_isolated(dir.path()))
+            .expect_err("an invalid setting must stop the command");
+
+        match error {
+            Error::InvalidFetchJobs { value } => assert_eq!(value, "0"),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
@@ -1357,116 +1806,439 @@ mod tests {
     fn the_progress_line_counts_from_one() {
         let candidates = siblings();
 
+        // 並列フェーズの引数は「完了した件数 − 1」であり、候補一覧の位置ではない。
+        // 2 番目に完了したのが 3 つ目の候補なら `[2/3]` と出る
         assert_eq!(progress_line(0, 3, &candidates[0]), "[1/3] mike");
-        assert_eq!(progress_line(2, 3, &candidates[2]), "[3/3] zulu");
+        assert_eq!(progress_line(1, 3, &candidates[2]), "[2/3] zulu");
+        assert_eq!(progress_line(2, 3, &candidates[1]), "[3/3] alpha");
     }
 
-    /// 実行に成功したことにする実行器。
-    fn succeed(_directory: &Path, _args: &[&str]) -> crate::error::Result<()> {
-        Ok(())
+    /// 同時実行数（テストは 1 以上の定数しか渡さない）。
+    fn jobs(count: usize) -> NonZeroUsize {
+        NonZeroUsize::new(count).expect("the test must ask for at least one job")
     }
 
-    /// 実行器へ渡された引数の記録（実行ディレクトリと git 引数）。
-    type Calls = std::rc::Rc<std::cell::RefCell<Vec<(std::path::PathBuf, Vec<String>)>>>;
+    /// 実行ディレクトリからリポジトリ名を取り出す（`sibling()` が `/repos/<名前>` を作る）。
+    fn name_of(directory: &Path) -> String {
+        directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
 
-    /// 対象のリポジトリごとの結果を決められる実行器を作り、呼び出し履歴を記録する。
-    fn recording(
-        results: Vec<crate::error::Result<()>>,
-    ) -> (
-        Calls,
-        impl FnMut(&Path, &[&str]) -> crate::error::Result<()>,
-    ) {
-        let calls: Calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let recorded = std::rc::Rc::clone(&calls);
-        let mut results = results.into_iter();
+    /// 名前を並べた候補一覧（`discover()` と同じく重複しないワークツリー）。
+    fn siblings_named(names: &[&str]) -> Vec<SiblingRepository> {
+        names.iter().map(|name| sibling(name, false)).collect()
+    }
 
-        let runner = move |directory: &Path, args: &[&str]| {
-            recorded.borrow_mut().push((
+    /// 同時に実行されていた件数の推移。
+    #[derive(Debug, Default, Clone, Copy)]
+    struct Concurrency {
+        /// いま実行中の件数。
+        running: usize,
+        /// これまでに同時実行された件数の最大値。
+        peak: usize,
+    }
+
+    /// 実行器の呼び出しの記録。
+    ///
+    /// 並列フェーズの実行器は複数のワーカーから同時に呼ばれるため `Fn + Sync` でなければならず、
+    /// `Rc<RefCell<…>>`（`Sync` でない）は使えない。記録はすべて `Mutex` で守る。
+    #[derive(Debug, Default)]
+    struct Recorder {
+        /// 呼び出しの記録（実行ディレクトリと git 引数）。並列フェーズの実行順は決まらないため、
+        /// 順序に依存する検査は `jobs = 1` のときだけ行う。
+        calls: Mutex<Vec<(std::path::PathBuf, Vec<String>)>>,
+        /// 同時実行の観測。
+        concurrency: Mutex<Concurrency>,
+    }
+
+    impl Recorder {
+        /// 呼び出しを記録し、実行中として数える。
+        fn enter(&self, directory: &Path, args: &[&str]) {
+            locked(&self.calls).push((
                 directory.to_path_buf(),
                 args.iter().map(|arg| (*arg).to_owned()).collect(),
             ));
-            results.next().unwrap_or(Ok(()))
-        };
 
-        (calls, runner)
+            let mut concurrency = locked(&self.concurrency);
+            concurrency.running += 1;
+            concurrency.peak = concurrency.peak.max(concurrency.running);
+        }
+
+        /// 実行が終わったことを記録する。
+        fn leave(&self) {
+            locked(&self.concurrency).running -= 1;
+        }
+
+        /// 呼び出された対象の名前（記録順）。
+        fn names(&self) -> Vec<String> {
+            locked(&self.calls)
+                .iter()
+                .map(|(directory, _)| name_of(directory))
+                .collect()
+        }
+
+        /// 呼び出しの回数。
+        fn count(&self) -> usize {
+            locked(&self.calls).len()
+        }
+
+        /// 同時に実行されていた件数の最大値。
+        fn peak(&self) -> usize {
+            locked(&self.concurrency).peak
+        }
+
+        /// 呼び出しごとの git 引数。
+        fn arguments(&self) -> Vec<Vec<String>> {
+            locked(&self.calls)
+                .iter()
+                .map(|(_, arguments)| arguments.clone())
+                .collect()
+        }
     }
 
-    /// リポジトリ 1 件分の fetch の失敗。
-    fn run_failure() -> crate::error::Result<()> {
-        Err(Error::GitRunFailed {
+    /// リポジトリ 1 件分の fetch の失敗（非ゼロ終了）。
+    fn run_failure() -> Error {
+        Error::GitRunFailed {
             command: "git fetch".to_owned(),
             code: Some(128),
-        })
+        }
+    }
+
+    /// 出力の無いキャプチャ結果（多くのテストは出力の中身を見ない）。
+    fn silent_run() -> CapturedRun {
+        CapturedRun {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    /// 並列フェーズの実行器。`failing` に挙げた名前のリポジトリだけが非ゼロ終了する。
+    fn parallel_runner<'a>(
+        recorder: &'a Recorder,
+        failing: &'a [&'a str],
+    ) -> impl Fn(&Path, &[&str]) -> crate::error::Result<CapturedRun> + Sync + 'a {
+        move |directory, args| {
+            recorder.enter(directory, args);
+            let result = if failing.contains(&name_of(directory).as_str()) {
+                Err(run_failure())
+            } else {
+                Ok(silent_run())
+            };
+            recorder.leave();
+
+            result
+        }
+    }
+
+    /// 並列フェーズの実行器。`at` の名前のリポジトリで `error` を返す（環境の問題を模す）。
+    fn parallel_runner_broken_at<'a>(
+        recorder: &'a Recorder,
+        at: &'a str,
+        error: impl Fn() -> Error + Sync + 'a,
+    ) -> impl Fn(&Path, &[&str]) -> crate::error::Result<CapturedRun> + Sync + 'a {
+        move |directory, args| {
+            recorder.enter(directory, args);
+            let result = if name_of(directory) == at {
+                Err(error())
+            } else {
+                Ok(silent_run())
+            };
+            recorder.leave();
+
+            result
+        }
+    }
+
+    /// 並列フェーズの実行器。どの対象でも git を起動できない環境を模す。
+    fn parallel_runner_without_git(
+        recorder: &Recorder,
+    ) -> impl Fn(&Path, &[&str]) -> crate::error::Result<CapturedRun> + Sync + '_ {
+        move |directory, args| {
+            recorder.enter(directory, args);
+            recorder.leave();
+
+            Err(Error::GitNotFound)
+        }
+    }
+
+    /// 並列フェーズの実行器。対象ごとに複数行の出力を返す（出力のまとまりを見るため）。
+    fn parallel_runner_with_output(
+        recorder: &Recorder,
+    ) -> impl Fn(&Path, &[&str]) -> crate::error::Result<CapturedRun> + Sync + '_ {
+        move |directory, args| {
+            recorder.enter(directory, args);
+            let name = name_of(directory);
+            recorder.leave();
+
+            Ok(CapturedRun {
+                stdout: format!("{name} stdout 1\n{name} stdout 2\n").into_bytes(),
+                stderr: format!("{name} stderr 1\n{name} stderr 2\n").into_bytes(),
+            })
+        }
+    }
+
+    /// 直列フェーズの実行器。`failing` に挙げた名前のリポジトリだけが非ゼロ終了する。
+    fn serial_runner<'a>(
+        recorder: &'a Recorder,
+        failing: &'a [&'a str],
+    ) -> impl FnMut(&Path, &[&str]) -> crate::error::Result<()> + 'a {
+        move |directory, args| {
+            recorder.enter(directory, args);
+            let result = if failing.contains(&name_of(directory).as_str()) {
+                Err(run_failure())
+            } else {
+                Ok(())
+            };
+            recorder.leave();
+
+            result
+        }
+    }
+
+    /// 書き出された内容を行に分ける。
+    fn lines_of(written: Vec<u8>) -> Vec<String> {
+        String::from_utf8(written)
+            .expect("the output should be utf-8")
+            .lines()
+            .map(str::to_owned)
+            .collect()
     }
 
     #[test]
     fn each_repository_is_fetched_in_candidate_order_with_the_same_arguments() {
         let candidates = siblings();
         let targets: Vec<&SiblingRepository> = candidates.iter().collect();
-        let (calls, runner) = recording(Vec::new());
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
         let mut written = Vec::new();
 
-        let summary = fetch_each(messages(), &targets, PruneMode::Prune, &mut written, runner)
-            .expect("a successful run should not fail");
+        let summary = fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Prune,
+            jobs(1),
+            &mut written,
+            parallel_runner(&parallel_calls, &[]),
+            serial_runner(&serial_calls, &[]),
+        )
+        .expect("a successful run should not fail");
 
         assert_eq!(summary.succeeded, 3);
         assert!(summary.failed.is_empty());
-        assert_eq!(
-            calls
-                .borrow()
-                .iter()
-                .map(|(directory, _)| directory.clone())
-                .collect::<Vec<_>>(),
-            candidates
-                .iter()
-                .map(|candidate| candidate.workdir.clone())
-                .collect::<Vec<_>>()
-        );
-        for (_, arguments) in calls.borrow().iter() {
-            assert_eq!(arguments, &sibling_fetch_args(PruneMode::Prune));
+        assert_eq!(parallel_calls.names(), ["mike", "alpha", "zulu"]);
+        for arguments in parallel_calls.arguments() {
+            assert_eq!(arguments, sibling_fetch_args(PruneMode::Prune));
         }
+        assert_eq!(
+            serial_calls.count(),
+            0,
+            "nothing failed, so the serial phase must not run"
+        );
     }
 
     #[test]
-    fn the_progress_of_every_repository_is_written_before_it_runs() {
+    fn the_progress_of_every_repository_is_written_as_it_completes() {
         let candidates = siblings();
         let targets: Vec<&SiblingRepository> = candidates.iter().collect();
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
         let mut written = Vec::new();
 
-        fetch_each(messages(), &targets, PruneMode::Keep, &mut written, succeed)
-            .expect("the run should succeed");
+        fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Keep,
+            jobs(1),
+            &mut written,
+            parallel_runner(&parallel_calls, &[]),
+            serial_runner(&serial_calls, &[]),
+        )
+        .expect("the run should succeed");
 
-        let text = String::from_utf8(written).expect("the progress should be utf-8");
+        // ワーカーが 1 本なので完了順は候補順と一致する（＝従来の直列実行と同じ出力）
         assert_eq!(
-            text.lines().collect::<Vec<_>>(),
+            lines_of(written),
             ["[1/3] mike", "[2/3] alpha", "[3/3] zulu"]
         );
+    }
+
+    #[test]
+    fn every_repository_goes_through_the_parallel_phase_exactly_once() {
+        let candidates = siblings_named(&["alpha", "bravo", "charlie", "delta", "echo"]);
+        let targets: Vec<&SiblingRepository> = candidates.iter().collect();
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
+        let mut written = Vec::new();
+
+        let summary = fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Keep,
+            jobs(3),
+            &mut written,
+            parallel_runner(&parallel_calls, &[]),
+            serial_runner(&serial_calls, &[]),
+        )
+        .expect("a successful run should not fail");
+
+        let mut names = parallel_calls.names();
+        names.sort();
+        assert_eq!(names, ["alpha", "bravo", "charlie", "delta", "echo"]);
+        assert_eq!(summary.succeeded, 5);
+    }
+
+    #[test]
+    fn the_number_of_repositories_running_at_once_never_exceeds_the_limit() {
+        let candidates = siblings_named(&["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]);
+        let targets: Vec<&SiblingRepository> = candidates.iter().collect();
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
+        let mut written = Vec::new();
+
+        fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Keep,
+            jobs(2),
+            &mut written,
+            parallel_runner(&parallel_calls, &[]),
+            serial_runner(&serial_calls, &[]),
+        )
+        .expect("a successful run should not fail");
+
+        assert!(
+            parallel_calls.peak() <= 2,
+            "at most 2 repositories may run at once: {}",
+            parallel_calls.peak()
+        );
+    }
+
+    #[test]
+    fn only_the_repositories_that_failed_in_parallel_are_run_serially() {
+        let candidates = siblings();
+        let targets: Vec<&SiblingRepository> = candidates.iter().collect();
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
+        let mut written = Vec::new();
+
+        fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Keep,
+            jobs(3),
+            &mut written,
+            parallel_runner(&parallel_calls, &["alpha"]),
+            serial_runner(&serial_calls, &[]),
+        )
+        .expect("a repository failure is recorded, not propagated");
+
+        assert_eq!(parallel_calls.count(), 3);
+        assert_eq!(
+            serial_calls.names(),
+            ["alpha"],
+            "only the repository that failed may be run again"
+        );
+    }
+
+    #[test]
+    fn a_repository_that_succeeds_in_the_serial_phase_is_counted_once() {
+        let candidates = siblings();
+        let targets: Vec<&SiblingRepository> = candidates.iter().collect();
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
+        let mut written = Vec::new();
+
+        let summary = fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Keep,
+            jobs(3),
+            &mut written,
+            parallel_runner(&parallel_calls, &["alpha"]),
+            serial_runner(&serial_calls, &[]),
+        )
+        .expect("a repository failure is recorded, not propagated");
+
+        assert_eq!(summary.succeeded, 3, "the retried repository counts once");
+        assert!(
+            summary.failed.is_empty(),
+            "the parallel failure was recovered: {:?}",
+            summary.failed
+        );
+    }
+
+    #[test]
+    fn a_repository_that_fails_in_both_phases_is_listed_once_in_candidate_order() {
+        let candidates = siblings();
+        let targets: Vec<&SiblingRepository> = candidates.iter().collect();
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
+        let mut written = Vec::new();
+
+        let summary = fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Keep,
+            jobs(3),
+            &mut written,
+            // 並列フェーズの実行順は決まらないため、失敗の一覧は候補順でなければ安定しない
+            parallel_runner(&parallel_calls, &["zulu", "alpha"]),
+            serial_runner(&serial_calls, &["zulu", "alpha"]),
+        )
+        .expect("a repository failure is recorded, not propagated");
+
+        assert_eq!(summary.succeeded, 1);
+        assert_eq!(summary.failed, ["alpha", "zulu"]);
     }
 
     #[test]
     fn a_failing_repository_does_not_stop_the_remaining_ones() {
         let candidates = siblings();
         let targets: Vec<&SiblingRepository> = candidates.iter().collect();
-        let (calls, runner) = recording(vec![Ok(()), run_failure(), Ok(())]);
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
         let mut written = Vec::new();
 
-        let summary = fetch_each(messages(), &targets, PruneMode::Keep, &mut written, runner)
-            .expect("a repository failure is recorded, not propagated");
+        let summary = fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Keep,
+            jobs(1),
+            &mut written,
+            parallel_runner(&parallel_calls, &["alpha"]),
+            serial_runner(&serial_calls, &["alpha"]),
+        )
+        .expect("a repository failure is recorded, not propagated");
 
         assert_eq!(summary.succeeded, 2);
         assert_eq!(summary.failed, ["alpha"]);
-        assert_eq!(calls.borrow().len(), 3, "every repository must be visited");
+        assert_eq!(
+            parallel_calls.count(),
+            3,
+            "every repository must be visited"
+        );
     }
 
     #[test]
     fn a_failure_to_start_git_stops_the_remaining_repositories() {
         let candidates = siblings();
         let targets: Vec<&SiblingRepository> = candidates.iter().collect();
-        let (calls, runner) = recording(vec![Ok(()), Err(Error::GitNotFound), Ok(())]);
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
         let mut written = Vec::new();
 
-        let err = fetch_each(messages(), &targets, PruneMode::Keep, &mut written, runner)
-            .expect_err("a broken environment must stop the run");
+        let err = fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Keep,
+            jobs(1),
+            &mut written,
+            parallel_runner_broken_at(&parallel_calls, "alpha", || Error::GitNotFound),
+            serial_runner(&serial_calls, &[]),
+        )
+        .expect_err("a broken environment must stop the run");
 
         assert!(
             err.chain()
@@ -1474,9 +2246,14 @@ mod tests {
             "the reason should be kept: {err:#}"
         );
         assert_eq!(
-            calls.borrow().len(),
+            parallel_calls.count(),
             2,
             "the repositories after the failure must not be visited"
+        );
+        assert_eq!(
+            serial_calls.count(),
+            0,
+            "a broken environment must not reach the serial phase"
         );
     }
 
@@ -1484,20 +2261,166 @@ mod tests {
     fn a_spawn_failure_stops_the_run_as_well() {
         let candidates = siblings();
         let targets: Vec<&SiblingRepository> = candidates.iter().collect();
-        let (calls, runner) = recording(vec![Err(Error::GitSpawnFailed {
-            args: "fetch --all".to_owned(),
-            source: std::io::Error::other("denied"),
-        })]);
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
         let mut written = Vec::new();
 
-        let err = fetch_each(messages(), &targets, PruneMode::Keep, &mut written, runner)
-            .expect_err("a broken environment must stop the run");
+        let err = fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Keep,
+            jobs(1),
+            &mut written,
+            parallel_runner_broken_at(&parallel_calls, "mike", || Error::GitSpawnFailed {
+                args: "fetch --all".to_owned(),
+                source: std::io::Error::other("denied"),
+            }),
+            serial_runner(&serial_calls, &[]),
+        )
+        .expect_err("a broken environment must stop the run");
 
         assert!(
             err.to_string().contains("mike"),
             "the repository should be named: {err:#}"
         );
-        assert_eq!(calls.borrow().len(), 1);
+        assert_eq!(parallel_calls.count(), 1);
+    }
+
+    #[test]
+    fn a_broken_environment_leaves_the_untouched_repositories_alone() {
+        let candidates = siblings_named(&["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"]);
+        let targets: Vec<&SiblingRepository> = candidates.iter().collect();
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
+        let mut written = Vec::new();
+
+        let err = fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Keep,
+            jobs(2),
+            &mut written,
+            parallel_runner_without_git(&parallel_calls),
+            serial_runner(&serial_calls, &[]),
+        )
+        .expect_err("a broken environment must stop the run");
+
+        assert!(
+            err.chain()
+                .any(|cause| matches!(cause.downcast_ref::<Error>(), Some(Error::GitNotFound))),
+            "the reason should be kept: {err:#}"
+        );
+        // それぞれのワーカーは 1 件目で中断を知るため、着手されるのは同時実行数までに収まる
+        assert!(
+            parallel_calls.count() <= 2,
+            "at most one repository per worker may start: {}",
+            parallel_calls.count()
+        );
+    }
+
+    #[test]
+    fn the_output_of_one_repository_is_not_split_by_another() {
+        let candidates = siblings_named(&["alpha", "bravo", "charlie", "delta"]);
+        let targets: Vec<&SiblingRepository> = candidates.iter().collect();
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
+        let mut written = Vec::new();
+
+        fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Keep,
+            jobs(4),
+            &mut written,
+            parallel_runner_with_output(&parallel_calls),
+            serial_runner(&serial_calls, &[]),
+        )
+        .expect("a successful run should not fail");
+
+        let lines = lines_of(written);
+        assert_eq!(
+            lines.len(),
+            4 * 5,
+            "1 対象につき進捗行 1 行と本文 4 行: {lines:?}"
+        );
+        for block in lines.chunks(5) {
+            let name = block[0]
+                .rsplit(' ')
+                .next()
+                .expect("the progress line names the repository");
+            for line in block {
+                assert!(
+                    line.contains(name),
+                    "the block of `{name}` must not be split: {block:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_serial_phase_is_announced_before_it_starts() {
+        let candidates = siblings();
+        let targets: Vec<&SiblingRepository> = candidates.iter().collect();
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
+        let mut written = Vec::new();
+
+        fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Keep,
+            jobs(1),
+            &mut written,
+            parallel_runner(&parallel_calls, &["alpha"]),
+            serial_runner(&serial_calls, &[]),
+        )
+        .expect("a repository failure is recorded, not propagated");
+
+        let lines = lines_of(written);
+        let notice = lines
+            .iter()
+            .position(|line| line == &messages().fetch().serial_fallback(1))
+            .expect("the fallback must be announced");
+        let retried = lines
+            .iter()
+            .position(|line| line == "[1/1] alpha")
+            .expect("the retried repository should be shown");
+
+        assert!(
+            notice < retried,
+            "the announcement must come first: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_is_announced_when_every_repository_succeeds() {
+        let candidates = siblings();
+        let targets: Vec<&SiblingRepository> = candidates.iter().collect();
+        let parallel_calls = Recorder::default();
+        let serial_calls = Recorder::default();
+        let mut written = Vec::new();
+
+        fetch_each(
+            messages(),
+            &targets,
+            PruneMode::Keep,
+            jobs(2),
+            &mut written,
+            parallel_runner(&parallel_calls, &[]),
+            serial_runner(&serial_calls, &[]),
+        )
+        .expect("a successful run should not fail");
+
+        let lines = lines_of(written);
+        assert!(
+            !lines.contains(&messages().fetch().serial_fallback(0)),
+            "there is nothing to re-run: {lines:?}"
+        );
+        assert_eq!(
+            lines.len(),
+            3,
+            "one progress line per repository: {lines:?}"
+        );
     }
 
     #[test]
@@ -1585,6 +2508,7 @@ mod tests {
                 "/repos/zulu",
             ),
             (fetch.sibling_start_failed("alpha"), "alpha"),
+            (fetch.serial_fallback(2), "2"),
         ]
     }
 

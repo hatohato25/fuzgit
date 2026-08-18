@@ -148,6 +148,20 @@ pub enum Error {
         detail: MalformedOutput,
     },
 
+    /// `git config fuzgit.fetchJobs` に、同時実行数として使えない値が設定されている。
+    ///
+    /// 0・負数・整数でない値がこれに当たる。既定値へ黙って倒さないのは、利用者が
+    /// 指定したつもりの同時実行数と実際の動作が食い違ったまま通信が始まるためである
+    /// （`fuzgit.lang` の明示指定が不正値で停止するのと同じ扱い。暗黙のフォールバック禁止）。
+    ///
+    /// 保持するのは**読み取った値そのもの**であり、表示済みの文へは組み立てない。
+    /// 文の組み立ては [`crate::i18n::messages::ErrorMessages::describe`] が言語ごとに行う。
+    #[error("invalid value for `fuzgit.fetchJobs`: `{value}` (expected an integer of 1 or more)")]
+    InvalidFetchJobs {
+        /// 設定から読み取った値。UTF-8 でない値はロッシー変換された文字列になる。
+        value: String,
+    },
+
     /// ユーザーが fuzzy finder を中断した（Esc / Ctrl-C）。
     #[error("the selection was cancelled")]
     Cancelled,
@@ -264,6 +278,18 @@ mod tests {
             code: None,
         };
         assert_eq!(err.to_string(), "git push was terminated by a signal");
+    }
+
+    #[test]
+    fn an_invalid_fetch_jobs_value_is_shown_verbatim() {
+        // 何を直せばよいか分かるよう、読み取った値と期待する形の両方を示す
+        let err = Error::InvalidFetchJobs {
+            value: "0".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid value for `fuzgit.fetchJobs`: `0` (expected an integer of 1 or more)"
+        );
     }
 
     #[test]

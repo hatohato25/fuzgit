@@ -311,6 +311,11 @@ impl ErrorMessages for EnglishErrorMessages {
                 operation = filesystem_operation_text(*operation),
                 path = path.display()
             ),
+            Error::InvalidFetchJobs { value } => format!(
+                "`{value}` is not a valid number of parallel jobs for the git config \
+                 `fuzgit.fetchJobs`. Set an integer of 1 or more, or remove the setting \
+                 to fall back to the default"
+            ),
             Error::Cancelled => "The selection was cancelled".to_owned(),
             Error::NoCandidates => "There are no candidates to select from".to_owned(),
             Error::FinderFailed { message } => {
@@ -1296,6 +1301,12 @@ impl FetchMessages for EnglishFetchMessages {
 
     fn sibling_start_failed(&self, name: &str) -> String {
         format!("Failed to start fetching `{name}`")
+    }
+
+    fn serial_fallback(&self, count: usize) -> String {
+        format!(
+            "Running the {count} repositories that failed in parallel again, one at a time, so they can ask for credentials"
+        )
     }
 
     fn partial_failure(&self) -> &'static str {

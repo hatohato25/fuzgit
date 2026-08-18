@@ -171,6 +171,12 @@ mod tests {
                 },
                 vec!["/work"],
             ),
+            (
+                Error::InvalidFetchJobs {
+                    value: "abc".to_string(),
+                },
+                vec!["abc", "fuzgit.fetchJobs"],
+            ),
             (Error::Cancelled, vec![]),
             (Error::NoCandidates, vec![]),
             (

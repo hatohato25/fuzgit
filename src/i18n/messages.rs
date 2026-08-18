@@ -1128,6 +1128,18 @@ pub trait FetchMessages: Sync + std::fmt::Debug {
     /// git を起動できなかった場合だけに使う。
     fn sibling_start_failed(&self, name: &str) -> String;
 
+    /// 並列で取得できなかった対象を直列で実行し直すことと、その件数・理由を伝える 1 行（FR-28）。
+    ///
+    /// 並列フェーズは対話（認証情報の入力）を構造的に禁じているため、passphrase や資格情報を
+    /// 求められた対象はそこで失敗する。直列フェーズは**リトライではなく**、それらを
+    /// 「対話できる形」で 1 回だけ実行し直すものであり、黙って実行し直すと同じ対象の出力が
+    /// 二度出る理由が読み手に分からない。
+    ///
+    /// この文言を [`CommonMessages`] へ置かないのは、読み手が知る必要のある事情
+    /// （並列フェーズがあること）が `gz fetch --siblings` に固有であり、他のコマンドと
+    /// 共有できないためである。
+    fn serial_fallback(&self, count: usize) -> String;
+
     /// 1 件でも取得に失敗したことを伝える。
     ///
     /// 失敗の内訳は [`CommonMessages::failed_targets`] が直前に示すため再掲しない。

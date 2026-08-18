@@ -76,6 +76,24 @@ const FIXED_MESSAGES_LOCALE: &str = "C";
 /// デバッグログで「削除した」ことを示す値の表記。
 const REMOVED_DISPLAY: &str = "(unset)";
 
+/// git 自身の端末プロンプト（`Username for …`）の可否を決める環境変数。
+const GIT_TERMINAL_PROMPT_ENV: &str = "GIT_TERMINAL_PROMPT";
+
+/// 資格情報を訊くヘルパを指定する環境変数。
+const GIT_ASKPASS_ENV: &str = "GIT_ASKPASS";
+
+/// git が ssh を起動する際のコマンドを指定する環境変数。
+const GIT_SSH_COMMAND_ENV: &str = "GIT_SSH_COMMAND";
+
+/// [`GIT_TERMINAL_PROMPT_ENV`] に与えて端末プロンプトを禁止する値。
+const TERMINAL_PROMPT_DISABLED: &str = "0";
+
+/// [`GIT_SSH_COMMAND_ENV`] が未設定のときに使う ssh コマンド。
+const DEFAULT_SSH_COMMAND: &str = "ssh";
+
+/// ssh へ対話を禁じるオプション。passphrase や未知のホストの確認を待たずに失敗させる。
+const SSH_BATCH_MODE_OPTION: &str = "-o BatchMode=yes";
+
 /// 子プロセス `git` のメッセージ言語をどう扱うか（FR-26 の (A)/(B) 分類）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocaleIntent {
@@ -198,6 +216,54 @@ fn apply_locale(command: &mut Command, intent: LocaleIntent) -> LocaleEnvironmen
     let environment = locale_environment(intent, std::env::var_os(LC_ALL_ENV).as_deref());
     environment.apply(command);
     environment
+}
+
+/// 並列フェーズで子プロセスへ追加設定する環境変数を組み立てる（純関数）。
+///
+/// `ssh_command` には**親プロセスの** `GIT_SSH_COMMAND` の値を渡す。値を引数で受け取るのは
+/// `std::env` に依存せず単体テストできるようにするため（[`locale_environment`] と同じ理由）。
+///
+/// 並列実行では複数の `git` の出力が同じ端末に混ざるため、認証プロンプトが出ても
+/// 「どのリポジトリが訊いているのか」を示せない。そこで並列フェーズでは対話を
+/// **構造的に禁止**し、対話が必要な対象は失敗させて直列フェーズで実行し直す。
+/// 以下はいずれも実測で確認した挙動（`.claude/tasks.md` T-366 / T-367）。
+///
+/// - `GIT_TERMINAL_PROMPT=0`: git 自身の端末プロンプトを止める
+/// - `GIT_ASKPASS=""`: askpass ヘルパの起動を止める。空文字は `core.askPass` と
+///   `SSH_ASKPASS` の**両方へのフォールバックも塞ぐ**
+/// - `GIT_SSH_COMMAND`: ssh は passphrase を**標準入力ではなく `/dev/tty` から読む**ため、
+///   `stdin` を閉じるだけでは防げない。`-o BatchMode=yes` を付けると実 pty 配下でも
+///   端末へ何も書かずに即座に失敗する。親環境に値があればそれへ追記し、利用者の ssh 設定を
+///   捨てない
+///
+/// **上の 2 つはどちらか一方では足りない。**`GIT_TERMINAL_PROMPT=0` だけでは askpass が
+/// 起動し、`GIT_ASKPASS=""` だけでは端末へプロンプトが書き出される。
+///
+/// 親環境の `GIT_SSH_COMMAND` が**空文字の場合は「未設定」として扱う**。そのまま追記すると
+/// 先頭にコマンド名の無い `" -o BatchMode=yes"` になってしまうため
+/// （空文字を未設定とみなすのは `FUZGIT_LANG` / `fuzgit.lang` と同じ流儀）。
+///
+/// **`Command::env_clear()` は使わない**（[`LocaleEnvironment`] と同じ理由）。設定するのは
+/// ここに並ぶ 3 つだけであり、直列フェーズや他の実行経路の環境は一切変えない。
+fn noninteractive_environment(ssh_command: Option<&OsStr>) -> Vec<(&'static str, OsString)> {
+    let ssh = match ssh_command.filter(|value| !value.is_empty()) {
+        Some(inherited) => {
+            let mut combined = inherited.to_owned();
+            combined.push(" ");
+            combined.push(SSH_BATCH_MODE_OPTION);
+            combined
+        }
+        None => OsString::from(format!("{DEFAULT_SSH_COMMAND} {SSH_BATCH_MODE_OPTION}")),
+    };
+
+    vec![
+        (
+            GIT_TERMINAL_PROMPT_ENV,
+            OsString::from(TERMINAL_PROMPT_DISABLED),
+        ),
+        (GIT_ASKPASS_ENV, OsString::new()),
+        (GIT_SSH_COMMAND_ENV, ssh),
+    ]
 }
 
 /// エラーメッセージ表示用に引数列を連結する。
@@ -447,6 +513,102 @@ pub fn capture_git_stderr_in(
     args: &[&str],
 ) -> Result<Vec<u8>> {
     Ok(capture_output(Some(directory), args, LocaleIntent::Display(language))?.stderr)
+}
+
+/// 出力をキャプチャした実行の結果。
+///
+/// fuzgit は中身を解釈せず、そのままユーザーへ書き出すためだけに保持する。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedRun {
+    /// 標準出力。
+    pub stdout: Vec<u8>,
+    /// 標準エラー。`git fetch` の更新表と進捗はこちらへ出る。
+    pub stderr: Vec<u8>,
+}
+
+/// `git` を `directory` で実行し、**対話を禁じたうえで**出力をキャプチャする（**(B) 系**）。
+///
+/// `gz fetch --siblings` の並列フェーズ専用。並列実行では複数の `git` の出力が同じ端末へ
+/// 混ざり、認証プロンプトが出ても対象を示せないため、出力を対象ごとに束ねて受け取り、
+/// 対話が必要になった場合は待たずに失敗させる（抑止の内容は
+/// [`noninteractive_environment`]）。失敗した対象は呼び出し側が直列フェーズで、
+/// 従来どおり継承 stdio で実行し直す。
+///
+/// カレントディレクトリで動く版は用意していない。唯一の呼び出し元が必ず対象リポジトリの
+/// ディレクトリを指定するためで、必要になった時点で対にする。
+///
+/// # (B) 系である根拠と、その境界条件
+///
+/// この出力を読むのは**ユーザー**である。fuzgit は行数も文言も見ず、受け取ったバイト列を
+/// そのまま書き出すだけで、分岐に使うのは `Result` の成否（＝終了コード）だけである。
+/// 判断基準「その出力を読むのは誰か」に照らせば (B) であり、[`capture_git_stderr_in`] を
+/// (B) とした判断とまったく同型である。
+///
+/// **将来この出力から失敗の理由を機械的に読み取るようになった場合は、(A) 系へ移すか、
+/// 理由の判定だけを別の (A) 系の呼び出しへ分ける必要がある。**
+///
+/// # Errors
+///
+/// - `git` が PATH 上に無い場合は [`Error::GitNotFound`]
+/// - 起動に失敗した場合は [`Error::GitSpawnFailed`]
+/// - 非ゼロ終了した場合は [`Error::GitRunFailed`]
+///
+/// 非ゼロ終了時に**キャプチャ済みの出力はエラーへ載せない**。載せると呼び出し側がそれを見て
+/// 分岐したくなる誘因を作り、上記の境界条件が破れるため（失敗の理由は、直列フェーズで
+/// 実行し直したときに git 自身が端末へ出す）。
+pub fn capture_git_noninteractive_in(
+    language: Language,
+    directory: &Path,
+    args: &[&str],
+) -> Result<CapturedRun> {
+    let mut command = build_command(Some(directory), args, LocaleIntent::Display(language));
+    command.stdin(Stdio::null());
+    for (key, value) in noninteractive_environment(std::env::var_os(GIT_SSH_COMMAND_ENV).as_deref())
+    {
+        command.env(key, value);
+    }
+
+    let output = command
+        .output()
+        .map_err(|source| map_spawn_error(source, args))?;
+
+    if output.status.success() {
+        Ok(CapturedRun {
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    } else {
+        log_discarded_output(args, &output);
+        Err(Error::GitRunFailed {
+            command: command_display(args),
+            code: output.status.code(),
+        })
+    }
+}
+
+/// 失敗した並列フェーズの実行について、呼び出し側へ渡さずに捨てる出力をログへ出す。
+///
+/// この出力を画面へ出さないのは、同じ対象が直列フェーズで実行し直され、git 自身が
+/// 失敗の理由をその場で表示するためである（二重に理由を並べない）。とはいえ黙って捨てると
+/// 「並列フェーズで何が起きたのか」を後から追う手段が無くなるため、`FUZGIT_DEBUG=1` の
+/// ときだけ残す。**ログへ出すだけであり、fuzgit はこの内容を解釈しない。**
+fn log_discarded_output(args: &[&str], output: &std::process::Output) {
+    if !debug_enabled() {
+        return;
+    }
+
+    // ログの書き込み失敗で本来の処理を止めたくないため結果を破棄する（[`log_command`] と同じ）
+    let _ = writeln!(
+        std::io::stderr(),
+        "[fuzgit] discarded {command} (code {code})\n{stdout}{stderr}",
+        command = command_display(args),
+        code = output
+            .status
+            .code()
+            .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+        stdout = String::from_utf8_lossy(&output.stdout),
+        stderr = String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 /// `git` を `directory` で実行し、終了コードと標準出力を返す（**(A) 系**）。
@@ -1245,5 +1407,197 @@ mod tests {
             "[fuzgit] (A) git log [LC_ALL=(unset) LC_CTYPE=fr_FR.UTF-8 LC_COLLATE=fr_FR.UTF-8 \
              LC_MESSAGES=C LC_MONETARY=fr_FR.UTF-8 LC_NUMERIC=fr_FR.UTF-8 LC_TIME=fr_FR.UTF-8]"
         );
+    }
+
+    /// 並列フェーズ以外では**書き換わらないはず**の環境変数の、親から引き継がれる値。
+    ///
+    /// 親の環境は読むだけで書き換えない（テストは並列実行されるため。
+    /// [`inherited_message_locale`] と同じ方針）。
+    fn inherited_value(key: &str) -> Option<String> {
+        std::env::var(key).ok()
+    }
+
+    #[test]
+    fn the_noninteractive_environment_closes_every_way_of_asking() {
+        // 端末プロンプトと askpass はどちらか一方を塞いでも、もう一方から訊かれてしまう
+        assert_eq!(
+            noninteractive_environment(None),
+            vec![
+                (GIT_TERMINAL_PROMPT_ENV, OsString::from("0")),
+                (GIT_ASKPASS_ENV, OsString::new()),
+                (GIT_SSH_COMMAND_ENV, OsString::from("ssh -o BatchMode=yes")),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_inherited_ssh_command_keeps_its_value_and_gains_batch_mode() {
+        // 捨ててしまうと、利用者が指定した鍵や踏み台ごと失われる
+        let environment = noninteractive_environment(Some(OsStr::new("ssh -i /tmp/key")));
+
+        assert_eq!(
+            ssh_command_of(&environment),
+            Some(OsStr::new("ssh -i /tmp/key -o BatchMode=yes"))
+        );
+    }
+
+    #[test]
+    fn an_empty_ssh_command_counts_as_unset() {
+        // そのまま追記すると、コマンド名の無い " -o BatchMode=yes" になる
+        let environment = noninteractive_environment(Some(OsStr::new("")));
+
+        assert_eq!(
+            ssh_command_of(&environment),
+            Some(OsStr::new("ssh -o BatchMode=yes"))
+        );
+    }
+
+    /// 組み立て結果から `GIT_SSH_COMMAND` の値だけを取り出す。
+    fn ssh_command_of<'a>(environment: &'a [(&'static str, OsString)]) -> Option<&'a OsStr> {
+        environment
+            .iter()
+            .find(|(key, _)| *key == GIT_SSH_COMMAND_ENV)
+            .map(|(_, value)| value.as_os_str())
+    }
+
+    #[test]
+    fn a_noninteractive_capture_forbids_interaction_in_the_child_process() {
+        use crate::test_support::{TempDir, init_repository};
+
+        let dir = TempDir::new("exec-noninteractive-env");
+        init_repository(dir.path());
+
+        let run = capture_git_noninteractive_in(
+            Language::English,
+            dir.path(),
+            &["-c", ENV_ALIAS_TO_STDOUT, ENV_ALIAS],
+        )
+        .expect("the env alias should succeed");
+
+        assert_eq!(
+            variable(&run.stdout, GIT_TERMINAL_PROMPT_ENV).as_deref(),
+            Some("0")
+        );
+        assert_eq!(variable(&run.stdout, GIT_ASKPASS_ENV).as_deref(), Some(""));
+
+        let ssh = variable(&run.stdout, GIT_SSH_COMMAND_ENV)
+            .expect("the ssh command should be set for the child process");
+        assert!(
+            ssh.ends_with("-o BatchMode=yes"),
+            "ssh must not be able to ask for a passphrase: {ssh}"
+        );
+
+        // (B) 系であり、表示言語は従来どおり子プロセスへ伝わる
+        assert_eq!(variable(&run.stdout, LANGUAGE_ENV).as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn a_noninteractive_capture_keeps_stdout_and_stderr_apart() {
+        use crate::test_support::{TempDir, init_repository};
+
+        // どちらへ出たかを保ったまま渡さないと、呼び出し側が元の順で書き出せない
+        let dir = TempDir::new("exec-noninteractive-streams");
+        init_repository(dir.path());
+
+        let on_stdout = capture_git_noninteractive_in(
+            Language::English,
+            dir.path(),
+            &["-c", ENV_ALIAS_TO_STDOUT, ENV_ALIAS],
+        )
+        .expect("the env alias should succeed");
+        let on_stderr = capture_git_noninteractive_in(
+            Language::English,
+            dir.path(),
+            &["-c", ENV_ALIAS_TO_STDERR, ENV_ALIAS],
+        )
+        .expect("the env alias should succeed");
+
+        assert!(variable(&on_stdout.stdout, GIT_TERMINAL_PROMPT_ENV).is_some());
+        assert!(variable(&on_stderr.stderr, GIT_TERMINAL_PROMPT_ENV).is_some());
+    }
+
+    #[test]
+    fn a_failing_noninteractive_capture_reports_only_the_exit_code() {
+        use crate::test_support::{TempDir, init_repository};
+
+        // 失敗の理由は直列フェーズで git 自身が出す。ここで抱え込むと解釈したくなる
+        let dir = TempDir::new("exec-noninteractive-failure");
+        init_repository(dir.path());
+
+        let error = capture_git_noninteractive_in(
+            Language::English,
+            dir.path(),
+            &["rev-parse", "--verify", "refs/heads/does-not-exist"],
+        )
+        .expect_err("an unknown revision should fail");
+
+        assert!(
+            matches!(error, Error::GitRunFailed { .. }),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn the_other_execution_paths_leave_the_interaction_settings_alone() {
+        use crate::test_support::{TempDir, init_repository};
+
+        // 抑止は並列フェーズだけに閉じる。直列フェーズは認証プロンプトを出せる必要がある
+        let dir = TempDir::new("exec-noninteractive-isolation");
+        init_repository(dir.path());
+
+        let displayed = capture_git_display(
+            Language::English,
+            &env_args(path_argument(dir.path()), ENV_ALIAS_TO_STDOUT),
+        )
+        .expect("the env alias should succeed");
+        let fixed = capture_git_in(dir.path(), &["-c", ENV_ALIAS_TO_STDOUT, ENV_ALIAS])
+            .expect("the env alias should succeed");
+
+        for key in [
+            GIT_TERMINAL_PROMPT_ENV,
+            GIT_ASKPASS_ENV,
+            GIT_SSH_COMMAND_ENV,
+        ] {
+            assert_eq!(
+                variable(&displayed, key),
+                inherited_value(key),
+                "{key} must be inherited untouched by capture_git_display"
+            );
+            assert_eq!(
+                variable(&fixed, key),
+                inherited_value(key),
+                "{key} must be inherited untouched by capture_git_in"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inherited_stdio_run_leaves_the_interaction_settings_alone() {
+        use crate::test_support::{TempDir, init_repository};
+
+        // 直列フェーズがこの経路であり、ここまで抑止されると認証プロンプトに応答できなくなる
+        let dir = TempDir::new("exec-noninteractive-serial");
+        init_repository(dir.path());
+
+        run_git_in(
+            Language::English,
+            dir.path(),
+            &["-c", ENV_ALIAS_TO_FILE, ENV_ALIAS],
+        )
+        .expect("the env alias should succeed");
+
+        let written = std::fs::read(dir.path().join(ENV_FILE)).expect("the alias should write");
+
+        for key in [
+            GIT_TERMINAL_PROMPT_ENV,
+            GIT_ASKPASS_ENV,
+            GIT_SSH_COMMAND_ENV,
+        ] {
+            assert_eq!(
+                variable(&written, key),
+                inherited_value(key),
+                "{key} must be inherited untouched by run_git_in"
+            );
+        }
     }
 }

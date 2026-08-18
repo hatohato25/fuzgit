@@ -1585,6 +1585,53 @@ fn fetch_siblings_reports_when_nothing_can_be_fetched() {
     }
 }
 
+/// `fuzgit.fetchJobs` が不正な場合、1 件も fetch せずに停止することを確認する（FR-28）。
+///
+/// 同時実行数は通信を始める前に解決するため、設定を直さない限りネットワークへは出ない。
+/// 暗黙に既定値へ倒さず、読み取った値を示して停止する（暗黙のフォールバック禁止）。
+#[test]
+fn fetch_siblings_stops_before_fetching_when_the_job_count_is_invalid() {
+    // 他のテストの一時ディレクトリが兄弟として並ばないよう、専用の親を用意する
+    let parent = TempDir::new("fetch-siblings-jobs");
+    let work = parent.path().join("work");
+    std::fs::create_dir_all(&work).expect("failed to create the work tree");
+    git_in(&work, &["init", "--quiet", "--initial-branch=main"]);
+    // 候補として選ばれるにはリモートが要る。到達不能な URL にしておけば、設定の検証を
+    // 素通りした場合にだけ通信を試みることになり、「通信前に止まる」ことを検証できる
+    git_in(
+        &work,
+        &["remote", "add", "origin", "https://example.invalid/o.git"],
+    );
+
+    for value in ["0", "many"] {
+        git_in(&work, &["config", "fuzgit.fetchJobs", value]);
+
+        let output = gz()
+            .args(["fetch", "--siblings"])
+            .current_dir(&work)
+            .env("FUZGIT_DEBUG", "1")
+            // 事前チェックが失われた場合に TUI で待ち続けないよう、上限を設けて打ち切る
+            .timeout(FINDER_GUARD_TIMEOUT)
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz fetch --siblings: {err}"));
+
+        assert!(
+            !output.status.success(),
+            "`fuzgit.fetchJobs = {value}` should stop the run"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("fuzgit.fetchJobs"),
+            "the setting at fault should be named for `{value}`:\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("git fetch"),
+            "no repository should be fetched for `{value}`:\n{stderr}"
+        );
+    }
+}
+
 /// `--siblings` を指定しない限り兄弟リポジトリは走査対象にならないことを確認する（FR-23）。
 ///
 /// 兄弟にリモート付きのリポジトリを置いても、既定の `gz fetch` は現在のリポジトリの
