@@ -17,7 +17,8 @@ use crate::commands::stash::{StashAction, UntrackedFiles};
 use crate::commands::sync::SyncMode;
 use crate::commands::tag::TagAction;
 use crate::error;
-use crate::git::read::{BranchScope, CommitScope};
+use crate::finder::{Highlight, HighlightColor};
+use crate::git::read::{BranchScope, CommitInfo, CommitScope};
 use crate::i18n::{Language, Messages};
 
 pub mod add;
@@ -130,6 +131,44 @@ fn pad(cell: &str, width: usize) -> String {
     padded.push_str(&" ".repeat(width.saturating_sub(cell.width())));
 
     padded
+}
+
+/// コミット候補の表示行を組み立てる。この文字列がそのまま絞り込みの対象になる。
+///
+/// `gz log` / `gz cherry-pick` / `gz revert` / `gz fixup` / `gz diff --commit` は同じ形の
+/// コミット一覧を出すため、書式と配色（[`commit_highlights`]）をここへ集約する。
+/// 片方だけを変えると同じ見た目の一覧でコマンドごとに色が食い違うため、両者は必ず対で使う。
+///
+/// コミットメッセージでの検索を主用途とするため、サマリを作者より前に置く。
+pub(crate) fn commit_line(commit: &CommitInfo) -> String {
+    format!(
+        "{short_id} {time} {summary} ({author})",
+        short_id = commit.short_id,
+        time = commit.time,
+        summary = commit.summary,
+        author = commit.author
+    )
+}
+
+/// [`commit_line`] のうち色を付ける範囲。
+///
+/// ハッシュを黄、日付を緑にする。これは fuzgit が独自に決めた配色ではなく、git 自身が
+/// `git log` で用いる配色（コミットハッシュが黄）と、`--pretty=format` の慣用例
+/// （`%C(yellow)%h %C(green)%ad`）に合わせたもの。サマリと作者は色を付けない
+/// （一覧の大半を占めるため、色を付けると逆に目印が埋もれる）。
+///
+/// 範囲はバイト位置である。短縮ハッシュ（16 進数）と日付（`YYYY-MM-DD`）はいずれも
+/// ASCII であり、後続のサマリに多バイト文字が含まれても前 2 列の位置には影響しない。
+pub(crate) fn commit_highlights(commit: &CommitInfo) -> Vec<Highlight> {
+    let hash_end = commit.short_id.len();
+    // 区切りの空白 1 文字を挟んで日付が始まる
+    let time_start = hash_end + 1;
+    let time_end = time_start + commit.time.len();
+
+    vec![
+        Highlight::new(0, hash_end, HighlightColor::Yellow),
+        Highlight::new(time_start, time_end, HighlightColor::Green),
+    ]
 }
 
 /// これから実行する git コマンドを表示用の 1 行に整形する。
@@ -406,6 +445,84 @@ mod tests {
                     &"advent-calendar",
                     "advent-calendar  origin/main".to_owned()
                 ),
+            ]
+        );
+    }
+
+    /// 色の範囲を検証するためのコミット。
+    fn commit(short_id: &str, time: &str, summary: &str) -> CommitInfo {
+        CommitInfo {
+            id: format!("{short_id}0000000000000000000000000000000"),
+            short_id: short_id.to_owned(),
+            summary: summary.to_owned(),
+            author: "hatohato25".to_owned(),
+            time: time.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_commit_line_puts_the_hash_and_the_date_first() {
+        assert_eq!(
+            commit_line(&commit("1f0c9a4", "2026-08-20", "add the notify feature")),
+            "1f0c9a4 2026-08-20 add the notify feature (hatohato25)"
+        );
+    }
+
+    #[test]
+    fn the_hash_is_yellow_and_the_date_is_green() {
+        // git 自身の配色に合わせる（`git log` のハッシュが黄、`%C(green)%ad` が慣用）
+        let highlights = commit_highlights(&commit("1f0c9a4", "2026-08-20", "add the feature"));
+
+        assert_eq!(
+            highlights,
+            [
+                Highlight::new(0, 7, HighlightColor::Yellow),
+                Highlight::new(8, 18, HighlightColor::Green),
+            ]
+        );
+    }
+
+    /// 行を独立に走査して、ハッシュ列と日付列のバイト位置を求める。
+    ///
+    /// `commit_highlights` と同じ計算を書き写すと、両方が同じ間違いをしても気付けない。
+    fn ranges_of(line: &str) -> (usize, usize, usize) {
+        let hash_end = line.find(' ').expect("the hash is followed by a separator");
+        let time_start = hash_end + 1;
+        let time_end = time_start
+            + line[time_start..]
+                .find(' ')
+                .expect("the date is followed by a separator");
+
+        (hash_end, time_start, time_end)
+    }
+
+    #[test]
+    fn the_coloured_ranges_match_the_line_they_describe() {
+        // 範囲はバイト位置。サマリの多バイト文字が前 2 列の位置へ影響しないことも同時に見る
+        let commit = commit("9bde988", "2026-08-07", "fuzgit 基盤と P1 フェーズ実装");
+        let (hash_end, time_start, time_end) = ranges_of(&commit_line(&commit));
+
+        assert_eq!(
+            commit_highlights(&commit),
+            [
+                Highlight::new(0, hash_end, HighlightColor::Yellow),
+                Highlight::new(time_start, time_end, HighlightColor::Green),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shorter_hash_moves_the_date_range_with_it() {
+        // 短縮ハッシュの長さは core.abbrev で変わるため、固定長を前提にしない
+        let commit = commit("1f0c9", "2026-08-20", "add the feature");
+        let (hash_end, time_start, time_end) = ranges_of(&commit_line(&commit));
+
+        assert_eq!(hash_end, 5, "the hash column follows the short id");
+        assert_eq!(
+            commit_highlights(&commit),
+            [
+                Highlight::new(0, hash_end, HighlightColor::Yellow),
+                Highlight::new(time_start, time_end, HighlightColor::Green),
             ]
         );
     }

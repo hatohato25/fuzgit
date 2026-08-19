@@ -14,6 +14,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 
 use crate::cli::DEFAULT_COMMIT_LIMIT;
 use crate::commands::file_selection::{FileCandidate, resolve, target_paths};
+use crate::commands::{commit_highlights, commit_line};
 use crate::finder::{
     FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with, select_one_with,
 };
@@ -404,13 +405,7 @@ fn branch_item(language: Language, branch: &BranchInfo) -> FinderItem {
 
 /// コミット候補の一覧に表示する 1 行を組み立てる（`gz log` と同じ並び）。
 fn commit_display_line(commit: &CommitInfo) -> String {
-    format!(
-        "{short_id} {time} {summary} ({author})",
-        short_id = commit.short_id,
-        time = commit.time,
-        summary = commit.summary,
-        author = commit.author
-    )
+    commit_line(commit)
 }
 
 /// コミット候補のプレビュー（`git show`）の引数を組み立てる。
@@ -430,6 +425,7 @@ fn commit_item(language: Language, commit: &CommitInfo) -> FinderItem {
         PreviewSource::Git(commit_preview_args(commit)),
         language.messages(),
     )
+    .with_highlights(commit_highlights(commit))
 }
 
 /// 変更ファイルのプレビュー（選択中ファイルに限定した差分）の引数を組み立てる。

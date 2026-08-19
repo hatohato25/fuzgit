@@ -4,6 +4,7 @@ use std::io::Write as _;
 
 use anyhow::{Context as _, Result};
 
+use crate::commands::{commit_highlights, commit_line};
 use crate::finder::{FinderItem, PreviewSource, select_one};
 use crate::git::read::{CommitInfo, CommitScope, commits};
 use crate::i18n::{Language, Messages};
@@ -39,13 +40,7 @@ pub fn run(
 ///
 /// コミットメッセージでの絞り込みを主用途とするため、サマリを作者より前に置く。
 fn display_line(commit: &CommitInfo) -> String {
-    format!(
-        "{short_id} {time} {summary} ({author})",
-        short_id = commit.short_id,
-        time = commit.time,
-        summary = commit.summary,
-        author = commit.author
-    )
+    commit_line(commit)
 }
 
 /// プレビュー用の `git show` の引数を組み立てる。
@@ -65,6 +60,7 @@ fn to_item(language: Language, commit: &CommitInfo) -> FinderItem {
         PreviewSource::Git(preview_args(commit)),
         language.messages(),
     )
+    .with_highlights(commit_highlights(commit))
 }
 
 #[cfg(test)]
