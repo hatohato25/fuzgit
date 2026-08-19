@@ -162,6 +162,20 @@ pub enum Error {
         value: String,
     },
 
+    /// `git config fuzgit.notify` に、真偽値として解釈できない値が設定されている。
+    ///
+    /// 既定（通知しない）へ黙って倒さないのは、有効にしたつもりの設定が効かないまま
+    /// 実行が進み、「通知が来ないのは設定を間違えたからだ」と気づく手段が無くなるため
+    /// である（[`Error::InvalidFetchJobs`] と同じ扱い。暗黙のフォールバック禁止）。
+    ///
+    /// 保持するのは**読み取った値そのもの**であり、表示済みの文へは組み立てない。
+    /// 文の組み立ては [`crate::i18n::messages::ErrorMessages::describe`] が言語ごとに行う。
+    #[error("invalid value for `fuzgit.notify`: `{value}` (expected a boolean)")]
+    InvalidNotify {
+        /// 設定から読み取った値。UTF-8 でない値はロッシー変換された文字列になる。
+        value: String,
+    },
+
     /// ユーザーが fuzzy finder を中断した（Esc / Ctrl-C）。
     #[error("the selection was cancelled")]
     Cancelled,
@@ -289,6 +303,18 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "invalid value for `fuzgit.fetchJobs`: `0` (expected an integer of 1 or more)"
+        );
+    }
+
+    #[test]
+    fn an_invalid_notify_value_is_shown_verbatim() {
+        // 真偽値の綴りは git のものに従うため、期待する形は「真偽値」とだけ示す
+        let err = Error::InvalidNotify {
+            value: "sometimes".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "invalid value for `fuzgit.notify`: `sometimes` (expected a boolean)"
         );
     }
 

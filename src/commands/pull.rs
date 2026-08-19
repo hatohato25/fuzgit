@@ -14,6 +14,8 @@
 //! 決まったあとに継承 stdio で実行する `git fetch` だけである（design.md「候補生成・
 //! プレビューでネットワークアクセスを行わない」）。
 
+use std::time::Instant;
+
 use anyhow::{Context as _, Result, bail};
 
 use crate::commands::aligned_candidates;
@@ -24,6 +26,7 @@ use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, sel
 use crate::git::exec::run_git;
 use crate::git::read::{PullScan, PullTarget, operation_in_progress, pull_targets};
 use crate::i18n::{Language, Messages};
+use crate::notify::{notify, notify_setting, should_notify};
 
 /// 自分自身のリポジトリを指す `git fetch` の取得元。
 ///
@@ -132,10 +135,31 @@ pub fn run(
         }
     };
 
+    // 通知の設定は 1 件も実行しないうちに解決する（不正な設定のまま通信を始めない）
+    let notification = notify_setting(repository)?;
+
+    // 通知の閾値と比べるのは取り込みに掛かった時間だけであり、finder で候補を選んで
+    // いる間は含めない（ユーザーが端末の前にいる時間であるため）
+    let started = Instant::now();
     let summary = pull_each(messages, &targets, &mut std::io::stderr(), |arguments| {
         run_git(language, arguments)
     })?;
+    let elapsed = started.elapsed();
     report_summary(messages, &mut std::io::stderr(), &summary)?;
+
+    // 集計を書き出した**後**に通知する。通知が出ない環境でも集計は必ず出ることを
+    // 構造で担保するためである（FR-29）。本文に [`summary_line`] を使わないのは、
+    // それが失敗したブランチ名（ユーザー由来の文字列）を含むためで、通知へ載せるのは
+    // 件数だけに限る（design.md「並列 fetch と完了通知のセキュリティ上の考慮」）
+    if should_notify(notification, elapsed) {
+        notify(
+            messages,
+            messages.pull().notification_title(),
+            &messages
+                .common()
+                .run_summary(summary.succeeded, summary.failed.len()),
+        );
+    }
 
     if summary.has_failure() {
         // 集計は表示済み。ここでは終了コードを 1 にするためにエラーを返す

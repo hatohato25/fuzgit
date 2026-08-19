@@ -263,14 +263,17 @@ pub enum Command {
 /// [`StashCommand`]（既定を決められないためサブコマンド必須）との違い。
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum BranchCommand {
-    /// Pick a starting point and create a new branch
+    /// Pick a starting point and create a new branch, then switch to it
+    //
+    // 作成したブランチへ切り替えるところまでが既定（`git switch -c` / `git checkout -b` と同じ）。
+    // 作成だけしたい場合に限って `--no-switch` を付ける
     Create {
         /// Name of the branch to create
         name: String,
 
-        /// Switch to the branch after creating it
+        /// Create the branch without switching to it
         #[arg(long)]
-        switch: bool,
+        no_switch: bool,
     },
 
     /// Pick a branch and delete it
@@ -471,8 +474,8 @@ fn localize_branch(command: ClapCommand, cli: &dyn CliMessages) -> ClapCommand {
                 .mut_arg("name", |argument| {
                     argument.help(cli.branch_create_name_help())
                 })
-                .mut_arg("switch", |argument| {
-                    argument.help(cli.branch_create_switch_help())
+                .mut_arg("no_switch", |argument| {
+                    argument.help(cli.branch_create_no_switch_help())
                 })
         })
         .mut_subcommand("delete", |delete| {
@@ -862,7 +865,7 @@ mod tests {
 
     #[test]
     fn branch_exposes_the_management_subcommands() {
-        let cli = Cli::try_parse_from(["gz", "branch", "create", "feature", "--switch"])
+        let cli = Cli::try_parse_from(["gz", "branch", "create", "feature", "--no-switch"])
             .expect("`gz branch create` should parse");
         match cli.command {
             Command::Branch { all, command } => {
@@ -871,10 +874,24 @@ mod tests {
                     command,
                     Some(BranchCommand::Create {
                         name: "feature".to_string(),
-                        switch: true,
+                        no_switch: true,
                     })
                 );
             }
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        // 既定は切り替えるところまで（`git switch -c` 相当）であり、フラグを足したときだけ留まる
+        let cli = Cli::try_parse_from(["gz", "branch", "create", "feature"])
+            .expect("`gz branch create` should parse without the flag");
+        match cli.command {
+            Command::Branch { command, .. } => assert_eq!(
+                command,
+                Some(BranchCommand::Create {
+                    name: "feature".to_string(),
+                    no_switch: false,
+                })
+            ),
             other => panic!("unexpected subcommand: {other:?}"),
         }
 

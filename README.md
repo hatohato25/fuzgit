@@ -163,6 +163,19 @@ The current repository is preselected. Tab: toggle the selection / Enter: fetch 
    zulu   origin/main
 ```
 
+The selected repositories are fetched **in parallel** — the wait is network round trips, and the
+targets are separate repositories. Four run at a time by default; `git config fuzgit.fetchJobs <n>`
+changes that, and `1` restores the fully serial behaviour. **The setting applies to
+`gz fetch --siblings` only**; plain `gz fetch`, `gz pull` and `gz sync` fetch once and have nothing
+to parallelise.
+
+Each repository's output is captured and printed as one block when it finishes, so the update tables
+never interleave. The parallel phase cannot prompt you for anything, so **anything that needs a
+password or passphrase is run again afterwards, one at a time, with the terminal attached** — that
+second run is not a retry, just a different way of running it. If you set `core.sshCommand` in git
+config, the parallel phase overrides it and every target falls through to that serial pass; the
+result is still correct, you just don't get the speedup.
+
 **[`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) — bring several branches up to date at once**
 
 The only thing you pick is which local branches should follow their upstream, and integration is
@@ -179,6 +192,24 @@ $ gz pull
 [4/4] zeta
 3 succeeded / 1 failed (failed: diverged)
 ```
+
+Branches run one at a time here, and that is deliberate: the per-remote fetch is effectively a single
+call (most repositories track one upstream remote), and integrating branches writes to a single
+repository, where the index and ref locks would collide.
+
+**Desktop notification when a long run finishes.** Both `gz fetch --siblings` and `gz pull` can tell
+you when they are done, which helps when you have stepped away.
+
+```sh
+git config --global fuzgit.notify true
+```
+
+It is **off unless you turn it on**, and it stays quiet for runs shorter than ten seconds. The body
+is the count only — no repository, branch or path names. Whether a banner actually appears depends on
+your environment (macOS uses `osascript` and needs notifications allowed for your terminal; Linux
+uses `notify-send`, which may not be installed). fuzgit never treats that as a failure, and the
+tally is always written to stderr regardless, so **the notification is a convenience, never the only
+way you learn the result**.
 
 ## Commands
 

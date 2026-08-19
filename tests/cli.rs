@@ -225,6 +225,34 @@ fn repository_with_an_unstaged_change(label: &str) -> TempDir {
     dir
 }
 
+/// upstream を設定したローカルの bare リポジトリを追跡する git リポジトリを用意する。
+///
+/// 取得元をローカルに置くため、`gz pull` を**ネットワークへ出さずに**最後まで実行できる
+/// （候補が 1 件だけになるため finder も起動しない）。戻り値の 1 つ目は取得元であり、
+/// 破棄されると追跡先が消えるため呼び出し側で保持する。
+fn repository_tracking_a_local_remote(label: &str) -> (TempDir, TempDir) {
+    let remote = TempDir::new(&format!("{label}-remote"));
+    git_in(
+        remote.path(),
+        &["init", "--quiet", "--bare", "--initial-branch=main"],
+    );
+    let remote_path = remote
+        .path()
+        .to_str()
+        .expect("the path should be utf-8")
+        .to_owned();
+
+    let work = empty_repository(label);
+    commit_in(work.path(), "a.txt", "first\n", "first commit");
+    git_in(work.path(), &["remote", "add", "origin", &remote_path]);
+    git_in(
+        work.path(),
+        &["push", "--quiet", "--set-upstream", "origin", "main"],
+    );
+
+    (remote, work)
+}
+
 /// `main` と、`main` へ取り込まれていない `wip` ブランチを持つ git リポジトリを用意する。
 ///
 /// merged なブランチが 1 件も無い状態であり、`gz branch cleanup` の候補が空になる。
@@ -1632,6 +1660,93 @@ fn fetch_siblings_stops_before_fetching_when_the_job_count_is_invalid() {
     }
 }
 
+/// `fuzgit.notify` が不正な場合、1 件も fetch せずに停止することを確認する（FR-29）。
+///
+/// 通知の設定は通信を始める前に解決する。既定（通知しない）へ黙って倒すと、有効に
+/// したつもりの設定が効かないまま実行が終わってしまう（暗黙のフォールバック禁止）。
+#[test]
+fn fetch_siblings_stops_before_fetching_when_the_notification_setting_is_invalid() {
+    // 他のテストの一時ディレクトリが兄弟として並ばないよう、専用の親を用意する
+    let parent = TempDir::new("fetch-siblings-notify-invalid");
+    let work = parent.path().join("work");
+    std::fs::create_dir_all(&work).expect("failed to create the work tree");
+    git_in(&work, &["init", "--quiet", "--initial-branch=main"]);
+    // 候補として選ばれるにはリモートが要る。到達不能な URL にしておけば、設定の検証を
+    // 素通りした場合にだけ通信を試みることになり、「通信前に止まる」ことを検証できる
+    git_in(
+        &work,
+        &["remote", "add", "origin", "https://example.invalid/o.git"],
+    );
+    git_in(&work, &["config", "fuzgit.notify", "sometimes"]);
+
+    let output = gz()
+        .args(["fetch", "--siblings"])
+        .current_dir(&work)
+        .env("FUZGIT_DEBUG", "1")
+        // 事前チェックが失われた場合に TUI で待ち続けないよう、上限を設けて打ち切る
+        .timeout(FINDER_GUARD_TIMEOUT)
+        .output()
+        .expect("failed to run gz fetch --siblings");
+
+    assert!(
+        !output.status.success(),
+        "an invalid `fuzgit.notify` should stop the run"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("fuzgit.notify"),
+        "the setting at fault should be named:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("git fetch"),
+        "no repository should be fetched:\n{stderr}"
+    );
+}
+
+/// 通知を有効にしても `gz fetch --siblings` の終了コードが変わらないことを確認する（FR-29）。
+///
+/// 通知コマンドが存在しない環境（CI・最小構成の Linux）でも、通知の失敗は握り潰されて
+/// 主処理の結果に影響しない。この実行は閾値より短いためそもそも通知は発火せず、ここで
+/// 検証するのは「通知を有効にしただけで結果が変わらないこと」と「集計は必ず出ること」。
+/// 通知が実際に表示されるかどうかは手動確認の対象とする。
+#[test]
+fn fetch_siblings_succeeds_with_the_notification_enabled() {
+    // ネットワークへ出ないよう、取得元はローカルの bare リポジトリにする。
+    // 走査対象の親ディレクトリの外へ置き、兄弟の候補に混ざらないようにする
+    let remote = TempDir::new("fetch-notify-remote");
+    git_in(
+        remote.path(),
+        &["init", "--quiet", "--bare", "--initial-branch=main"],
+    );
+    let remote_path = remote.path().to_str().expect("the path should be utf-8");
+
+    let parent = TempDir::new("fetch-notify-scope");
+    let work = parent.path().join("work");
+    std::fs::create_dir_all(&work).expect("failed to create the work tree");
+    git_in(&work, &["init", "--quiet", "--initial-branch=main"]);
+    commit_in(&work, "a.txt", "first\n", "first commit");
+    git_in(&work, &["remote", "add", "origin", remote_path]);
+    git_in(&work, &["config", "fuzgit.notify", "true"]);
+
+    let output = gz()
+        .args(["fetch", "--siblings"])
+        .current_dir(&work)
+        .timeout(FINDER_GUARD_TIMEOUT)
+        .output()
+        .expect("failed to run gz fetch --siblings");
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        output.status.success(),
+        "a failing notification must not change the exit code:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("成功 1 件 / 失敗 0 件"),
+        "the summary must be written whether or not the notification appears:\n{stderr}"
+    );
+}
+
 /// `--siblings` を指定しない限り兄弟リポジトリは走査対象にならないことを確認する（FR-23）。
 ///
 /// 兄弟にリモート付きのリポジトリを置いても、既定の `gz fetch` は現在のリポジトリの
@@ -1704,6 +1819,64 @@ fn pull_reports_when_no_branch_can_follow_an_upstream() {
     assert!(
         output.stdout.is_empty(),
         "nothing should be written to stdout"
+    );
+}
+
+/// 通知を有効にしても `gz pull` の終了コードが変わらないことを確認する（FR-29）。
+///
+/// `gz pull` は直列実行のままであり、通知の発火条件は並列化（FR-28）の有無に依存しない。
+/// この実行は閾値より短いため通知は発火せず、ここで検証するのは「通知を有効にしただけで
+/// 結果が変わらないこと」と「集計は必ず出ること」。
+#[test]
+fn pull_succeeds_with_the_notification_enabled() {
+    let (_remote, work) = repository_tracking_a_local_remote("pull-notify");
+    git_in(work.path(), &["config", "fuzgit.notify", "true"]);
+
+    let output = gz()
+        .arg("pull")
+        .current_dir(work.path())
+        .timeout(FINDER_GUARD_TIMEOUT)
+        .output()
+        .expect("failed to run gz pull");
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        output.status.success(),
+        "a failing notification must not change the exit code:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("成功 1 件 / 失敗 0 件"),
+        "the summary must be written whether or not the notification appears:\n{stderr}"
+    );
+}
+
+/// `fuzgit.notify` が不正な場合、`gz pull` も 1 件も fetch せずに停止することを確認する（FR-29）。
+#[test]
+fn pull_stops_before_fetching_when_the_notification_setting_is_invalid() {
+    let (_remote, work) = repository_tracking_a_local_remote("pull-notify-invalid");
+    git_in(work.path(), &["config", "fuzgit.notify", "sometimes"]);
+
+    let output = gz()
+        .arg("pull")
+        .current_dir(work.path())
+        .env("FUZGIT_DEBUG", "1")
+        .timeout(FINDER_GUARD_TIMEOUT)
+        .output()
+        .expect("failed to run gz pull");
+
+    assert!(
+        !output.status.success(),
+        "an invalid `fuzgit.notify` should stop the run"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("fuzgit.notify"),
+        "the setting at fault should be named:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("git fetch"),
+        "no remote should be fetched:\n{stderr}"
     );
 }
 

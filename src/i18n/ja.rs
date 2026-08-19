@@ -298,6 +298,11 @@ impl ErrorMessages for JapaneseErrorMessages {
                 "git config `fuzgit.fetchJobs` の値 `{value}` は同時実行数として使えません。\
                  1 以上の整数を設定するか、設定を削除して既定値に戻してください"
             ),
+            Error::InvalidNotify { value } => format!(
+                "git config `fuzgit.notify` の値 `{value}` は真偽値として解釈できません。\
+                 `true` / `false` のような git の真偽値を設定するか、設定を削除して\
+                 通知を無効のままにしてください"
+            ),
             Error::Cancelled => "選択が中断されました".to_owned(),
             Error::NoCandidates => "選択できる候補がありません".to_owned(),
             Error::FinderFailed { message } => {
@@ -1195,6 +1200,12 @@ impl FetchMessages for JapaneseFetchMessages {
     fn partial_failure(&self) -> &'static str {
         "一部のリポジトリで取得に失敗しました"
     }
+
+    fn notification_title(&self) -> &'static str {
+        // 通知の本文は件数だけであるため、どのコマンドが終わったのかはここで示す。
+        // コマンド列（`gz fetch --siblings`）は翻訳しない
+        "gz fetch --siblings が完了しました"
+    }
 }
 
 /// `gz pull`（[`crate::commands::pull`]）の日本語表示。
@@ -1259,6 +1270,10 @@ impl PullMessages for JapanesePullMessages {
     fn partial_failure(&self) -> &'static str {
         "一部のブランチで取り込みに失敗しました"
     }
+
+    fn notification_title(&self) -> &'static str {
+        "gz pull が完了しました"
+    }
 }
 
 /// `clap` のヘルプ（[`CliMessages`]）の日本語表示。
@@ -1287,15 +1302,15 @@ impl CliMessages for JapaneseCliMessages {
     }
 
     fn branch_create_about(&self) -> &'static str {
-        "作成元を選択して新しいブランチを作成する"
+        "作成元を選択して新しいブランチを作成し、そのブランチへ切り替える"
     }
 
     fn branch_create_name_help(&self) -> &'static str {
         "作成するブランチ名"
     }
 
-    fn branch_create_switch_help(&self) -> &'static str {
-        "作成後にそのブランチへ切り替える"
+    fn branch_create_no_switch_help(&self) -> &'static str {
+        "切り替えずに作成だけ行う"
     }
 
     fn branch_delete_about(&self) -> &'static str {

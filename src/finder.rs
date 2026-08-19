@@ -195,6 +195,8 @@ pub enum HighlightColor {
     Green,
     /// 赤（ANSI 31）。
     Red,
+    /// 黄（ANSI 33）。
+    Yellow,
 }
 
 impl HighlightColor {
@@ -203,6 +205,7 @@ impl HighlightColor {
         match self {
             Self::Green => Color::Green,
             Self::Red => Color::Red,
+            Self::Yellow => Color::Yellow,
         }
     }
 }

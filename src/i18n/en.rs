@@ -316,6 +316,11 @@ impl ErrorMessages for EnglishErrorMessages {
                  `fuzgit.fetchJobs`. Set an integer of 1 or more, or remove the setting \
                  to fall back to the default"
             ),
+            Error::InvalidNotify { value } => format!(
+                "`{value}` is not a boolean for the git config `fuzgit.notify`. \
+                 Set a git boolean such as `true` or `false`, or remove the setting \
+                 to leave the notification disabled"
+            ),
             Error::Cancelled => "The selection was cancelled".to_owned(),
             Error::NoCandidates => "There are no candidates to select from".to_owned(),
             Error::FinderFailed { message } => {
@@ -1312,6 +1317,11 @@ impl FetchMessages for EnglishFetchMessages {
     fn partial_failure(&self) -> &'static str {
         "Fetching failed for some repositories"
     }
+
+    fn notification_title(&self) -> &'static str {
+        // 通知の本文は件数だけであるため、どのコマンドが終わったのかはここで示す
+        "gz fetch --siblings finished"
+    }
 }
 
 /// `gz pull`（[`crate::commands::pull`]）の英語表示。
@@ -1384,6 +1394,10 @@ Push with `git push -u <remote> <branch>`, or set one with `git branch --set-ups
     fn partial_failure(&self) -> &'static str {
         "Integrating failed for some branches"
     }
+
+    fn notification_title(&self) -> &'static str {
+        "gz pull finished"
+    }
 }
 
 /// `clap` のヘルプ（[`CliMessages`]）の英語表示。
@@ -1412,15 +1426,15 @@ impl CliMessages for EnglishCliMessages {
     }
 
     fn branch_create_about(&self) -> &'static str {
-        "Pick a starting point and create a new branch"
+        "Pick a starting point, create a new branch and switch to it"
     }
 
     fn branch_create_name_help(&self) -> &'static str {
         "Name of the branch to create"
     }
 
-    fn branch_create_switch_help(&self) -> &'static str {
-        "Switch to the branch after creating it"
+    fn branch_create_no_switch_help(&self) -> &'static str {
+        "Create the branch without switching to it"
     }
 
     fn branch_delete_about(&self) -> &'static str {

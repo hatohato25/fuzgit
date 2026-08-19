@@ -94,6 +94,21 @@ const DEFAULT_SSH_COMMAND: &str = "ssh";
 /// ssh へ対話を禁じるオプション。passphrase や未知のホストの確認を待たずに失敗させる。
 const SSH_BATCH_MODE_OPTION: &str = "-o BatchMode=yes";
 
+/// ssh の接続多重化（ControlMaster）を使わせないオプション。
+///
+/// 利用者が `ControlMaster auto` を設定していると、同時に起動した ssh がいずれも
+/// 「マスター接続はまだ無い」と判断して同じ ControlPath を作りに行き、先に作れた 1 つ以外は
+/// `ControlSocket ... already exists, disabling multiplexing` を出して通常接続へ落ちる。
+/// 並列実行では多重化はそもそも成立しないため、**競合させたうえで警告を読ませるより、
+/// 初めから使わないことを明示する**（`man ssh_config` の ControlMaster は `auto` を
+/// 「マスターがあれば使い、無ければ作る」日和見的な多重化と説明している）。
+///
+/// 無効化はこの経路に閉じており、直列フォールバックでは利用者の設定がそのまま効く。
+const SSH_NO_MULTIPLEXING_OPTION: &str = "-o ControlMaster=no";
+
+/// 並列フェーズの ssh へ必ず付けるオプション（この順に後ろへ足す）。
+const SSH_PARALLEL_OPTIONS: [&str; 2] = [SSH_BATCH_MODE_OPTION, SSH_NO_MULTIPLEXING_OPTION];
+
 /// 子プロセス `git` のメッセージ言語をどう扱うか（FR-26 の (A)/(B) 分類）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocaleIntent {
@@ -231,30 +246,29 @@ fn apply_locale(command: &mut Command, intent: LocaleIntent) -> LocaleEnvironmen
 /// - `GIT_TERMINAL_PROMPT=0`: git 自身の端末プロンプトを止める
 /// - `GIT_ASKPASS=""`: askpass ヘルパの起動を止める。空文字は `core.askPass` と
 ///   `SSH_ASKPASS` の**両方へのフォールバックも塞ぐ**
-/// - `GIT_SSH_COMMAND`: ssh は passphrase を**標準入力ではなく `/dev/tty` から読む**ため、
-///   `stdin` を閉じるだけでは防げない。`-o BatchMode=yes` を付けると実 pty 配下でも
-///   端末へ何も書かずに即座に失敗する。親環境に値があればそれへ追記し、利用者の ssh 設定を
-///   捨てない
+/// - `GIT_SSH_COMMAND`: [`SSH_PARALLEL_OPTIONS`] を付けた ssh を使わせる。
+///   `-o BatchMode=yes` は、ssh が passphrase を**標準入力ではなく `/dev/tty` から読む**ため
+///   `stdin` を閉じるだけでは防げないことへの対処（実 pty 配下でも端末へ何も書かずに失敗する）。
+///   `-o ControlMaster=no` は並列起動どうしの接続多重化の競合を避けるため。
+///   親環境に値があればそれへ追記し、利用者の ssh 設定を捨てない
 ///
-/// **上の 2 つはどちらか一方では足りない。**`GIT_TERMINAL_PROMPT=0` だけでは askpass が
-/// 起動し、`GIT_ASKPASS=""` だけでは端末へプロンプトが書き出される。
+/// **`GIT_TERMINAL_PROMPT` と `GIT_ASKPASS` はどちらか一方では足りない。**前者だけでは
+/// askpass が起動し、後者だけでは端末へプロンプトが書き出される。
 ///
 /// 親環境の `GIT_SSH_COMMAND` が**空文字の場合は「未設定」として扱う**。そのまま追記すると
-/// 先頭にコマンド名の無い `" -o BatchMode=yes"` になってしまうため
+/// 先頭にコマンド名の無い `" -o BatchMode=yes …"` になってしまうため
 /// （空文字を未設定とみなすのは `FUZGIT_LANG` / `fuzgit.lang` と同じ流儀）。
 ///
 /// **`Command::env_clear()` は使わない**（[`LocaleEnvironment`] と同じ理由）。設定するのは
 /// ここに並ぶ 3 つだけであり、直列フェーズや他の実行経路の環境は一切変えない。
 fn noninteractive_environment(ssh_command: Option<&OsStr>) -> Vec<(&'static str, OsString)> {
-    let ssh = match ssh_command.filter(|value| !value.is_empty()) {
-        Some(inherited) => {
-            let mut combined = inherited.to_owned();
-            combined.push(" ");
-            combined.push(SSH_BATCH_MODE_OPTION);
-            combined
-        }
-        None => OsString::from(format!("{DEFAULT_SSH_COMMAND} {SSH_BATCH_MODE_OPTION}")),
-    };
+    let mut ssh = ssh_command
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| OsString::from(DEFAULT_SSH_COMMAND), OsStr::to_owned);
+    for option in SSH_PARALLEL_OPTIONS {
+        ssh.push(" ");
+        ssh.push(option);
+    }
 
     vec![
         (
@@ -1425,30 +1439,49 @@ mod tests {
             vec![
                 (GIT_TERMINAL_PROMPT_ENV, OsString::from("0")),
                 (GIT_ASKPASS_ENV, OsString::new()),
-                (GIT_SSH_COMMAND_ENV, OsString::from("ssh -o BatchMode=yes")),
+                (
+                    GIT_SSH_COMMAND_ENV,
+                    OsString::from("ssh -o BatchMode=yes -o ControlMaster=no")
+                ),
             ]
         );
     }
 
     #[test]
-    fn an_inherited_ssh_command_keeps_its_value_and_gains_batch_mode() {
+    fn an_inherited_ssh_command_keeps_its_value_and_gains_the_parallel_options() {
         // 捨ててしまうと、利用者が指定した鍵や踏み台ごと失われる
         let environment = noninteractive_environment(Some(OsStr::new("ssh -i /tmp/key")));
 
         assert_eq!(
             ssh_command_of(&environment),
-            Some(OsStr::new("ssh -i /tmp/key -o BatchMode=yes"))
+            Some(OsStr::new(
+                "ssh -i /tmp/key -o BatchMode=yes -o ControlMaster=no"
+            ))
         );
     }
 
     #[test]
     fn an_empty_ssh_command_counts_as_unset() {
-        // そのまま追記すると、コマンド名の無い " -o BatchMode=yes" になる
+        // そのまま追記すると、コマンド名の無い " -o BatchMode=yes …" になる
         let environment = noninteractive_environment(Some(OsStr::new("")));
 
         assert_eq!(
             ssh_command_of(&environment),
-            Some(OsStr::new("ssh -o BatchMode=yes"))
+            Some(OsStr::new("ssh -o BatchMode=yes -o ControlMaster=no"))
+        );
+    }
+
+    #[test]
+    fn the_parallel_phase_does_not_multiplex_the_ssh_connection() {
+        // 同時に起動した ssh がいずれもマスターになろうとすると、先に作れた 1 つ以外は
+        // `ControlSocket ... already exists, disabling multiplexing` を出して通常接続へ落ちる。
+        // 並列では多重化が成立しないため、競合させずに初めから使わないことを明示する
+        let environment = noninteractive_environment(Some(OsStr::new("ssh")));
+
+        let ssh = ssh_command_of(&environment).expect("the ssh command should be built");
+        assert!(
+            ssh.to_string_lossy().contains("-o ControlMaster=no"),
+            "multiplexing must be turned off explicitly: {ssh:?}"
         );
     }
 
@@ -1483,8 +1516,12 @@ mod tests {
         let ssh = variable(&run.stdout, GIT_SSH_COMMAND_ENV)
             .expect("the ssh command should be set for the child process");
         assert!(
-            ssh.ends_with("-o BatchMode=yes"),
+            ssh.contains("-o BatchMode=yes"),
             "ssh must not be able to ask for a passphrase: {ssh}"
+        );
+        assert!(
+            ssh.contains("-o ControlMaster=no"),
+            "ssh must not fight over the control socket: {ssh}"
         );
 
         // (B) 系であり、表示言語は従来どおり子プロセスへ伝わる

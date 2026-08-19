@@ -177,6 +177,12 @@ mod tests {
                 },
                 vec!["abc", "fuzgit.fetchJobs"],
             ),
+            (
+                Error::InvalidNotify {
+                    value: "sometimes".to_string(),
+                },
+                vec!["sometimes", "fuzgit.notify"],
+            ),
             (Error::Cancelled, vec![]),
             (Error::NoCandidates, vec![]),
             (

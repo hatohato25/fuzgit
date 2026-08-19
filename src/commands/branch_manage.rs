@@ -17,7 +17,8 @@ use crate::cli::BranchCommand;
 use crate::commands::aligned_candidates;
 use crate::commands::confirmation::confirm;
 use crate::finder::{
-    FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with, select_one,
+    FinderItem, FinderOptions, Highlight, HighlightColor, PreviewSource, SelectionMode,
+    select_many_with, select_one,
 };
 use crate::git::exec::run_git;
 use crate::git::read::{
@@ -33,8 +34,20 @@ const DEFAULT_MERGE_BASE: &str = "HEAD";
 /// プレビューに表示する直近コミット数。
 const PREVIEW_COMMIT_COUNT: &str = "50";
 
-/// 作成元候補の種別ラベルを揃える桁数（`branch` の 6 文字に合わせる）。
-const KIND_WIDTH: usize = 6;
+/// 作成元の候補一覧で先頭へ寄せるブランチ名（この順に優先する）。
+///
+/// git の既定ブランチ名は `master` から `main` へ移っており、両方あるリポジトリでは
+/// 新しい方を上に置く。`init.defaultBranch` や `origin/HEAD` を読んで決める案は採らない
+/// （前者は**これから作るリポジトリ**の設定であって既存リポジトリの既定とは限らず、
+/// 後者は追加のリモート問い合わせか参照の解決を要して候補生成が重くなるため）。
+const PREFERRED_BASE_BRANCHES: [&str; 2] = ["main", "master"];
+
+/// 作成元候補の種別ラベルを揃える桁数。
+///
+/// ラベルは 1 文字であり、種別は**文字と色の両方**で示す（[`BaseKind::label`]）。
+/// 候補一覧はほとんどがブランチであり、同じ語を全行に並べても情報を持たないうえ、
+/// 名前の開始位置を右へ押し出してしまうため、幅を最小にしている。
+const KIND_WIDTH: usize = 1;
 
 /// upstream 設定が指すリモート側ブランチの参照名の前置き。
 const BRANCH_REF_PREFIX: &str = "refs/heads/";
@@ -53,12 +66,15 @@ const UNMERGED_LABEL: &str = "unmerged";
 
 /// ブランチ作成後に切り替えるかどうか。
 ///
-/// 作成と切替は別の操作であり、`gz branch create` は既定では作成だけを行う。
+/// 新しいブランチを切る目的はそこで作業を始めることであり、作成しただけで切り替えないのは
+/// ほとんどの場合もう一手間を強いるだけである。そのため `gz branch create` は
+/// **作成に続けて切り替えるところまでを既定**とし、`git switch -c` / `git checkout -b` と
+/// 同じ挙動にする。作成だけしたい場合に限って `--no-switch` を付ける。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwitchAfterCreate {
-    /// 作成のみ行い、現在のブランチのままにする（既定）。
+    /// 作成のみ行い、現在のブランチのままにする（`--no-switch`）。
     Stay,
-    /// 作成後にそのブランチへ切り替える（`--switch`）。
+    /// 作成後にそのブランチへ切り替える（既定）。
     Switch,
 }
 
@@ -94,11 +110,27 @@ enum BaseKind {
 }
 
 impl BaseKind {
-    /// 表示および finder キーの前置きに用いる呼称。
+    /// 表示および finder キーの前置きに用いる 1 文字のラベル。
+    ///
+    /// 語ではなく頭文字にするのは、候補のほとんどがブランチであり、同じ語を全行へ並べても
+    /// 区別に寄与しないため。1 文字だけでは意味が伝わりにくい分は [`Self::color`] の色が補う。
+    ///
+    /// **ASCII 1 文字であること**が [`KIND_WIDTH`] と、色を付ける範囲（バイト位置）の前提になる。
     fn label(self) -> &'static str {
         match self {
-            BaseKind::Branch => "branch",
-            BaseKind::Tag => "tag",
+            BaseKind::Branch => "b",
+            BaseKind::Tag => "t",
+        }
+    }
+
+    /// ラベルに付ける色。
+    ///
+    /// git 自身の配色に合わせる（`git branch --color` のローカルブランチが緑、
+    /// `git log --decorate` のタグが黄）。
+    fn color(self) -> HighlightColor {
+        match self {
+            BaseKind::Branch => HighlightColor::Green,
+            BaseKind::Tag => HighlightColor::Yellow,
         }
     }
 }
@@ -119,6 +151,14 @@ struct BaseCandidate {
     /// ブランチは名前をそのまま、タグは解決済みのオブジェクト ID を渡す
     /// （annotated tag のタグオブジェクトは git 側でコミットまで peel される）。
     revision: String,
+    /// 表示文字列のうち色を付ける範囲（先頭の種別ラベル）。
+    highlights: Vec<Highlight>,
+    /// 作成完了の報告に用いる名前（ブランチ名またはタグ名）。
+    ///
+    /// [`Self::key`] と分けているのは、キーが finder 内での一意化のために種別を前置きした
+    /// 内部表現であり、そのまま読ませると `b main` のような文言になってしまうため。
+    /// [`Self::revision`] とも分ける（タグの revision はオブジェクト ID であり読めない）。
+    name: String,
 }
 
 /// 削除候補 1 件分。
@@ -146,11 +186,11 @@ pub fn run(
     command: &BranchCommand,
 ) -> Result<()> {
     match command {
-        BranchCommand::Create { name, switch } => {
-            let switch = if *switch {
-                SwitchAfterCreate::Switch
-            } else {
+        BranchCommand::Create { name, no_switch } => {
+            let switch = if *no_switch {
                 SwitchAfterCreate::Stay
+            } else {
+                SwitchAfterCreate::Switch
             };
             create(language, messages, repository, name, switch)
         }
@@ -220,21 +260,57 @@ fn create(
 ///
 /// ブランチを先に並べる。作成元は多くの場合ブランチであり、タグからの作成
 /// （リリース時点からの枝分かれ）は相対的に少ないため。
+/// ブランチの中では既定ブランチ（[`PREFERRED_BASE_BRANCHES`]）を先頭へ寄せる。
 fn base_candidates(branches: &[BranchInfo], tags: &[TagInfo]) -> Vec<BaseCandidate> {
-    let from_branches = branches.iter().map(|branch| BaseCandidate {
-        key: base_key(BaseKind::Branch, &branch.name),
-        display: base_display(BaseKind::Branch, &branch.name, None),
-        revision: branch.name.clone(),
-    });
+    let from_branches = preferred_first(branches)
+        .into_iter()
+        .map(|branch| BaseCandidate {
+            key: base_key(BaseKind::Branch, &branch.name),
+            display: base_display(BaseKind::Branch, &branch.name, None),
+            revision: branch.name.clone(),
+            highlights: kind_highlights(BaseKind::Branch),
+            name: branch.name.clone(),
+        });
 
     let from_tags = tags.iter().map(|tag| BaseCandidate {
         key: base_key(BaseKind::Tag, &tag.name),
         display: base_display(BaseKind::Tag, &tag.name, tag.message.as_deref()),
         // annotated tag は参照が指すタグオブジェクトの ID。git が対象コミットまで peel する
         revision: tag.id.clone(),
+        highlights: kind_highlights(BaseKind::Tag),
+        name: tag.name.clone(),
     });
 
     from_branches.chain(from_tags).collect()
+}
+
+/// 作成元に選ばれやすいブランチを先頭へ寄せた並びを返す。
+///
+/// 新しいブランチは既定ブランチから切ることが最も多く、候補が数十件あると目的の行まで
+/// 打ち込むか送る手間がかかる。先頭に置けば finder のカーソルが最初からそこに当たるため、
+/// そのまま Enter を押せば済む。
+///
+/// **対象はローカルブランチだけである。**`origin/main` のようなリモート追跡ブランチは
+/// 名前が一致しないため寄せない（作成元にするならローカルの既定ブランチを選ぶのが普通であり、
+/// リモート側を優先すると追跡関係の無いブランチが既定になってしまう）。
+///
+/// 並べ替えは安定ソートで行い、寄せた分以外の順序（[`crate::git::read::branches`] が返す
+/// ローカル名前順 → リモート名前順）は変えない。
+fn preferred_first(branches: &[BranchInfo]) -> Vec<&BranchInfo> {
+    let mut ordered: Vec<&BranchInfo> = branches.iter().collect();
+    ordered.sort_by_key(|branch| preferred_rank(&branch.name));
+
+    ordered
+}
+
+/// 作成元としての優先順位。小さいほど前に来る。
+///
+/// [`PREFERRED_BASE_BRANCHES`] に無い名前はすべて同順であり、安定ソートにより元の順序を保つ。
+fn preferred_rank(name: &str) -> usize {
+    PREFERRED_BASE_BRANCHES
+        .iter()
+        .position(|preferred| *preferred == name)
+        .unwrap_or(PREFERRED_BASE_BRANCHES.len())
 }
 
 /// 作成元候補の finder キーを組み立てる。
@@ -257,6 +333,14 @@ fn base_display(kind: BaseKind, name: &str, message: Option<&str>) -> String {
     line
 }
 
+/// 種別ラベルに付ける色の指定を組み立てる。
+///
+/// ラベルは表示行の先頭にあり、[`BaseKind::label`] は ASCII 1 文字であるため、
+/// 範囲は常に先頭の [`KIND_WIDTH`] バイトになる。
+fn kind_highlights(kind: BaseKind) -> Vec<Highlight> {
+    vec![Highlight::new(0, KIND_WIDTH, kind.color())]
+}
+
 /// 作成元候補を finder のアイテムへ変換する。
 fn to_base_item(language: Language, candidate: &BaseCandidate) -> FinderItem {
     FinderItem::new(
@@ -265,6 +349,7 @@ fn to_base_item(language: Language, candidate: &BaseCandidate) -> FinderItem {
         PreviewSource::Git(log_preview_args(&candidate.revision)),
         language.messages(),
     )
+    .with_highlights(candidate.highlights.clone())
 }
 
 /// プレビュー用の `git log --oneline` の引数を組み立てる。
@@ -321,7 +406,7 @@ fn report_created(
     writeln!(
         writer,
         "{}",
-        messages.branch_manage().created(name, &base.key)
+        messages.branch_manage().created(name, &base.name)
     )
     .context(messages.common().stderr_write_failed())?;
 
@@ -804,8 +889,64 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.key.as_str())
                 .collect::<Vec<_>>(),
-            ["branch main", "branch origin/main", "tag v1.0"]
+            ["b main", "b origin/main", "t v1.0"]
         );
+    }
+
+    #[test]
+    fn the_default_branch_is_offered_first() {
+        // 新しいブランチは既定ブランチから切ることが最も多い。先頭にあれば Enter だけで済む
+        let candidates = base_candidates(
+            &[local("develop"), local("main"), local("zeta")],
+            &[tag("v1.0", None)],
+        );
+
+        assert_eq!(candidates[0].name, "main");
+    }
+
+    #[test]
+    fn master_is_used_when_there_is_no_main() {
+        let candidates = base_candidates(&[local("develop"), local("master")], &[]);
+
+        assert_eq!(candidates[0].name, "master");
+    }
+
+    #[test]
+    fn main_comes_before_master_when_both_exist() {
+        let candidates = base_candidates(&[local("master"), local("develop"), local("main")], &[]);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            ["main", "master", "develop"]
+        );
+    }
+
+    #[test]
+    fn the_order_of_the_other_branches_is_kept() {
+        // 寄せるのは既定ブランチだけで、残りは `branches()` が返した順のままにする
+        let candidates = base_candidates(
+            &[local("alpha"), local("main"), local("beta"), local("gamma")],
+            &[],
+        );
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.name.as_str())
+                .collect::<Vec<_>>(),
+            ["main", "alpha", "beta", "gamma"]
+        );
+    }
+
+    #[test]
+    fn a_remote_branch_named_main_is_not_pulled_to_the_front() {
+        // 作成元にするならローカルの既定ブランチ。リモート側を優先すると追跡関係が無いものが既定になる
+        let candidates = base_candidates(&[local("develop"), remote("origin/main")], &[]);
+
+        assert_eq!(candidates[0].name, "develop");
     }
 
     #[test]
@@ -813,9 +954,33 @@ mod tests {
         // 同名のブランチとタグは共存できるため、名前だけをキーにすると取り違える
         let candidates = base_candidates(&[local("v1.0")], &[tag("v1.0", None)]);
 
-        assert_eq!(candidates[0].key, "branch v1.0");
-        assert_eq!(candidates[1].key, "tag v1.0");
+        assert_eq!(candidates[0].key, "b v1.0");
+        assert_eq!(candidates[1].key, "t v1.0");
         assert_ne!(candidates[0].key, candidates[1].key);
+    }
+
+    #[test]
+    fn the_kind_is_shown_by_a_letter_and_a_colour() {
+        // 1 文字だけでは意味が伝わりにくい分を色が補うため、両方が揃っている必要がある
+        let candidates = base_candidates(&[local("main")], &[tag("v1.0", None)]);
+
+        assert_eq!(
+            candidates[0].highlights,
+            [Highlight::new(0, 1, HighlightColor::Green)]
+        );
+        assert_eq!(
+            candidates[1].highlights,
+            [Highlight::new(0, 1, HighlightColor::Yellow)]
+        );
+    }
+
+    #[test]
+    fn the_report_names_the_base_without_the_kind_prefix() {
+        // キーは finder 内での一意化のための内部表現であり、そのまま読ませると `b main` になる
+        let candidates = base_candidates(&[local("main")], &[tag("v1.0", None)]);
+
+        assert_eq!(candidates[0].name, "main");
+        assert_eq!(candidates[1].name, "v1.0");
     }
 
     #[test]
@@ -835,15 +1000,16 @@ mod tests {
 
     #[test]
     fn a_base_line_names_its_kind_before_the_name() {
-        assert_eq!(base_display(BaseKind::Branch, "main", None), "branch  main");
-        assert_eq!(base_display(BaseKind::Tag, "v2.0", None), "tag     v2.0");
+        // 種別は 1 文字。名前の開始位置は種別によらず揃う
+        assert_eq!(base_display(BaseKind::Branch, "main", None), "b  main");
+        assert_eq!(base_display(BaseKind::Tag, "v2.0", None), "t  v2.0");
     }
 
     #[test]
     fn an_annotated_tag_shows_its_message_after_the_name() {
         assert_eq!(
             base_display(BaseKind::Tag, "v1.0", Some("リリース 1.0")),
-            "tag     v1.0  リリース 1.0"
+            "t  v1.0  リリース 1.0"
         );
     }
 
@@ -853,7 +1019,7 @@ mod tests {
 
         assert_eq!(
             to_base_item(Language::Japanese, &candidates[0]).key(),
-            "branch main"
+            "b main"
         );
     }
 
@@ -894,7 +1060,9 @@ mod tests {
 
         let text = String::from_utf8(output).expect("the message should be utf-8");
         assert!(text.contains("ブランチ `feature`"), "unexpected: {text}");
-        assert!(text.contains("branch main"), "unexpected: {text}");
+        // 内部キー（`b main`）ではなく読める名前で示す
+        assert!(text.contains("main"), "unexpected: {text}");
+        assert!(!text.contains("b main"), "the internal key leaked: {text}");
         assert!(
             text.contains("git switch feature"),
             "the way to switch should be suggested: {text}"
@@ -1547,7 +1715,9 @@ mod tests {
 
         let text = String::from_utf8(output).expect("the message should be utf-8");
         assert_eq!(text.lines().count(), 2, "unexpected: {text}");
-        assert!(text.contains("branch main"), "unexpected: {text}");
+        // 内部キー（`b main`）ではなく読める名前で示す
+        assert!(text.contains("main"), "unexpected: {text}");
+        assert!(!text.contains("b main"), "the internal key leaked: {text}");
         assert!(
             text.contains("git switch feature"),
             "the way to switch should be suggested: {text}"

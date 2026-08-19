@@ -86,6 +86,7 @@
         <h2><span lang="en">Reference</span><span lang="ja">リファレンス</span></h2>
         <ul>
           <li><a href="#network"><span lang="en">Network operations</span><span lang="ja">ネットワーク操作について</span></a></li>
+          <li><a href="#notify"><span lang="en">Completion notifications</span><span lang="ja">完了通知</span></a></li>
           <li><a href="#keys"><span lang="en">Key bindings</span><span lang="ja">キー操作</span></a></li>
           <li><a href="#exit-codes"><span lang="en">Exit codes</span><span lang="ja">終了コード</span></a></li>
           <li><a href="#out-of-scope"><span lang="en">Out of scope</span><span lang="ja">スコープ外・非対応</span></a></li>
@@ -734,7 +735,7 @@ gz branch cleanup          # delete every merged branch in one go</code></pre>
                 <thead><tr><th scope="col">Argument / option</th><th scope="col">Description</th></tr></thead>
                 <tbody>
                   <tr><td><code>&lt;NAME&gt;</code></td><td>Name of the branch to create (required positional argument)</td></tr>
-                  <tr><td><code>--switch</code></td><td>Switch to the branch after creating it</td></tr>
+                  <tr><td><code>--no-switch</code></td><td>Create the branch without switching to it</td></tr>
                 </tbody>
               </table>
             </div>
@@ -742,9 +743,10 @@ gz branch cleanup          # delete every merged branch in one go</code></pre>
               <li>
                 What you pick in the fuzzy finder is the
                 <strong>starting point</strong>. Candidates are local branches,
-                remote-tracking branches and tags, each line prefixed with its
-                kind (<code>branch</code> / <code>tag</code>), because a branch
-                and a tag can share a name.
+                remote-tracking branches and tags, each line prefixed with a
+                one-letter kind (<code>b</code> in green for a branch,
+                <code>t</code> in yellow for a tag), because a branch and a tag
+                can share a name.
               </li>
               <li>
                 It runs <code>git branch -- &lt;name&gt; &lt;start point&gt;</code>. For an
@@ -760,7 +762,9 @@ gz branch cleanup          # delete every merged branch in one go</code></pre>
                 rejected by git.
               </li>
               <li>
-                Without <code>--switch</code> the branch is only created, and the
+                It switches to the new branch after creating it, the same as
+                <code>git switch -c</code> / <code>git checkout -b</code>. With
+                <code>--no-switch</code> the branch is only created, and the
                 command to switch to it is printed to stderr.
               </li>
             </ul>
@@ -870,15 +874,16 @@ gz branch cleanup          # merged なブランチを一括で削除する</cod
                 <thead><tr><th scope="col">引数・オプション</th><th scope="col">説明</th></tr></thead>
                 <tbody>
                   <tr><td><code>&lt;NAME&gt;</code></td><td>作成するブランチ名（必須の位置引数）</td></tr>
-                  <tr><td><code>--switch</code></td><td>作成後にそのブランチへ切り替える</td></tr>
+                  <tr><td><code>--no-switch</code></td><td>切り替えずに作成だけ行う</td></tr>
                 </tbody>
               </table>
             </div>
             <ul>
               <li>
                 fuzzy finder で選ぶのは<strong>作成元</strong>です。候補はローカルブランチ・
-                リモート追跡ブランチ・タグで、行頭に種別（<code>branch</code> / <code>tag</code>）が
-                付きます（同名のブランチとタグが共存できるため）。
+                リモート追跡ブランチ・タグで、行頭に種別が 1 文字で付きます
+                （ブランチは緑の <code>b</code>、タグは黄の <code>t</code>。
+                同名のブランチとタグが共存できるため）。
               </li>
               <li>
                 実行するのは <code>git branch -- &lt;name&gt; &lt;作成元&gt;</code> です。
@@ -891,8 +896,9 @@ gz branch cleanup          # merged なブランチを一括で削除する</cod
                 <code>--</code> で保護したうえで git が拒否します。
               </li>
               <li>
-                <code>--switch</code> を付けない場合は作成のみを行い、切り替えるためのコマンドを
-                標準エラーへ案内します。
+                作成に続けてそのブランチへ切り替えます（<code>git switch -c</code> /
+                <code>git checkout -b</code> と同じ挙動）。<code>--no-switch</code> を付けた場合は
+                作成のみを行い、切り替えるためのコマンドを標準エラーへ案内します。
               </li>
             </ul>
 
@@ -2192,12 +2198,42 @@ The current repository is the only target, so the selection was skipped
               <li>
                 What runs in each repository is
                 <code>git fetch [--prune] --all</code>. They run
-                <strong>one at a time, serially, in candidate order</strong>
-                (never in parallel). Before each one,
-                <code>[&lt;n&gt;/&lt;total&gt;] &lt;directory name&gt;</code> is
-                printed to stderr; without that line you could not tell which
-                repository the update table belongs to, since git writes it to
-                stderr as well.
+                <strong>in parallel</strong>, up to
+                <code>git config fuzgit.fetchJobs</code> at a time (4 by
+                default). Each repository&rsquo;s output is captured and written
+                out as a single block when it finishes, headed by
+                <code>[&lt;done&gt;/&lt;total&gt;] &lt;directory name&gt;</code>,
+                so the update tables of different repositories never interleave
+                (git writes them to stderr as well).
+              </li>
+              <li>
+                The parallel phase <strong>cannot ask you anything</strong> (no
+                password, passphrase or host key prompt). Any repository that
+                fails there is <strong>run again, one at a time, with the
+                terminal attached</strong>, so you can answer the prompt. That
+                second run is not a retry: it happens once, and only to change
+                <em>how</em> the command is run.
+              </li>
+              <li>
+                The number of repositories fetched at once comes from
+                <code>git config fuzgit.fetchJobs</code> (an integer of 1 or
+                more; <strong>4</strong> when unset). <code>1</code> restores the
+                fully serial behaviour. An invalid value <strong>stops the run
+                before anything is fetched</strong> rather than silently falling
+                back to the default. There is no CLI flag for it.
+                <pre><code>git config fuzgit.fetchJobs 8   # or --global</code></pre>
+              </li>
+              <li>
+                If you set <code>core.sshCommand</code> in git config, the
+                parallel phase overrides it (an environment variable beats the
+                config key &mdash; see <code>man git-config</code>), so every
+                target fails there and falls through to the serial pass. The
+                result is still correct; you simply do not get the speedup.
+              </li>
+              <li>
+                <code>git config fuzgit.notify true</code> makes fuzgit post a
+                <strong>desktop notification when the run finishes</strong>
+                (see <a href="#notify">Completion notifications</a>).
               </li>
               <li>
                 <strong>A failing repository does not stop the run</strong>; the
@@ -2344,10 +2380,36 @@ git@github.com:example/big-repo.git
               </li>
               <li>
                 実行するのは各リポジトリでの <code>git fetch [--prune] --all</code> です。
-                <strong>候補一覧の順序で 1 件ずつ直列に</strong>実行します（並列にしません）。
-                実行前に <code>[&lt;何番目&gt;/&lt;全体&gt;] &lt;ディレクトリ名&gt;</code> を標準エラーへ
-                表示します。<code>git fetch</code> の更新表も標準エラーに出るため、この 1 行が無いと
-                どのリポジトリの出力なのか読み取れなくなります。
+                <strong>並列に</strong>実行し、同時実行数は
+                <code>git config fuzgit.fetchJobs</code>（既定 4）で決まります。
+                各リポジトリの出力はキャプチャして、完了した順に
+                <code>[&lt;完了件数&gt;/&lt;全体&gt;] &lt;ディレクトリ名&gt;</code> を頭に付けて
+                ひとまとまりで書き出します。<code>git fetch</code> の更新表も標準エラーに出るため、
+                こうしないと複数のリポジトリの出力が混ざって読み取れなくなります。
+              </li>
+              <li>
+                並列フェーズでは<strong>一切の対話ができません</strong>（パスワード・passphrase・
+                ホスト鍵の確認を求めません）。そこで失敗したリポジトリだけは、端末をつないだまま
+                <strong>1 件ずつ実行し直す</strong>ため、プロンプトに応答できます。
+                これはリトライではなく<em>実行方法</em>の切り替えであり、1 回だけ行います。
+              </li>
+              <li>
+                同時に fetch する件数は <code>git config fuzgit.fetchJobs</code> で決まります
+                （1 以上の整数。未設定なら <strong>4</strong>）。<code>1</code> を指定すると
+                完全な直列実行に戻ります。不正な値のときは既定値へ暗黙に倒さず、
+                <strong>1 件も fetch しないまま停止</strong>します。CLI のフラグは設けていません。
+                <pre><code>git config fuzgit.fetchJobs 8   # --global も可</code></pre>
+              </li>
+              <li>
+                git config に <code>core.sshCommand</code> を設定している場合、並列フェーズは
+                それを上書きします（環境変数が config より優先されます。<code>man git-config</code>）。
+                そのため対象がすべて並列フェーズで失敗し、直列フェーズへ回ります。
+                結果は正しく得られますが、高速化の恩恵は受けられません。
+              </li>
+              <li>
+                <code>git config fuzgit.notify true</code> を設定すると、
+                <strong>実行の完了をデスクトップ通知で知らせます</strong>
+                （<a href="#notify">完了通知</a>参照）。
               </li>
               <li>
                 <strong>途中のリポジトリが失敗しても中断せず残りを実行</strong>し、最後に成功件数・
@@ -2998,16 +3060,23 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 and no direct socket handling whatsoever.
               </li>
               <li>
-                <strong><code>gz fetch --siblings</code> and <code>gz pull</code>
-                run the selected targets one at a time, serially</strong> (never
-                in parallel). git itself also fetches multiple remotes
-                sequentially by default (see <code>man git-fetch</code>). Running
-                them in parallel would interleave the inherited stdio, and with
-                several SSH passphrase or credential helper prompts running at
-                once you could not tell which remote you were typing into.
+                <strong><code>gz fetch --siblings</code> runs the selected
+                repositories in parallel</strong> (up to
+                <code>git config fuzgit.fetchJobs</code>, 4 by default), because
+                the wait is network round trips and the targets are separate
+                repositories. To keep the output readable and the prompts
+                unambiguous, that phase captures each repository&rsquo;s output
+                and <strong>forbids interaction</strong>
+                (<code>GIT_TERMINAL_PROMPT=0</code>, <code>GIT_ASKPASS=""</code>,
+                <code>ssh -o BatchMode=yes -o ControlMaster=no</code>); whatever
+                fails there is then run again one at a time with the terminal
+                attached. <strong><code>gz pull</code> stays serial</strong>: its
+                per-remote fetch is effectively a single call, and integrating
+                branches writes to one repository, where the index and ref locks
+                would collide.
                 <kbd>Ctrl-C</kbd> during a run is not handled specially: the
                 SIGINT delivered to the foreground process group terminates fuzgit
-                along with it (the remaining targets are not run).
+                along with it (targets not yet started are not run).
               </li>
               <li>
                 <strong>Without <code>--siblings</code>, neighbouring repositories
@@ -3058,17 +3127,99 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 ソケットの直接操作は一切行いません。
               </li>
               <li>
-                <strong><code>gz fetch --siblings</code> と <code>gz pull</code> は選択した対象を
-                1 件ずつ直列に実行します</strong>（並列にしません）。git 自身も複数リモートの fetch を
-                既定で逐次実行します（man git-fetch）。並列にすると継承 stdio の出力が混ざるうえ、
-                SSH パスフレーズや credential helper のプロンプトが同時に複数走るとどのリモートへ
-                入力しているのか判別できなくなるためです。実行中の <kbd>Ctrl-C</kbd> は独自に処理せず、
-                前面プロセスグループへ届いた SIGINT で fuzgit ごと終了します（残りは実行されません）。
+                <strong><code>gz fetch --siblings</code> は選択したリポジトリを並列に実行します</strong>
+                （同時実行数は <code>git config fuzgit.fetchJobs</code>、既定 4）。待ちの実体が
+                ネットワークの往復であり、対象が互いに独立した別リポジトリであるためです。
+                出力が読めなくなることとプロンプトの宛先が分からなくなることを防ぐため、
+                並列フェーズはリポジトリごとに出力をキャプチャし、<strong>対話を禁止</strong>します
+                （<code>GIT_TERMINAL_PROMPT=0</code>・<code>GIT_ASKPASS=""</code>・
+                <code>ssh -o BatchMode=yes -o ControlMaster=no</code>）。そこで失敗した対象は、
+                端末をつないだまま 1 件ずつ実行し直します。
+                <strong><code>gz pull</code> は直列のままです</strong>。リモートごとの fetch は
+                対象数が実質 1 件であり、ブランチの取り込みは同一リポジトリへの書き込みで
+                index や参照の lock が競合するためです。
+                実行中の <kbd>Ctrl-C</kbd> は独自に処理せず、前面プロセスグループへ届いた SIGINT で
+                fuzgit ごと終了します（まだ着手していない対象は実行されません）。
               </li>
               <li>
                 <strong><code>--siblings</code> を指定しない限り、隣のリポジトリは候補にすら
                 なりません。</strong>ディレクトリを移動しただけで多数のリポジトリへ通信が飛ぶことを
                 防ぐため、探索の起点は常に現在のリポジトリから導出し、パスで指定することもできません。
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <section id="notify">
+          <h2>
+            <span lang="en">Completion notifications</span><span lang="ja">完了通知</span>
+            <a class="anchor" href="#notify" aria-label="Link to this section">#</a>
+          </h2>
+          <div lang="en">
+            <ul>
+              <li>
+                <strong><code>gz fetch --siblings</code> and <code>gz pull</code>
+                can post a desktop notification when they finish</strong>, which
+                helps when you have stepped away from a long run. It is
+                <strong>off unless you turn it on</strong>:
+                <pre><code>git config --global fuzgit.notify true</code></pre>
+              </li>
+              <li>
+                Nothing is posted for runs shorter than <strong>ten
+                seconds</strong> &mdash; below that you are still looking at the
+                terminal. The threshold is fixed; there is no setting for it.
+              </li>
+              <li>
+                The body is the <strong>count only</strong>
+                (<code>3 succeeded / 1 failed</code>). No repository, branch or
+                path name is included: on macOS the text is handed to
+                <code>osascript</code>, which interprets its argument as
+                AppleScript, so user-derived strings are kept out of it by
+                construction.
+              </li>
+              <li>
+                Whether a banner actually appears depends on your environment.
+                macOS uses <code>osascript</code> and needs notifications allowed
+                for your terminal application; Linux uses
+                <code>notify-send</code>, which may not be installed. fuzgit
+                <strong>never treats that as a failure</strong> &mdash; the exit
+                code is unchanged, and the reason is only written to the debug
+                log (<code>FUZGIT_DEBUG=1</code>).
+              </li>
+              <li>
+                <strong>The tally is always written to stderr</strong> whether or
+                not a notification appears, so the notification is a convenience
+                and never the only way you learn the result.
+              </li>
+            </ul>
+          </div>
+          <div lang="ja">
+            <ul>
+              <li>
+                <strong><code>gz fetch --siblings</code> と <code>gz pull</code> は、完了時に
+                デスクトップ通知を出せます</strong>。長い実行の間に席を外しているときに役立ちます。
+                <strong>明示的に有効化しない限り出ません</strong>。
+                <pre><code>git config --global fuzgit.notify true</code></pre>
+              </li>
+              <li>
+                <strong>10 秒</strong>未満で終わった実行では通知しません。それより短ければ
+                ユーザーはまだ端末を見ているためです。閾値は固定で、設定項目は設けていません。
+              </li>
+              <li>
+                本文は<strong>件数だけ</strong>です（<code>成功 3 件 / 失敗 1 件</code>）。
+                リポジトリ名・ブランチ名・パスは含めません。macOS では本文を
+                <code>osascript</code> へ渡しますが、これは引数を AppleScript として解釈するため、
+                ユーザー由来の文字列を構造的に混ぜないようにしています。
+              </li>
+              <li>
+                実際にバナーが表示されるかは環境によります。macOS は <code>osascript</code> を
+                使うため端末アプリへの通知許可が必要で、Linux は <code>notify-send</code> を
+                使うため未導入だと出ません。fuzgit はこれを<strong>失敗として扱いません</strong>。
+                終了コードは変わらず、理由はデバッグログ（<code>FUZGIT_DEBUG=1</code>）にだけ出ます。
+              </li>
+              <li>
+                通知が出るかどうかに関わらず<strong>集計は必ず標準エラーへ出します</strong>。
+                通知はあくまで補助であり、結果を知る唯一の経路にはなりません。
               </li>
             </ul>
           </div>
@@ -3295,8 +3446,8 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                     <td>It would mean repeating the finder once per repository, which breaks the operation model. Guessing a single remote implicitly is also avoided, in favour of the deterministic rule <code>--all</code> (every registered remote). Excluding a specific remote can be done on the git side with <code>remote.&lt;name&gt;.skipFetchAll</code></td>
                   </tr>
                   <tr>
-                    <td>Fetching sibling repositories in parallel</td>
-                    <td>git itself fetches multiple remotes sequentially by default. With inherited stdio the output would interleave and the destination of an authentication prompt would become unidentifiable (see <a href="#network">Network operations</a>)</td>
+                    <td>Fetching the branches of <code>gz pull</code> in parallel</td>
+                    <td>Its per-remote fetch is effectively a single call (one upstream remote in most repositories), and integrating branches writes to one repository, where the index, ref and <code>packed-refs</code> locks would collide. <code>gz fetch --siblings</code> <em>is</em> parallel, because the targets are separate repositories (see <a href="#network">Network operations</a>)</td>
                   </tr>
                   <tr>
                     <td>Including bare repositories in the <code>--siblings</code> candidates</td>
@@ -3416,8 +3567,8 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                     </td>
                   </tr>
                   <tr>
-                    <td>兄弟リポジトリの並列 fetch</td>
-                    <td>git 自身も複数リモートの fetch を既定で逐次実行する。継承 stdio では出力が混ざり、認証プロンプトの宛先も判別できなくなる（<a href="#network">ネットワーク操作について</a>参照）</td>
+                    <td><code>gz pull</code> のブランチ取り込みの並列化</td>
+                    <td>リモートごとの fetch は対象数が実質 1 件（大半のリポジトリで upstream のリモートは 1 つ）であり、ブランチの取り込みは同一リポジトリへの書き込みで index・参照・<code>packed-refs</code> の lock が競合する。<code>gz fetch --siblings</code> は対象が別リポジトリであるため<em>並列に実行する</em>（<a href="#network">ネットワーク操作について</a>参照）</td>
                   </tr>
                   <tr>
                     <td>bare リポジトリを <code>--siblings</code> の候補に含めること</td>

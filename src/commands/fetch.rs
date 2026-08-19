@@ -22,6 +22,7 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use gix::bstr::ByteSlice as _;
@@ -35,6 +36,7 @@ use crate::git::exec::{CapturedRun, capture_git_noninteractive_in, run_git, run_
 use crate::git::read::{branch_tracking_args, remote_tracking_refs_args, remote_url_args, remotes};
 use crate::git::siblings::{self, SiblingRepository, SiblingScan};
 use crate::i18n::{Language, Messages};
+use crate::notify::{notify, notify_setting, should_notify};
 
 /// 「すべてのリモート」を表す固定候補のキー。
 ///
@@ -265,9 +267,14 @@ fn run_siblings(
         }
     };
 
-    // 同時実行数は 1 件も実行しないうちに解決する（不正な設定のまま通信を始めない）
+    // 同時実行数と通知の設定は 1 件も実行しないうちに解決する
+    // （不正な設定のまま通信を始めない。数十秒かけてからエラーにしない）
     let jobs = fetch_jobs(repository)?;
+    let notification = notify_setting(repository)?;
 
+    // 通知の閾値と比べるのは取得そのものに掛かった時間だけであり、finder で候補を
+    // 選んでいる間は含めない（ユーザーが端末の前にいる時間であるため）
+    let started = Instant::now();
     let summary = fetch_each(
         messages,
         &targets,
@@ -277,11 +284,27 @@ fn run_siblings(
         |directory, arguments| capture_git_noninteractive_in(language, directory, arguments),
         |directory, arguments| run_git_in(language, directory, arguments),
     )?;
+    let elapsed = started.elapsed();
     report_line(
         messages,
         &mut std::io::stderr(),
         &summary_line(messages, &summary),
     )?;
+
+    // 集計を書き出した**後**に通知する。通知が出ない環境でも集計は必ず出ることを
+    // 構造で担保するためであり、失敗した場合も通知するのは「終わった」ことを
+    // 伝えるのが目的だからである（FR-29）。本文に [`summary_line`] を使わないのは、
+    // それが失敗したリポジトリ名（ユーザー由来の文字列）を含むためで、通知へ載せるのは
+    // 件数だけに限る（design.md「並列 fetch と完了通知のセキュリティ上の考慮」）
+    if should_notify(notification, elapsed) {
+        notify(
+            messages,
+            messages.fetch().notification_title(),
+            &messages
+                .common()
+                .run_summary(summary.succeeded, summary.failed.len()),
+        );
+    }
 
     if summary.has_failure() {
         bail!(messages.fetch().partial_failure());

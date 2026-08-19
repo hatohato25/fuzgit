@@ -259,8 +259,8 @@ pub trait CliMessages: Sync + std::fmt::Debug {
     /// `gz branch create <NAME>` の説明。
     fn branch_create_name_help(&self) -> &'static str;
 
-    /// `gz branch create --switch` の説明。
-    fn branch_create_switch_help(&self) -> &'static str;
+    /// `gz branch create --no-switch` の説明。
+    fn branch_create_no_switch_help(&self) -> &'static str;
 
     /// `gz branch delete` の説明。
     fn branch_delete_about(&self) -> &'static str;
@@ -1144,6 +1144,16 @@ pub trait FetchMessages: Sync + std::fmt::Debug {
     ///
     /// 失敗の内訳は [`CommonMessages::failed_targets`] が直前に示すため再掲しない。
     fn partial_failure(&self) -> &'static str;
+
+    /// 完了通知（FR-29）のタイトル。
+    ///
+    /// **引数を取らない固定文言**である。通知の本文は件数だけ
+    /// （[`CommonMessages::run_summary`]）であり、どのコマンドの完了なのかを示すのは
+    /// このタイトルだけになる。可変部分を持たせないのは、macOS では通知のタイトルと本文が
+    /// AppleScript の文字列リテラルへ埋め込まれ、ユーザー由来の文字列を通すと
+    /// スクリプト片の注入面になるためである（design.md「並列 fetch と完了通知の
+    /// セキュリティ上の考慮」。[`crate::notify`]）。
+    fn notification_title(&self) -> &'static str;
 }
 
 /// `gz pull`（[`crate::commands::pull`]）の文言。
@@ -1223,6 +1233,14 @@ pub trait PullMessages: Sync + std::fmt::Debug {
     ///
     /// 失敗の内訳は [`CommonMessages::failed_targets`] が直前に示すため再掲しない。
     fn partial_failure(&self) -> &'static str;
+
+    /// 完了通知（FR-29）のタイトル。
+    ///
+    /// 制約と理由は [`FetchMessages::notification_title`] と同じ（引数を取らない固定文言）。
+    /// [`CommonMessages`] へ置かず両コマンドが別々に持つのは、通知の本文が件数だけであり、
+    /// `gz fetch --siblings` と `gz pull` のどちらが終わったのかをタイトルでしか
+    /// 区別できないためである。
+    fn notification_title(&self) -> &'static str;
 }
 
 /// [`crate::error::Error`] をユーザー向けの 1 文へ整形する文言。
