@@ -4,8 +4,8 @@ use std::io::Write as _;
 
 use anyhow::{Context as _, Result};
 
-use crate::commands::{commit_highlights, commit_line};
-use crate::finder::{FinderItem, PreviewSource, select_one};
+use crate::commands::{commit_highlights, commit_line, selection_header};
+use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one_with};
 use crate::git::read::{CommitInfo, CommitScope, commits};
 use crate::i18n::{Language, Messages};
 
@@ -27,7 +27,11 @@ pub fn run(
         .iter()
         .map(|commit| to_item(language, commit))
         .collect();
-    let selected = select_one(items)?;
+    let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
+        messages.log().header_subject(),
+        messages.log().header_outcome(),
+    ));
+    let selected = select_one_with(items, &options)?;
 
     // パイプ利用を想定し、stdout にはフルハッシュ以外を混ぜない。
     // パイプ先が先に閉じた場合に panic しないよう、書き込みエラーは明示的に伝播する
@@ -103,5 +107,25 @@ mod tests {
         let item = to_item(Language::Japanese, &commit());
 
         assert_eq!(item.key(), "1f0c9a4b3d2e5f60718293a4b5c6d7e8f9012345");
+    }
+
+    #[test]
+    fn every_log_message_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let log = language.messages().log();
+
+            for text in [log.header_subject(), log.header_outcome()] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+        }
+    }
+
+    #[test]
+    fn the_log_wording_is_translated() {
+        let japanese = Language::Japanese.messages().log();
+        let english = Language::English.messages().log();
+
+        assert_ne!(japanese.header_subject(), english.header_subject());
+        assert_ne!(japanese.header_outcome(), english.header_outcome());
     }
 }

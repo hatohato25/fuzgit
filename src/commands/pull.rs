@@ -18,9 +18,9 @@ use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::commands::aligned_candidates;
 use crate::commands::in_progress;
 use crate::commands::sync::{SyncMode, integrate_args as sync_integrate_args};
+use crate::commands::{HEADER_SEPARATOR, aligned_candidates};
 use crate::error::Error;
 use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with};
 use crate::git::exec::run_git;
@@ -51,9 +51,6 @@ const UPSTREAM_ARROW: &str = "→";
 
 /// リモート追跡参照の接頭辞。表示用の短縮名（`origin/main`）を得るために取り除く。
 const TRACKING_PREFIX: &str = "refs/remotes/";
-
-/// ヘッダー内の区切り（`gz fetch --siblings` と同じ体裁）。
-const HEADER_SEPARATOR: &str = "  |  ";
 
 /// プレビューに表示する最大コミット数。
 const PREVIEW_COMMIT_COUNT: &str = "50";

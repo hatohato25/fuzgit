@@ -14,11 +14,11 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context as _, Result, anyhow, bail};
 
 use crate::cli::BranchCommand;
-use crate::commands::aligned_candidates;
 use crate::commands::confirmation::confirm;
+use crate::commands::{aligned_candidates, selection_header};
 use crate::finder::{
     FinderItem, FinderOptions, Highlight, HighlightColor, PreviewSource, SelectionMode,
-    select_many_with, select_one,
+    select_many_with, select_one_with,
 };
 use crate::git::exec::run_git;
 use crate::git::read::{
@@ -42,12 +42,12 @@ const PREVIEW_COMMIT_COUNT: &str = "50";
 /// 後者は追加のリモート問い合わせか参照の解決を要して候補生成が重くなるため）。
 const PREFERRED_BASE_BRANCHES: [&str; 2] = ["main", "master"];
 
-/// 作成元候補の種別ラベルを揃える桁数。
+/// 作成元候補の種別ラベルを揃える桁数（最も長い `[branch]` に合わせる）。
 ///
-/// ラベルは 1 文字であり、種別は**文字と色の両方**で示す（[`BaseKind::label`]）。
-/// 候補一覧はほとんどがブランチであり、同じ語を全行に並べても情報を持たないうえ、
-/// 名前の開始位置を右へ押し出してしまうため、幅を最小にしている。
-const KIND_WIDTH: usize = 1;
+/// 一度は 1 文字（`b` / `t`）まで詰めたが、**頭文字だけでは何を指すのか読み取れない**ため
+/// 語へ戻した。角括弧で囲むのは、種別が候補の名前ではなく分類であることを字面で示すため。
+/// 幅を揃えるのは、種別によって名前の開始位置がずれないようにするため。
+const KIND_WIDTH: usize = 8;
 
 /// upstream 設定が指すリモート側ブランチの参照名の前置き。
 const BRANCH_REF_PREFIX: &str = "refs/heads/";
@@ -76,6 +76,19 @@ pub enum SwitchAfterCreate {
     Stay,
     /// 作成後にそのブランチへ切り替える（既定）。
     Switch,
+}
+
+impl SwitchAfterCreate {
+    /// 候補一覧のヘッダーで示す「決定すると何が起きるのか」。
+    ///
+    /// 切り替えの有無は選択の後に効くため、候補行からは読み取れない。網羅的な `match` に
+    /// することで、切替の方針を変えたときにヘッダーの更新漏れがコンパイルエラーになる。
+    fn header_outcome(self, messages: &dyn Messages) -> &'static str {
+        match self {
+            SwitchAfterCreate::Stay => messages.branch_manage().base_header_outcome_stay(),
+            SwitchAfterCreate::Switch => messages.branch_manage().base_header_outcome_switch(),
+        }
+    }
 }
 
 /// 削除に用いる `git branch` のオプション。
@@ -110,16 +123,13 @@ enum BaseKind {
 }
 
 impl BaseKind {
-    /// 表示および finder キーの前置きに用いる 1 文字のラベル。
+    /// 表示および finder キーの前置きに用いるラベル。
     ///
-    /// 語ではなく頭文字にするのは、候補のほとんどがブランチであり、同じ語を全行へ並べても
-    /// 区別に寄与しないため。1 文字だけでは意味が伝わりにくい分は [`Self::color`] の色が補う。
-    ///
-    /// **ASCII 1 文字であること**が [`KIND_WIDTH`] と、色を付ける範囲（バイト位置）の前提になる。
+    /// **ASCII であること**が [`KIND_WIDTH`] と、色を付ける範囲（バイト位置）の前提になる。
     fn label(self) -> &'static str {
         match self {
-            BaseKind::Branch => "b",
-            BaseKind::Tag => "t",
+            BaseKind::Branch => "[branch]",
+            BaseKind::Tag => "[tag]",
         }
     }
 
@@ -231,7 +241,11 @@ fn create(
         .iter()
         .map(|candidate| to_base_item(language, candidate))
         .collect();
-    let selected = select_one(items)?;
+    let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
+        messages.branch_manage().base_header_subject(),
+        switch.header_outcome(messages),
+    ));
+    let selected = select_one_with(items, &options)?;
 
     // `git branch` の作成元は `--` の後ろに置いてもオプション扱いから守れる位置に無いため、
     // 選択結果が候補一覧に含まれることを確かめてから引数に渡す（design.md セキュリティ設計）
@@ -335,10 +349,11 @@ fn base_display(kind: BaseKind, name: &str, message: Option<&str>) -> String {
 
 /// 種別ラベルに付ける色の指定を組み立てる。
 ///
-/// ラベルは表示行の先頭にあり、[`BaseKind::label`] は ASCII 1 文字であるため、
-/// 範囲は常に先頭の [`KIND_WIDTH`] バイトになる。
+/// ラベルは表示行の先頭にあり ASCII であるため、範囲は先頭からラベルのバイト数までになる。
+/// [`KIND_WIDTH`] ではなくラベルの長さを使うのは、桁を揃えるために右へ足した空白まで
+/// 塗らないようにするため（`[tag]` は `[branch]` より短い）。
 fn kind_highlights(kind: BaseKind) -> Vec<Highlight> {
-    vec![Highlight::new(0, KIND_WIDTH, kind.color())]
+    vec![Highlight::new(0, kind.label().len(), kind.color())]
 }
 
 /// 作成元候補を finder のアイテムへ変換する。
@@ -889,7 +904,7 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.key.as_str())
                 .collect::<Vec<_>>(),
-            ["b main", "b origin/main", "t v1.0"]
+            ["[branch] main", "[branch] origin/main", "[tag] v1.0"]
         );
     }
 
@@ -954,23 +969,40 @@ mod tests {
         // 同名のブランチとタグは共存できるため、名前だけをキーにすると取り違える
         let candidates = base_candidates(&[local("v1.0")], &[tag("v1.0", None)]);
 
-        assert_eq!(candidates[0].key, "b v1.0");
-        assert_eq!(candidates[1].key, "t v1.0");
+        assert_eq!(candidates[0].key, "[branch] v1.0");
+        assert_eq!(candidates[1].key, "[tag] v1.0");
         assert_ne!(candidates[0].key, candidates[1].key);
     }
 
     #[test]
-    fn the_kind_is_shown_by_a_letter_and_a_colour() {
-        // 1 文字だけでは意味が伝わりにくい分を色が補うため、両方が揃っている必要がある
+    fn the_kind_is_shown_by_a_word_and_a_colour() {
+        // 語と色の両方で示す。色を落とすと区別が字面だけに戻り、語を落とすと意味が読めなくなる
         let candidates = base_candidates(&[local("main")], &[tag("v1.0", None)]);
 
         assert_eq!(
             candidates[0].highlights,
-            [Highlight::new(0, 1, HighlightColor::Green)]
+            [Highlight::new(0, "[branch]".len(), HighlightColor::Green)]
         );
         assert_eq!(
             candidates[1].highlights,
-            [Highlight::new(0, 1, HighlightColor::Yellow)]
+            [Highlight::new(0, "[tag]".len(), HighlightColor::Yellow)]
+        );
+    }
+
+    #[test]
+    fn the_padding_after_a_short_kind_is_left_uncoloured() {
+        // 桁を揃えるための空白まで塗ると、`[tag]` の行だけ色の帯が長く見える
+        let candidates = base_candidates(&[], &[tag("v1.0", None)]);
+        let line = &candidates[0].display;
+
+        assert!(
+            line.starts_with("[tag]     "),
+            "the kind column is padded to the widest label: {line}"
+        );
+        assert_eq!(
+            candidates[0].highlights,
+            [Highlight::new(0, "[tag]".len(), HighlightColor::Yellow)],
+            "the padding must stay outside the coloured range"
         );
     }
 
@@ -1001,15 +1033,18 @@ mod tests {
     #[test]
     fn a_base_line_names_its_kind_before_the_name() {
         // 種別は 1 文字。名前の開始位置は種別によらず揃う
-        assert_eq!(base_display(BaseKind::Branch, "main", None), "b  main");
-        assert_eq!(base_display(BaseKind::Tag, "v2.0", None), "t  v2.0");
+        assert_eq!(
+            base_display(BaseKind::Branch, "main", None),
+            "[branch]  main"
+        );
+        assert_eq!(base_display(BaseKind::Tag, "v2.0", None), "[tag]     v2.0");
     }
 
     #[test]
     fn an_annotated_tag_shows_its_message_after_the_name() {
         assert_eq!(
             base_display(BaseKind::Tag, "v1.0", Some("リリース 1.0")),
-            "t  v1.0  リリース 1.0"
+            "[tag]     v1.0  リリース 1.0"
         );
     }
 
@@ -1019,7 +1054,7 @@ mod tests {
 
         assert_eq!(
             to_base_item(Language::Japanese, &candidates[0]).key(),
-            "b main"
+            "[branch] main"
         );
     }
 
@@ -1570,6 +1605,9 @@ mod tests {
         let branch_manage = language.messages().branch_manage();
 
         vec![
+            branch_manage.base_header_subject(),
+            branch_manage.base_header_outcome_switch(),
+            branch_manage.base_header_outcome_stay(),
             branch_manage.no_tracking(),
             branch_manage.unknown_date(),
             branch_manage.merged_state_read_failed(),
@@ -1650,6 +1688,20 @@ mod tests {
             .zip(texts_with_arguments(Language::English))
         {
             assert_ne!(japanese, english, "the wording must be translated");
+        }
+    }
+
+    #[test]
+    fn the_base_header_states_whether_the_new_branch_is_switched_to() {
+        // 既定と `--no-switch` で結果が変わるため、ヘッダーも変わらなければ嘘になる
+        for language in [Language::Japanese, Language::English] {
+            let messages = language.messages();
+
+            assert_ne!(
+                SwitchAfterCreate::Switch.header_outcome(messages),
+                SwitchAfterCreate::Stay.header_outcome(messages),
+                "{language:?} must tell the two apart"
+            );
         }
     }
 

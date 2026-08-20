@@ -2,7 +2,8 @@
 
 use anyhow::{Context as _, Result, anyhow};
 
-use crate::finder::{FinderItem, PreviewSource, select_one};
+use crate::commands::selection_header;
+use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one_with};
 use crate::git::exec::run_git;
 use crate::git::read::{BranchInfo, BranchScope, branches};
 use crate::i18n::{Language, Messages};
@@ -34,7 +35,11 @@ pub fn run(
         .iter()
         .map(|branch| to_item(language, branch))
         .collect();
-    let selected = select_one(items)?;
+    let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
+        messages.branch().header_subject(),
+        messages.branch().header_outcome(),
+    ));
+    let selected = select_one_with(items, &options)?;
 
     let branch = candidates
         .iter()
@@ -225,6 +230,10 @@ mod tests {
         for language in [Language::Japanese, Language::English] {
             let branch = language.messages().branch();
 
+            for text in [branch.header_subject(), branch.header_outcome()] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
+
             for (text, argument) in [
                 (branch.selection_not_found("feature"), "feature"),
                 (branch.tracking_target_undetermined("origin"), "origin"),
@@ -243,6 +252,8 @@ mod tests {
         let japanese = Language::Japanese.messages().branch();
         let english = Language::English.messages().branch();
 
+        assert_ne!(japanese.header_subject(), english.header_subject());
+        assert_ne!(japanese.header_outcome(), english.header_outcome());
         assert_ne!(
             japanese.selection_not_found("feature"),
             english.selection_not_found("feature")

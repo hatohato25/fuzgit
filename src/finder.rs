@@ -1257,13 +1257,19 @@ mod tests {
     }
 
     #[test]
-    fn a_header_is_passed_to_skim() {
-        let options = build_options(
-            &FinderOptions::new(SelectionMode::Multi).with_header("Tab で選択".to_string()),
-        )
-        .expect("options should build");
+    fn a_header_is_passed_to_skim_in_either_mode() {
+        // 単一選択にも「何を選ぶのか」を示すヘッダーを出すため、モードで分岐させない
+        for mode in [SelectionMode::Single, SelectionMode::Multi] {
+            let options =
+                build_options(&FinderOptions::new(mode).with_header("Enter: 切り替え".to_string()))
+                    .expect("options should build");
 
-        assert_eq!(options.header.as_deref(), Some("Tab で選択"));
+            assert_eq!(
+                options.header.as_deref(),
+                Some("Enter: 切り替え"),
+                "{mode:?}"
+            );
+        }
     }
 
     #[test]

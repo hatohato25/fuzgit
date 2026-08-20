@@ -4,7 +4,8 @@ use std::io::Write as _;
 
 use anyhow::{Context as _, Result, anyhow};
 
-use crate::finder::{FinderItem, PreviewSource, select_one};
+use crate::commands::selection_header;
+use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one_with};
 use crate::git::exec::run_git;
 use crate::git::read::{ReflogEntry, head_reflog};
 use crate::i18n::{Language, Messages};
@@ -33,7 +34,11 @@ pub fn run(
         .iter()
         .map(|entry| to_item(language, entry))
         .collect();
-    let selected = select_one(items)?;
+    let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
+        messages.reflog().header_subject(),
+        &header_outcome(messages, branch),
+    ));
+    let selected = select_one_with(items, &options)?;
 
     let entry = candidates
         .iter()
@@ -65,6 +70,17 @@ pub fn run(
     }
 
     Ok(())
+}
+
+/// 候補一覧のヘッダーで示す「決定すると何が起きるのか」。
+///
+/// `--restore` の有無で結果が変わる。既定は標準出力へ書くだけだが、指定された場合は
+/// リポジトリにブランチが増えるため、作成される名前まで選択前に示す。
+fn header_outcome(messages: &dyn Messages, branch: Option<&str>) -> String {
+    match branch {
+        Some(name) => messages.reflog().header_outcome_restore(name),
+        None => messages.reflog().header_outcome_print().to_owned(),
+    }
 }
 
 /// 表示用の短縮ハッシュ。
@@ -188,13 +204,41 @@ mod tests {
     }
 
     #[test]
+    fn the_header_names_the_branch_that_restore_would_create() {
+        // `--restore` はリポジトリに参照を増やすため、既定と同じ文言では嘘になる
+        for language in [Language::Japanese, Language::English] {
+            let messages = language.messages();
+            let restore = header_outcome(messages, Some("recovered"));
+
+            assert!(
+                restore.contains("recovered"),
+                "{language:?} must name the branch: {restore}"
+            );
+            assert_ne!(
+                restore,
+                header_outcome(messages, None),
+                "{language:?} must tell the two apart"
+            );
+        }
+    }
+
+    #[test]
     fn every_reflog_message_is_filled_in_for_both_languages() {
         for language in [Language::Japanese, Language::English] {
             let reflog = language.messages().reflog();
 
+            for text in [
+                reflog.header_subject(),
+                reflog.header_outcome_print(),
+                reflog.read_failed(),
+            ] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
             assert!(
-                !reflog.read_failed().trim().is_empty(),
-                "{language:?} left a message empty"
+                reflog
+                    .header_outcome_restore("recovered")
+                    .contains("recovered"),
+                "{language:?} must name the branch that would be created"
             );
             assert!(
                 reflog.selection_not_found("HEAD@{3}").contains("HEAD@{3}"),
@@ -220,6 +264,15 @@ mod tests {
         let japanese = Language::Japanese.messages().reflog();
         let english = Language::English.messages().reflog();
 
+        assert_ne!(japanese.header_subject(), english.header_subject());
+        assert_ne!(
+            japanese.header_outcome_print(),
+            english.header_outcome_print()
+        );
+        assert_ne!(
+            japanese.header_outcome_restore("recovered"),
+            english.header_outcome_restore("recovered")
+        );
         assert_ne!(japanese.read_failed(), english.read_failed());
         assert_ne!(
             japanese.selection_not_found("HEAD@{0}"),

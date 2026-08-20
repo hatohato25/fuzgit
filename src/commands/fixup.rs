@@ -8,8 +8,8 @@ use std::io::Write as _;
 use anyhow::{Context as _, Result, anyhow, bail};
 
 use crate::cli::DEFAULT_COMMIT_LIMIT;
-use crate::commands::{commit_highlights, commit_line};
-use crate::finder::{FinderItem, PreviewSource, select_one};
+use crate::commands::{commit_highlights, commit_line, selection_header};
+use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one_with};
 use crate::git::exec::run_git;
 use crate::git::read::{ChangeScope, CommitInfo, CommitScope, changes, commits};
 use crate::i18n::{Language, Messages};
@@ -95,7 +95,11 @@ pub fn run(
         .iter()
         .map(|commit| to_item(language, commit))
         .collect();
-    let selected = select_one(items)?;
+    let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
+        messages.fixup().header_subject(),
+        &messages.fixup().header_outcome(kind.label()),
+    ));
+    let selected = select_one_with(items, &options)?;
 
     // ハッシュは `--fixup=<hash>` のオプション値として渡るため `--` で保護できない。
     // 選択結果が候補一覧に含まれることを確かめてから引数に渡す（design.md セキュリティ設計）
@@ -439,11 +443,19 @@ mod tests {
         for language in [Language::Japanese, Language::English] {
             let fixup = language.messages().fixup();
 
-            for text in [fixup.staged_changes_read_failed(), fixup.root_start_note()] {
+            for text in [
+                fixup.header_subject(),
+                fixup.staged_changes_read_failed(),
+                fixup.root_start_note(),
+            ] {
                 assert!(!text.trim().is_empty(), "{language:?} left a message empty");
             }
 
             for label in ["fixup", "squash"] {
+                assert!(
+                    fixup.header_outcome(label).contains(label),
+                    "{language:?} must name the {label} commit"
+                );
                 assert!(
                     fixup.staged_required(label).contains(label),
                     "{language:?} must name the {label} commit"
@@ -481,6 +493,11 @@ mod tests {
         let japanese = Language::Japanese.messages().fixup();
         let english = Language::English.messages().fixup();
 
+        assert_ne!(japanese.header_subject(), english.header_subject());
+        assert_ne!(
+            japanese.header_outcome("fixup"),
+            english.header_outcome("fixup")
+        );
         assert_ne!(
             japanese.staged_changes_read_failed(),
             english.staged_changes_read_failed()

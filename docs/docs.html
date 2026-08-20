@@ -743,10 +743,9 @@ gz branch cleanup          # delete every merged branch in one go</code></pre>
               <li>
                 What you pick in the fuzzy finder is the
                 <strong>starting point</strong>. Candidates are local branches,
-                remote-tracking branches and tags, each line prefixed with a
-                one-letter kind (<code>b</code> in green for a branch,
-                <code>t</code> in yellow for a tag), because a branch and a tag
-                can share a name.
+                remote-tracking branches and tags, each line prefixed with its
+                kind (<code>[branch]</code> in green, <code>[tag]</code> in
+                yellow), because a branch and a tag can share a name.
               </li>
               <li>
                 It runs <code>git branch -- &lt;name&gt; &lt;start point&gt;</code>. For an
@@ -881,8 +880,8 @@ gz branch cleanup          # merged なブランチを一括で削除する</cod
             <ul>
               <li>
                 fuzzy finder で選ぶのは<strong>作成元</strong>です。候補はローカルブランチ・
-                リモート追跡ブランチ・タグで、行頭に種別が 1 文字で付きます
-                （ブランチは緑の <code>b</code>、タグは黄の <code>t</code>。
+                リモート追跡ブランチ・タグで、行頭に種別が付きます
+                （ブランチは緑の <code>[branch]</code>、タグは黄の <code>[tag]</code>。
                 同名のブランチとタグが共存できるため）。
               </li>
               <li>

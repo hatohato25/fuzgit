@@ -18,6 +18,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 
 use crate::cli::WorktreeCommand;
 use crate::commands::confirmation::confirm;
+use crate::commands::worktree_install::{InstallMode, install_dependencies};
 use crate::commands::{COLUMN_SEPARATOR, aligned_candidates};
 use crate::finder::{FinderItem, PreviewSource, select_one};
 use crate::git::exec::{capture_git_stderr_in, run_git};
@@ -79,7 +80,15 @@ pub fn run(
 ) -> Result<()> {
     match command {
         None => list(language, messages, repository),
-        Some(WorktreeCommand::Add { path }) => add(language, messages, repository, path),
+        // `--no-install` の真偽値をここで型へ畳み、commands 層へ `bool` を持ち回さない
+        // （既存の `PruneMode` / `FetchScope` と同方針）
+        Some(WorktreeCommand::Add { path, no_install }) => add(
+            language,
+            messages,
+            repository,
+            path,
+            InstallMode::from_no_install(*no_install),
+        ),
         Some(WorktreeCommand::Remove) => remove(language, messages, repository),
         Some(WorktreeCommand::Prune) => prune(language, messages, repository),
     }
@@ -110,15 +119,23 @@ fn list(language: Language, messages: &dyn Messages, repository: &gix::Repositor
 /// 複数の worktree で同時にチェックアウトできないため、使用中のブランチを選べても
 /// 必ず失敗する選択肢になるだけである。
 ///
+/// 作成に成功したら、[`InstallMode::Run`] の場合に限り依存インストールを試みる
+/// （FR-30。[`crate::commands::worktree_install`]）。**インストールの成否はこの関数の
+/// 戻り値に影響しない。**worktree の作成そのものは成功しており、それを失敗として返すと
+/// 呼び出し側（`&&` で繋いだシェル・スクリプト）に「worktree ができていない」と
+/// 誤解させるためである。
+///
 /// # Errors
 ///
 /// パスが UTF-8 でない場合、候補の取得・選択（中断を含む）、`git worktree add` の実行に
-/// 失敗した場合にエラーを返す。
+/// 失敗した場合にエラーを返す。作成後の worktree 一覧の読み直しに失敗した場合も
+/// エラーを返す（この読み取りは fuzgit 自身の操作であり、インストールの失敗ではない）。
 fn add(
     language: Language,
     messages: &dyn Messages,
     repository: &gix::Repository,
     path: &Path,
+    install: InstallMode,
 ) -> Result<()> {
     // `git` へ渡す引数は文字列である必要がある。解釈できないパスを勝手に変換すると
     // 意図と異なる場所に worktree を作ってしまうため、推測せずエラーにする
@@ -151,6 +168,74 @@ fn add(
     let arguments = add_args(path, &branch.name);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     run_git(language, &arguments).with_context(|| messages.worktree().creation_failed(path))?;
+
+    if install == InstallMode::Skip {
+        return Ok(());
+    }
+
+    // 作業ディレクトリには利用者が打った文字列（`../feature` のような相対パス）を使わない。
+    // 一覧を読み直して照合した登録済みパスを使う（design.md セキュリティ設計）
+    let created = created_worktree(messages, repository, path)?;
+    match created {
+        Some(directory) => install_dependencies(messages, &directory, &mut std::io::stderr()),
+        None => report_install_directory_not_found(messages, path, &mut std::io::stderr())?,
+    }
+
+    Ok(())
+}
+
+/// 作成した worktree の登録済みパスを、利用者が打ったパスとの照合を経て求める。
+///
+/// 照合には [`std::fs::canonicalize`] した利用者入力を使う。`git worktree list --porcelain`
+/// が報告するのはシンボリックリンクを解決した絶対パスであり（git 2.55 で実測。cwd が
+/// `/tmp/…` でも `/private/tmp/…` が報告される）、相対パスの解釈がプロセスのカレント
+/// ディレクトリに依存する曖昧さもこれで消える。
+///
+/// 照合できない場合（一覧に無い・正規化できない）は `None` を返す。**推測でパスを
+/// 組み立てない**（列挙済み候補との照合検証を経てから実行する既存方針と同型）。
+///
+/// # Errors
+///
+/// worktree 一覧の読み直しに失敗した場合にエラーを返す。直前に `git worktree add` が
+/// 成功している以上ほぼ起こり得ないが、起きたのであればインストールの問題ではなく
+/// fuzgit の読み取りの問題であるため、警告へ倒さず明示する。
+fn created_worktree(
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    path: &str,
+) -> Result<Option<std::path::PathBuf>> {
+    let worktrees = read_worktrees(messages, repository)?;
+
+    // 作成直後であるため正規化は成功するはずだが、失敗したなら照合の根拠が無い。
+    // 検証できないまま実行しないという点で「一覧に無い」場合と扱いは同じ
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return Ok(None);
+    };
+
+    Ok(worktrees
+        .into_iter()
+        .map(|worktree| std::path::PathBuf::from(worktree.path))
+        .find(|registered| *registered == canonical))
+}
+
+/// 作成した worktree を一覧に見つけられず、インストールを行わないことを伝える。
+///
+/// 標準出力はパス出力のために空けておく（書き出し先は標準エラー）。
+///
+/// # Errors
+///
+/// 書き込みに失敗した場合にエラーを返す。
+fn report_install_directory_not_found(
+    messages: &dyn Messages,
+    path: &str,
+    writer: &mut impl std::io::Write,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "{message}",
+        message = messages.worktree().install_directory_not_found(path)
+    )
+    .context(messages.common().stderr_write_failed())?;
 
     Ok(())
 }
@@ -901,6 +986,77 @@ Removing worktrees/old: gitdir file points to non-existent location\n";
         assert_ne!(japanese.prune_confirmation(), english.prune_confirmation());
         assert_ne!(japanese.prune_failed(), english.prune_failed());
         assert_ne!(japanese.nothing_to_prune(), english.nothing_to_prune());
+        assert_ne!(
+            japanese.install_directory_not_found("/repo/../feature"),
+            english.install_directory_not_found("/repo/../feature")
+        );
+    }
+
+    #[test]
+    fn the_created_worktree_is_resolved_to_the_path_git_registered() {
+        let (_dir, repository, root) = repository_with_worktree("worktree-created");
+        let created = root.join("feature");
+
+        let resolved = created_worktree(
+            Language::English.messages(),
+            &repository,
+            created.to_str().expect("the temp path must be UTF-8"),
+        )
+        .expect("the list must be readable right after the worktree was created");
+
+        // 一時ディレクトリの親（macOS の `/var` 等）がシンボリックリンクである環境では、
+        // git が報告するのは解決済みの絶対パスであり、利用者入力を正規化して初めて一致する
+        assert_eq!(
+            resolved,
+            Some(
+                std::fs::canonicalize(&created)
+                    .expect("the created worktree must exist on the filesystem")
+            )
+        );
+    }
+
+    #[test]
+    fn a_path_that_git_never_registered_resolves_to_nothing() {
+        let (_dir, repository, root) = repository_with_worktree("worktree-unregistered");
+
+        for candidate in [root.join("feature").join("src"), root.join("absent")] {
+            let resolved = created_worktree(
+                Language::English.messages(),
+                &repository,
+                candidate.to_str().expect("the temp path must be UTF-8"),
+            )
+            .expect("the list must stay readable");
+
+            assert_eq!(
+                resolved, None,
+                "only a registered worktree may become the install directory: {candidate:?}"
+            );
+        }
+    }
+
+    /// linked worktree を 1 つ持つリポジトリと、その親ディレクトリを用意する。
+    fn repository_with_worktree(
+        label: &str,
+    ) -> (
+        crate::test_support::TempDir,
+        gix::Repository,
+        std::path::PathBuf,
+    ) {
+        use crate::test_support::{TempDir, commit, create_branch, git_in, init_repository};
+
+        let dir = TempDir::new(label);
+        let main = dir.path().join("main");
+        std::fs::create_dir_all(&main).expect("the main worktree must be creatable");
+        init_repository(&main);
+        commit(&main, "initial");
+        create_branch(&main, "feature");
+        git_in(&main, &["worktree", "add", "--", "../feature", "feature"]);
+
+        let repository = gix::open_opts(&main, gix::open::Options::isolated())
+            .expect("the initialized repository must be openable");
+        let root = dir.path().to_path_buf();
+
+        (dir, repository, root)
     }
 
     #[test]

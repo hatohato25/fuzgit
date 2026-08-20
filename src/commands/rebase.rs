@@ -9,10 +9,10 @@
 
 use anyhow::{Context as _, Result, anyhow, bail};
 
-use crate::commands::command_display;
 use crate::commands::confirmation::confirm;
 use crate::commands::in_progress;
-use crate::finder::{FinderItem, PreviewSource, select_one};
+use crate::commands::{command_display, selection_header};
+use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one_with};
 use crate::git::exec::run_git;
 use crate::git::read::{BranchInfo, commit_count, operation_in_progress, other_branches};
 use crate::git::repo::workdir;
@@ -57,7 +57,11 @@ pub fn run(
         .iter()
         .map(|branch| to_item(language, branch))
         .collect();
-    let selected = select_one(items)?;
+    let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
+        messages.rebase().header_subject(),
+        messages.rebase().header_outcome(),
+    ));
+    let selected = select_one_with(items, &options)?;
 
     // `git rebase` はブランチ名を位置引数に取り `--` で保護できないため、
     // 選択結果が候補一覧に含まれることを確かめてから引数に渡す（design.md セキュリティ設計）
@@ -253,10 +257,13 @@ mod tests {
         for language in [Language::Japanese, Language::English] {
             let rebase = language.messages().rebase();
 
-            assert!(
-                !rebase.no_candidates().trim().is_empty(),
-                "{language:?} left a message empty"
-            );
+            for text in [
+                rebase.header_subject(),
+                rebase.header_outcome(),
+                rebase.no_candidates(),
+            ] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
 
             assert!(
                 rebase.selection_not_found("main").contains("main"),
@@ -284,6 +291,8 @@ mod tests {
         let japanese = Language::Japanese.messages().rebase();
         let english = Language::English.messages().rebase();
 
+        assert_ne!(japanese.header_subject(), english.header_subject());
+        assert_ne!(japanese.header_outcome(), english.header_outcome());
         assert_ne!(japanese.no_candidates(), english.no_candidates());
         assert_ne!(
             japanese.selection_not_found("main"),

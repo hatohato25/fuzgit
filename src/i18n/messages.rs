@@ -13,8 +13,10 @@
 //! `gz branch create` / `delete` / `cleanup`、および複数コマンドが共用するファイル選択・
 //! merge / rebase の復帰メニュー・兄弟リポジトリ走査。
 //!
-//! `gz log` / `gz add` のように、文言がすべて [`CommonMessages`] で賄えるコマンドには専用の
+//! `gz add` のように、文言がすべて [`CommonMessages`] で賄えるコマンドには専用の
 //! trait を置かない（空の trait はコンパイル時の完全性に何も寄与しないため）。
+//! `gz log` は候補一覧のヘッダーという固有の文言を持つに至ったため、
+//! [`LogMessages`] を持つ。
 //!
 //! 唯一の例外が [`Messages::cli`]（`clap` のヘルプ）で、これはコマンドの実行時ではなく
 //! **引数のパース時**に使われる。差し替えを行うのが `clap` の `Command` を組み立てる
@@ -123,6 +125,9 @@ pub trait Messages: Sync + std::fmt::Debug {
 
     /// `gz pull`（[`crate::commands::pull`]）の文言。
     fn pull(&self) -> &dyn PullMessages;
+
+    /// `gz log`（[`crate::commands::log`]）の文言。
+    fn log(&self) -> &dyn LogMessages;
 }
 
 /// 複数のコマンドで共有する語彙（design.md の `Messages::common`）。
@@ -445,10 +450,22 @@ pub trait CliMessages: Sync + std::fmt::Debug {
 
     /// `gz worktree prune` の説明。
     fn worktree_prune_about(&self) -> &'static str;
+
+    /// `gz worktree add --no-install` の説明。
+    fn worktree_add_no_install_help(&self) -> &'static str;
 }
 
 /// `gz branch`（[`crate::commands::branch`]）の文言。
 pub trait BranchMessages: Sync + std::fmt::Debug {
+    /// 候補一覧のヘッダーのうち、何を選ぶのかを示す節。
+    ///
+    /// 節の区切りと決定キーの表記は**装飾**であり、
+    /// [`crate::commands::selection_header`] が付ける。
+    fn header_subject(&self) -> &'static str;
+
+    /// 候補一覧のヘッダーのうち、決定すると何が起きるのかを示す節。
+    fn header_outcome(&self) -> &'static str;
+
     /// 選択されたブランチが候補一覧に見つからなかったことを伝える。
     fn selection_not_found(&self, selected: &str) -> String;
 
@@ -467,6 +484,21 @@ pub trait BranchMessages: Sync + std::fmt::Debug {
 /// 含めない（design.md「翻訳しないもの」）。一方 upstream の有無と最終更新日時の表示は
 /// fuzgit 自身の文言であるため、`gz fetch` の「すべてのリモート」行と同じ扱いで翻訳する。
 pub trait BranchManageMessages: Sync + std::fmt::Debug {
+    /// 作成元の候補一覧のヘッダーのうち、何を選ぶのかを示す節（`create`）。
+    ///
+    /// 節の区切りと決定キーの表記は**装飾**であり、
+    /// [`crate::commands::selection_header`] が付ける。
+    fn base_header_subject(&self) -> &'static str;
+
+    /// 作成後にそのブランチへ切り替える場合（既定）のヘッダーの結果節（`create`）。
+    fn base_header_outcome_switch(&self) -> &'static str;
+
+    /// 作成のみ行う場合（`--no-switch`）のヘッダーの結果節（`create`）。
+    ///
+    /// 切り替えの有無はヘッダーを見た時点で分からないと、意図せず作業ブランチが
+    /// 変わったように見えるため、既定と別の文言を持つ。
+    fn base_header_outcome_stay(&self) -> &'static str;
+
     /// 選択された作成元が候補一覧に見つからなかったことを伝える（`create`）。
     fn base_selection_not_found(&self, selected: &str) -> String;
 
@@ -578,6 +610,27 @@ pub trait FileSelectionMessages: Sync + std::fmt::Debug {
 
 /// `gz tag`（[`crate::commands::tag`]）の文言。
 pub trait TagMessages: Sync + std::fmt::Debug {
+    /// 候補一覧のヘッダーのうち、何を選ぶのかを示す節。
+    ///
+    /// 節の区切りと決定キーの表記は**装飾**であり、
+    /// [`crate::commands::selection_header`] が付ける。
+    fn header_subject(&self) -> &'static str;
+
+    /// タグ名を出力する場合（フラグ指定なし）のヘッダーの結果節。
+    ///
+    /// 同じ一覧から選ばせて結果だけが `--switch` / `--diff` で変わるため、
+    /// 操作ごとに別の文言を持つ（[`StashMessages::header_outcome_apply`] と同じ扱い）。
+    fn header_outcome_print(&self) -> &'static str;
+
+    /// タグの指すコミットへ切り替える場合（`--switch`）のヘッダーの結果節。
+    ///
+    /// 切り替え先が detached HEAD であることまで含める。ブランチの切替と違い、
+    /// そのままコミットすると参照から辿れなくなるため。
+    fn header_outcome_switch(&self) -> &'static str;
+
+    /// HEAD との差分を表示する場合（`--diff`）のヘッダーの結果節。
+    fn header_outcome_diff(&self) -> &'static str;
+
     /// `--switch` と `--diff` が同時に指定されたことを伝える。
     ///
     /// オプション名は翻訳しない（design.md「翻訳しないもの」）。
@@ -595,6 +648,21 @@ pub trait TagMessages: Sync + std::fmt::Debug {
 
 /// `gz reflog`（[`crate::commands::reflog`]）の文言。
 pub trait ReflogMessages: Sync + std::fmt::Debug {
+    /// 候補一覧のヘッダーのうち、何を選ぶのかを示す節。
+    ///
+    /// 節の区切りと決定キーの表記は**装飾**であり、
+    /// [`crate::commands::selection_header`] が付ける。
+    fn header_subject(&self) -> &'static str;
+
+    /// ハッシュを出力する場合（`--restore` なし）のヘッダーの結果節。
+    fn header_outcome_print(&self) -> &'static str;
+
+    /// ブランチを作成する場合（`--restore <NAME>`）のヘッダーの結果節。
+    ///
+    /// 作成されるブランチ名を含めるのは、標準出力へ書くだけの既定と違って
+    /// リポジトリに参照が増えるため。
+    fn header_outcome_restore(&self, name: &str) -> String;
+
     /// reflog を読み取れなかったことを伝える。
     fn read_failed(&self) -> &'static str;
 
@@ -650,6 +718,26 @@ pub trait RevertMessages: Sync + std::fmt::Debug {
 
 /// `gz stash`（[`crate::commands::stash`]）の文言。
 pub trait StashMessages: Sync + std::fmt::Debug {
+    /// stash の候補一覧のヘッダーのうち、何を選ぶのかを示す節。
+    ///
+    /// 節の区切りと決定キーの表記は**装飾**であり、
+    /// [`crate::commands::selection_header`] が付ける。
+    fn header_subject(&self) -> &'static str;
+
+    /// `gz stash apply` のヘッダーの結果節。
+    ///
+    /// apply / pop / drop は同じ一覧から選ばせて結果だけが異なる。取り違えると
+    /// 復元したかった stash を消してしまうため、操作ごとに別の文言を持つ。
+    fn header_outcome_apply(&self) -> &'static str;
+
+    /// `gz stash pop` のヘッダーの結果節。
+    fn header_outcome_pop(&self) -> &'static str;
+
+    /// `gz stash drop` のヘッダーの結果節。
+    ///
+    /// 決定した時点では破棄されず確認プロンプトを挟むため、その旨まで含める。
+    fn header_outcome_drop(&self) -> &'static str;
+
     /// stash を破棄することへの同意を求める見出し。
     ///
     /// 対象の stash は [`crate::commands::confirmation::confirm`] が別途列挙する。
@@ -691,6 +779,18 @@ pub trait CommitMessages: Sync + std::fmt::Debug {
 /// `label` には作成するコミットの種類（`fixup` / `squash`）が入る。これは作成される
 /// コミットメッセージの接頭辞と同じ綴りであるため翻訳しない。
 pub trait FixupMessages: Sync + std::fmt::Debug {
+    /// 候補一覧のヘッダーのうち、何を選ぶのかを示す節。
+    ///
+    /// 節の区切りと決定キーの表記は**装飾**であり、
+    /// [`crate::commands::selection_header`] が付ける。
+    fn header_subject(&self) -> &'static str;
+
+    /// 候補一覧のヘッダーのうち、決定すると何が起きるのかを示す節。
+    ///
+    /// `label` には作成するコミットの種類が入る。作成されるのは `fixup!` / `squash!`
+    /// コミットまでであり、autosquash の rebase までは行わないことが読めるようにする。
+    fn header_outcome(&self, label: &str) -> String;
+
     /// ステージ済みの変更を読み取れなかったことを伝える。
     fn staged_changes_read_failed(&self) -> &'static str;
 
@@ -750,6 +850,18 @@ pub trait StatusMessages: Sync + std::fmt::Debug {
 
 /// `gz merge`（[`crate::commands::merge`]）の文言。
 pub trait MergeMessages: Sync + std::fmt::Debug {
+    /// 候補一覧のヘッダーのうち、何を選ぶのかを示す節。
+    ///
+    /// 節の区切りと決定キーの表記は**装飾**であり、
+    /// [`crate::commands::selection_header`] が付ける。
+    fn header_subject(&self) -> &'static str;
+
+    /// 候補一覧のヘッダーのうち、決定すると何が起きるのかを示す節。
+    ///
+    /// 方式（`--no-ff` / `--squash` / `--ff-only`）で結果節を分けないのは、決定した時点では
+    /// merge されず、実行する引数配列そのものを確認プロンプトが示すため。
+    fn header_outcome(&self) -> &'static str;
+
     /// `--no-ff` / `--squash` / `--ff-only` が同時に指定されたことを伝える。
     ///
     /// オプション名は翻訳しない（design.md「翻訳しないもの」）。
@@ -805,6 +917,15 @@ pub trait MergeMessages: Sync + std::fmt::Debug {
 
 /// `gz rebase`（[`crate::commands::rebase`]）の文言。
 pub trait RebaseMessages: Sync + std::fmt::Debug {
+    /// 候補一覧のヘッダーのうち、何を選ぶのかを示す節。
+    ///
+    /// 節の区切りと決定キーの表記は**装飾**であり、
+    /// [`crate::commands::selection_header`] が付ける。
+    fn header_subject(&self) -> &'static str;
+
+    /// 候補一覧のヘッダーのうち、決定すると何が起きるのかを示す節。
+    fn header_outcome(&self) -> &'static str;
+
     /// base になるブランチが 1 件も無いことを伝える。
     fn no_candidates(&self) -> &'static str;
 
@@ -923,6 +1044,46 @@ pub trait WorktreeMessages: Sync + std::fmt::Debug {
     /// 対象が無いのは正常な状態であるためエラーにはせず、この文言を標準エラーへ出す
     /// （requirements.md FR-21）。
     fn nothing_to_prune(&self) -> &'static str;
+
+    /// これから実行する依存インストールを、実行の直前に伝える（FR-30）。
+    ///
+    /// install は数分掛かり得るため、何を待っているのかが分からないまま端末が止まる
+    /// ことを避ける。`command` は表示専用の文字列であり、これを実行することはない
+    /// （実行は常に引数配列で行う。[`crate::commands::worktree_install`]）。
+    fn install_running(&self, directory: &Path, command: &str) -> String;
+
+    /// 同一エコシステムに lockfile が複数並び、インストールを実行しないことを伝える。
+    ///
+    /// どちらが実運用のものかを fuzgit が知る手段は無く、優先順位で暗黙にどちらかへ
+    /// 倒さない。黙って何もしないことも避けるため、検出した lockfile 名を列挙する。
+    /// エコシステム名（`Node` / `Python` / `Ruby` / `PHP`）と lockfile 名は固有名詞で
+    /// あるため翻訳しない（design.md「翻訳しないもの」）。
+    fn install_ambiguous(&self, ecosystem: &str, lockfiles: &str) -> String;
+
+    /// `yarn.lock` の版を判別できず、インストールを実行しないことを伝える。
+    ///
+    /// `--immutable`（Yarn 2 以降）と `--frozen-lockfile`（Yarn 1）は綴りが版で異なる
+    /// ため、判別できないまま暗黙にどちらかへ倒さない。
+    fn install_flavour_unknown(&self, lockfile: &str) -> String;
+
+    /// インストールコマンドが PATH に無く、実行できなかったことを伝える。
+    ///
+    /// 通知（FR-29）と違って黙って握り潰さないのは、ここでの不実行が「依存の入って
+    /// いない worktree ができた」という結果そのものだからである。
+    fn install_command_missing(&self, program: &str) -> String;
+
+    /// インストールコマンドが失敗したことと、実行し直すコマンドを伝える。
+    ///
+    /// worktree の作成そのものは成功しているため、`gz worktree add` は非ゼロ終了しない。
+    fn install_failed(&self, command: &str) -> String;
+
+    /// 作成した worktree が `git worktree list` に見つからず、インストールを
+    /// 実行しないことを伝える。
+    ///
+    /// 利用者が打ったパス文字列をそのまま作業ディレクトリにせず、登録済みの worktree
+    /// パスとの照合を経てから実行する（design.md セキュリティ設計）。照合できない場合に
+    /// パスを推測で組み立てない。
+    fn install_directory_not_found(&self, path: &str) -> String;
 }
 
 /// `gz sync`（[`crate::commands::sync`]）の文言。
@@ -1047,6 +1208,16 @@ pub trait DiffMessages: Sync + std::fmt::Debug {
 /// 進捗表示 `[<n>/<全体>] <対象>` は数値・区切り記号・対象の名前だけで構成されるため
 /// 文言を持たない。
 pub trait FetchMessages: Sync + std::fmt::Debug {
+    /// リモートの候補一覧のヘッダーのうち、何を選ぶのかを示す節。
+    ///
+    /// 兄弟リポジトリの一覧（[`FetchMessages::siblings_header`]）とは選ぶ対象が異なるため、
+    /// 文言を共有しない。節の区切りと決定キーの表記は**装飾**であり、
+    /// [`crate::commands::selection_header`] が付ける。
+    fn remote_header_subject(&self) -> &'static str;
+
+    /// リモートの候補一覧のヘッダーのうち、決定すると何が起きるのかを示す節。
+    fn remote_header_outcome(&self) -> &'static str;
+
     /// 「すべてのリモート」を表す固定候補の表示。
     ///
     /// 選択結果の解決には実在のリモート名と衝突しない固定キーを使うため、表示を翻訳しても
@@ -1241,6 +1412,24 @@ pub trait PullMessages: Sync + std::fmt::Debug {
     /// `gz fetch --siblings` と `gz pull` のどちらが終わったのかをタイトルでしか
     /// 区別できないためである。
     fn notification_title(&self) -> &'static str;
+}
+
+/// `gz log`（[`crate::commands::log`]）の文言。
+///
+/// 候補行（短縮ハッシュ・日付・サマリ・作者）はリポジトリの内容そのものであるため翻訳せず、
+/// この trait にも含めない（design.md「翻訳しないもの」）。
+pub trait LogMessages: Sync + std::fmt::Debug {
+    /// 候補一覧のヘッダーのうち、何を選ぶのかを示す節。
+    ///
+    /// 節の区切りと決定キーの表記は**装飾**であり、
+    /// [`crate::commands::selection_header`] が付ける。
+    fn header_subject(&self) -> &'static str;
+
+    /// 候補一覧のヘッダーのうち、決定すると何が起きるのかを示す節。
+    ///
+    /// 候補行に見えているのは短縮ハッシュだが、出力されるのはフルハッシュである。
+    /// パイプ先へ渡る値を取り違えないよう、どちらが出るのかまで示す。
+    fn header_outcome(&self) -> &'static str;
 }
 
 /// [`crate::error::Error`] をユーザー向けの 1 文へ整形する文言。

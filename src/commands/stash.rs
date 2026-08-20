@@ -7,8 +7,11 @@ use anyhow::{Context as _, Result, anyhow};
 
 use crate::commands::confirmation::confirm;
 use crate::commands::file_selection::{FileCandidate, RenameOrigin, resolve_changes, target_paths};
+use crate::commands::selection_header;
 use crate::error::Error;
-use crate::finder::{FinderItem, PreviewSource, select_many, select_one};
+use crate::finder::{
+    FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many, select_one_with,
+};
 use crate::git::exec::{pathspec, run_git};
 use crate::git::read::{ChangeScope, FileChange, StashEntry, changes, stashes};
 use crate::i18n::{Language, Messages};
@@ -39,6 +42,19 @@ impl StashAction {
             StashAction::Apply => "apply",
             StashAction::Pop => "pop",
             StashAction::Drop => "drop",
+        }
+    }
+
+    /// 候補一覧のヘッダーで示す「決定すると何が起きるのか」。
+    ///
+    /// apply / pop / drop は同じ stash 一覧から選ばせるため、一覧を見ただけでは結果が
+    /// 分からない。網羅的な `match` にすることで、操作を増やしたときにヘッダーの
+    /// 更新漏れがコンパイルエラーになる。
+    fn header_outcome(self, messages: &dyn Messages) -> &'static str {
+        match self {
+            StashAction::Apply => messages.stash().header_outcome_apply(),
+            StashAction::Pop => messages.stash().header_outcome_pop(),
+            StashAction::Drop => messages.stash().header_outcome_drop(),
         }
     }
 
@@ -164,7 +180,11 @@ pub fn run(
         .iter()
         .map(|entry| to_stash_item(language, entry))
         .collect();
-    let selected = select_one(items)?;
+    let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
+        messages.stash().header_subject(),
+        action.header_outcome(messages),
+    ));
+    let selected = select_one_with(items, &options)?;
 
     let entry = candidates
         .iter()
@@ -519,14 +539,40 @@ mod tests {
     }
 
     #[test]
+    fn the_header_states_what_enter_does_for_each_action() {
+        // apply / pop / drop は同じ一覧から選ばせて結果だけが変わる。取り違えると
+        // 復元したかった stash を消してしまうため、文言が重なっていないことを確かめる
+        for language in [Language::Japanese, Language::English] {
+            let messages = language.messages();
+            let outcomes = [
+                StashAction::Apply.header_outcome(messages),
+                StashAction::Pop.header_outcome(messages),
+                StashAction::Drop.header_outcome(messages),
+            ];
+
+            for (index, outcome) in outcomes.iter().enumerate() {
+                assert!(
+                    !outcomes[index + 1..].contains(outcome),
+                    "{language:?} must tell the actions apart: {outcome}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_stash_message_is_filled_in_for_both_languages() {
         for language in [Language::Japanese, Language::English] {
             let stash = language.messages().stash();
 
-            assert!(
-                !stash.drop_confirmation().trim().is_empty(),
-                "{language:?} left a message empty"
-            );
+            for text in [
+                stash.header_subject(),
+                stash.header_outcome_apply(),
+                stash.header_outcome_pop(),
+                stash.header_outcome_drop(),
+                stash.drop_confirmation(),
+            ] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
             assert!(
                 stash.selection_not_found("stash@{2}").contains("stash@{2}"),
                 "{language:?} must name the selection"
@@ -539,6 +585,16 @@ mod tests {
         let japanese = Language::Japanese.messages().stash();
         let english = Language::English.messages().stash();
 
+        assert_ne!(japanese.header_subject(), english.header_subject());
+        assert_ne!(
+            japanese.header_outcome_apply(),
+            english.header_outcome_apply()
+        );
+        assert_ne!(japanese.header_outcome_pop(), english.header_outcome_pop());
+        assert_ne!(
+            japanese.header_outcome_drop(),
+            english.header_outcome_drop()
+        );
         assert_ne!(japanese.drop_confirmation(), english.drop_confirmation());
         assert_ne!(
             japanese.selection_not_found("stash@{2}"),

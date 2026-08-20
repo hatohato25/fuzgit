@@ -6,9 +6,9 @@ use super::Language;
 use super::messages::{
     BranchManageMessages, BranchMessages, CherryPickMessages, CliMessages, CommitMessages,
     CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
-    FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, MergeMessages,
-    Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages, RevertMessages,
-    StashMessages, StatusMessages, SyncMessages, TagMessages, WorktreeMessages,
+    FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, LogMessages,
+    MergeMessages, Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages,
+    RevertMessages, StashMessages, StatusMessages, SyncMessages, TagMessages, WorktreeMessages,
 };
 use crate::error::{Error, stderr_suffix};
 use crate::git::read::{BRANCH_REF_PREFIX, MalformedOutput, ReadOperation, WORKTREE_LABEL};
@@ -125,6 +125,10 @@ impl Messages for JapaneseMessages {
 
     fn pull(&self) -> &dyn PullMessages {
         &JapanesePullMessages
+    }
+
+    fn log(&self) -> &dyn LogMessages {
+        &JapaneseLogMessages
     }
 }
 
@@ -479,6 +483,14 @@ impl ConfirmMessages for JapaneseConfirmMessages {
 pub struct JapaneseBranchMessages;
 
 impl BranchMessages for JapaneseBranchMessages {
+    fn header_subject(&self) -> &'static str {
+        "切り替えるブランチを選択"
+    }
+
+    fn header_outcome(&self) -> &'static str {
+        "切り替え"
+    }
+
     fn selection_not_found(&self, selected: &str) -> String {
         format!("選択されたブランチ `{selected}` が候補に見つかりません")
     }
@@ -494,6 +506,18 @@ impl BranchMessages for JapaneseBranchMessages {
 pub struct JapaneseBranchManageMessages;
 
 impl BranchManageMessages for JapaneseBranchManageMessages {
+    fn base_header_subject(&self) -> &'static str {
+        "新しいブランチの作成元を選択"
+    }
+
+    fn base_header_outcome_switch(&self) -> &'static str {
+        "作成して切り替え"
+    }
+
+    fn base_header_outcome_stay(&self) -> &'static str {
+        "作成のみ（切り替えない）"
+    }
+
     fn base_selection_not_found(&self, selected: &str) -> String {
         format!("選択された作成元 `{selected}` が候補に見つかりません")
     }
@@ -611,6 +635,22 @@ impl FileSelectionMessages for JapaneseFileSelectionMessages {
 pub struct JapaneseTagMessages;
 
 impl TagMessages for JapaneseTagMessages {
+    fn header_subject(&self) -> &'static str {
+        "タグを選択"
+    }
+
+    fn header_outcome_print(&self) -> &'static str {
+        "タグ名を出力"
+    }
+
+    fn header_outcome_switch(&self) -> &'static str {
+        "detached HEAD で切り替え"
+    }
+
+    fn header_outcome_diff(&self) -> &'static str {
+        "HEAD との差分を表示"
+    }
+
     fn conflicting_actions(&self) -> &'static str {
         "`--switch` と `--diff` は同時に指定できません"
     }
@@ -633,6 +673,18 @@ impl TagMessages for JapaneseTagMessages {
 pub struct JapaneseReflogMessages;
 
 impl ReflogMessages for JapaneseReflogMessages {
+    fn header_subject(&self) -> &'static str {
+        "reflog のエントリを選択"
+    }
+
+    fn header_outcome_print(&self) -> &'static str {
+        "フルハッシュを出力"
+    }
+
+    fn header_outcome_restore(&self, name: &str) -> String {
+        format!("ブランチ `{name}` を作成")
+    }
+
     fn read_failed(&self) -> &'static str {
         "reflog の取得に失敗しました"
     }
@@ -696,6 +748,22 @@ impl RevertMessages for JapaneseRevertMessages {
 pub struct JapaneseStashMessages;
 
 impl StashMessages for JapaneseStashMessages {
+    fn header_subject(&self) -> &'static str {
+        "stash を選択"
+    }
+
+    fn header_outcome_apply(&self) -> &'static str {
+        "作業ツリーへ適用（stash は残す）"
+    }
+
+    fn header_outcome_pop(&self) -> &'static str {
+        "作業ツリーへ適用して stash を取り除く"
+    }
+
+    fn header_outcome_drop(&self) -> &'static str {
+        "確認のうえ破棄"
+    }
+
     fn drop_confirmation(&self) -> &'static str {
         "以下の stash を破棄します（元に戻せません）:"
     }
@@ -734,6 +802,14 @@ git はメッセージが空だと判断してコミットを中止します。
 pub struct JapaneseFixupMessages;
 
 impl FixupMessages for JapaneseFixupMessages {
+    fn header_subject(&self) -> &'static str {
+        "修正対象のコミットを選択"
+    }
+
+    fn header_outcome(&self, label: &str) -> String {
+        format!("{label} コミットを作成")
+    }
+
     fn staged_changes_read_failed(&self) -> &'static str {
         "ステージ済みの変更の取得に失敗しました"
     }
@@ -805,6 +881,14 @@ impl StatusMessages for JapaneseStatusMessages {
 pub struct JapaneseMergeMessages;
 
 impl MergeMessages for JapaneseMergeMessages {
+    fn header_subject(&self) -> &'static str {
+        "merge するブランチを選択"
+    }
+
+    fn header_outcome(&self) -> &'static str {
+        "merge を実行"
+    }
+
     fn conflicting_modes(&self) -> &'static str {
         "`--no-ff` / `--squash` / `--ff-only` は同時に指定できません"
     }
@@ -858,6 +942,14 @@ impl MergeMessages for JapaneseMergeMessages {
 pub struct JapaneseRebaseMessages;
 
 impl RebaseMessages for JapaneseRebaseMessages {
+    fn header_subject(&self) -> &'static str {
+        "rebase 先のブランチを選択"
+    }
+
+    fn header_outcome(&self) -> &'static str {
+        "rebase を実行"
+    }
+
     fn no_candidates(&self) -> &'static str {
         "rebase の base になるブランチがありません。\
 現在のブランチ以外のローカルブランチ・リモート追跡ブランチが必要です"
@@ -988,6 +1080,45 @@ impl WorktreeMessages for JapaneseWorktreeMessages {
     fn nothing_to_prune(&self) -> &'static str {
         "整理する worktree はありません"
     }
+
+    fn install_running(&self, directory: &Path, command: &str) -> String {
+        format!(
+            "{directory} で `{command}` を実行します",
+            directory = directory.display()
+        )
+    }
+
+    /// エコシステム名・lockfile 名は固有名詞であり訳さない。
+    fn install_ambiguous(&self, ecosystem: &str, lockfiles: &str) -> String {
+        format!(
+            "{ecosystem} の lockfile が複数あるため依存インストールを実行しません（{lockfiles}）"
+        )
+    }
+
+    /// オプション名は訳さない（design.md「翻訳しないもの」）。
+    fn install_flavour_unknown(&self, lockfile: &str) -> String {
+        format!(
+            "{lockfile} から Yarn の版を判別できないため依存インストールを実行しません\
+（`--immutable` は Yarn 2 以降、`--frozen-lockfile` は Yarn 1 の綴りです）"
+        )
+    }
+
+    fn install_command_missing(&self, program: &str) -> String {
+        format!("`{program}` が見つからないため依存インストールを実行しませんでした")
+    }
+
+    fn install_failed(&self, command: &str) -> String {
+        format!(
+            "依存インストールに失敗しました（worktree は作成済みです。`{command}` で実行し直せます）"
+        )
+    }
+
+    fn install_directory_not_found(&self, path: &str) -> String {
+        format!(
+            "作成した worktree `{path}` が worktree の一覧に見つからないため\
+依存インストールを実行しませんでした"
+        )
+    }
 }
 
 /// `gz sync`（[`crate::commands::sync`]）の日本語表示。
@@ -1113,6 +1244,14 @@ impl DiffMessages for JapaneseDiffMessages {
 pub struct JapaneseFetchMessages;
 
 impl FetchMessages for JapaneseFetchMessages {
+    fn remote_header_subject(&self) -> &'static str {
+        "取得するリモートを選択"
+    }
+
+    fn remote_header_outcome(&self) -> &'static str {
+        "取得"
+    }
+
     fn all_remotes_label(&self) -> &'static str {
         "すべてのリモート"
     }
@@ -1273,6 +1412,20 @@ impl PullMessages for JapanesePullMessages {
 
     fn notification_title(&self) -> &'static str {
         "gz pull が完了しました"
+    }
+}
+
+/// `gz log`（[`crate::commands::log`]）の日本語表示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JapaneseLogMessages;
+
+impl LogMessages for JapaneseLogMessages {
+    fn header_subject(&self) -> &'static str {
+        "コミットを選択"
+    }
+
+    fn header_outcome(&self) -> &'static str {
+        "フルハッシュを出力"
     }
 }
 
@@ -1547,5 +1700,9 @@ impl CliMessages for JapaneseCliMessages {
 
     fn worktree_prune_about(&self) -> &'static str {
         "実体を失った worktree の管理情報を整理する"
+    }
+
+    fn worktree_add_no_install_help(&self) -> &'static str {
+        "作成後の依存インストールを行わない（lockfile の走査も行わない）"
     }
 }

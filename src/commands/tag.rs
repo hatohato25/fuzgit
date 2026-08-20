@@ -4,8 +4,8 @@ use std::io::Write as _;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 
-use crate::commands::aligned_candidates;
-use crate::finder::{FinderItem, PreviewSource, select_one};
+use crate::commands::{aligned_candidates, selection_header};
+use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one_with};
 use crate::git::exec::run_git;
 use crate::git::read::{TagInfo, tags};
 use crate::i18n::{Language, Messages};
@@ -40,6 +40,19 @@ impl TagAction {
             (true, true) => bail!(messages.tag().conflicting_actions()),
         }
     }
+
+    /// 候補一覧のヘッダーで示す「決定すると何が起きるのか」。
+    ///
+    /// 3 通りとも同じタグ一覧から選ばせるため、一覧を見ただけでは結果が分からない。
+    /// 網羅的な `match` にすることで、操作を増やしたときにヘッダーの更新漏れが
+    /// コンパイルエラーになる。
+    fn header_outcome(self, messages: &dyn Messages) -> &'static str {
+        match self {
+            TagAction::Print => messages.tag().header_outcome_print(),
+            TagAction::Switch => messages.tag().header_outcome_switch(),
+            TagAction::Diff => messages.tag().header_outcome_diff(),
+        }
+    }
 }
 
 /// タグを 1 件選び、[`TagAction`] に応じた処理を行う。
@@ -60,7 +73,11 @@ pub fn run(
         .into_iter()
         .map(|(tag, line)| to_item(language, tag, line))
         .collect();
-    let selected = select_one(items)?;
+    let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
+        messages.tag().header_subject(),
+        action.header_outcome(messages),
+    ));
+    let selected = select_one_with(items, &options)?;
 
     let tag = candidates
         .iter()
@@ -281,14 +298,39 @@ mod tests {
     }
 
     #[test]
+    fn the_header_states_what_enter_does_for_each_action() {
+        // 同じタグ一覧から選ばせて結果だけが変わるため、3 通りが同じ文言では嘘になる
+        for language in [Language::Japanese, Language::English] {
+            let messages = language.messages();
+            let outcomes = [
+                TagAction::Print.header_outcome(messages),
+                TagAction::Switch.header_outcome(messages),
+                TagAction::Diff.header_outcome(messages),
+            ];
+
+            for (index, outcome) in outcomes.iter().enumerate() {
+                assert!(
+                    !outcomes[index + 1..].contains(outcome),
+                    "{language:?} must tell the actions apart: {outcome}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_tag_message_is_filled_in_for_both_languages() {
         for language in [Language::Japanese, Language::English] {
             let tag = language.messages().tag();
 
-            assert!(
-                !tag.conflicting_actions().trim().is_empty(),
-                "{language:?} left a message empty"
-            );
+            for text in [
+                tag.header_subject(),
+                tag.header_outcome_print(),
+                tag.header_outcome_switch(),
+                tag.header_outcome_diff(),
+                tag.conflicting_actions(),
+            ] {
+                assert!(!text.trim().is_empty(), "{language:?} left a message empty");
+            }
             // オプション名は訳さないため、どの言語でもそのまま現れる
             assert!(
                 tag.conflicting_actions().contains("--switch")
@@ -315,6 +357,19 @@ mod tests {
         let japanese = Language::Japanese.messages().tag();
         let english = Language::English.messages().tag();
 
+        assert_ne!(japanese.header_subject(), english.header_subject());
+        assert_ne!(
+            japanese.header_outcome_print(),
+            english.header_outcome_print()
+        );
+        assert_ne!(
+            japanese.header_outcome_switch(),
+            english.header_outcome_switch()
+        );
+        assert_ne!(
+            japanese.header_outcome_diff(),
+            english.header_outcome_diff()
+        );
         assert_ne!(
             japanese.conflicting_actions(),
             english.conflicting_actions()

@@ -27,10 +27,10 @@ use std::time::Instant;
 use anyhow::{Context as _, Result, anyhow, bail};
 use gix::bstr::ByteSlice as _;
 
-use crate::commands::aligned_candidates;
+use crate::commands::{HEADER_SEPARATOR, aligned_candidates, selection_header};
 use crate::error::Error;
 use crate::finder::{
-    FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with, select_one,
+    FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with, select_one_with,
 };
 use crate::git::exec::{CapturedRun, capture_git_noninteractive_in, run_git, run_git_in};
 use crate::git::read::{branch_tracking_args, remote_tracking_refs_args, remote_url_args, remotes};
@@ -51,9 +51,6 @@ const ALL_REMOTES_OPTION: &str = "--all";
 
 /// リモートで削除されたブランチの追跡参照を掃除する `git fetch` のオプション。
 const PRUNE_OPTION: &str = "--prune";
-
-/// ヘッダー内の区切り（`gz status` と同じ体裁）。
-const HEADER_SEPARATOR: &str = "  |  ";
 
 /// HEAD がブランチを指していない兄弟リポジトリの表示。
 const DETACHED_LABEL: &str = "detached HEAD";
@@ -212,7 +209,11 @@ fn run_current(
             target
         }
         FetchDecision::Choose => {
-            let selected = select_one(items(language, messages, &remotes))?;
+            let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
+                messages.fetch().remote_header_subject(),
+                messages.fetch().remote_header_outcome(),
+            ));
+            let selected = select_one_with(items(language, messages, &remotes), &options)?;
 
             // `git fetch` はパス以外の位置引数を取り `--` で保護できないため、
             // 選択結果が候補一覧に含まれることを確かめてから引数に渡す
@@ -2498,6 +2499,8 @@ mod tests {
         let fetch = language.messages().fetch();
 
         vec![
+            fetch.remote_header_subject(),
+            fetch.remote_header_outcome(),
             fetch.all_remotes_label(),
             fetch.no_remotes(),
             fetch.url_section(),

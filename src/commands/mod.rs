@@ -44,11 +44,38 @@ pub mod status;
 pub mod sync;
 pub mod tag;
 pub mod worktree;
+pub mod worktree_install;
 
 /// 候補一覧の列を区切る空白。
 ///
 /// 候補一覧の体裁をコマンド間で揃えるため、区切りはこの 1 か所だけに持つ。
 pub(crate) const COLUMN_SEPARATOR: &str = "  ";
+
+/// 候補一覧のヘッダーで節を区切る記号。
+///
+/// 複数選択（`gz pull` / `gz fetch --siblings` / `gz status`）と単一選択
+/// （[`selection_header`]）が同じ見た目のヘッダーを出すため、[`COLUMN_SEPARATOR`] と
+/// 同じくコマンド間で 1 か所に持つ。
+pub(crate) const HEADER_SEPARATOR: &str = "  |  ";
+
+/// 決定キーの表記。
+///
+/// キー名は端末が送るキーの名前であり訳さないため、言語ごとの文言（`crate::i18n`）ではなく
+/// ヘッダーの骨格としてここに持つ。
+const DECIDE_KEY: &str = "Enter: ";
+
+/// 単一選択の候補一覧に固定表示するヘッダーを組み立てる。
+///
+/// 単一選択には Tab による選択の切替が無く、候補行だけでは「何を選ばされているのか」も
+/// 「決定すると何が起きるのか」も読み取れない。`subject`（選ぶ対象）と `outcome`
+/// （Enter で起きること）を必ず対で受け取り、片方だけのヘッダーが生まれないようにする。
+///
+/// `outcome` は**実際に行う操作**を渡すこと。同じ一覧でもフラグで結果が変わるコマンド
+/// （`gz tag` / `gz stash` / `gz reflog` / `gz branch create`）は、選択前に見えている説明と
+/// 決定後の挙動が食い違うと、取り返しの付かない操作を承知せずに実行させることになる。
+pub(crate) fn selection_header(subject: &str, outcome: &str) -> String {
+    format!("{subject}{HEADER_SEPARATOR}{DECIDE_KEY}{outcome}")
+}
 
 /// 候補と、列の幅を候補一覧全体で揃えた表示行の対を組み立てる。
 ///
@@ -350,6 +377,25 @@ mod tests {
     /// 列の並びを行として組み立てる。
     fn row(cells: &[&str]) -> Vec<String> {
         cells.iter().map(|cell| (*cell).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_single_selection_header_states_the_subject_and_what_enter_does() {
+        let header = selection_header("切り替えるブランチを選択", "切り替え");
+
+        assert_eq!(header, "切り替えるブランチを選択  |  Enter: 切り替え");
+    }
+
+    #[test]
+    fn a_single_selection_header_stays_on_one_line() {
+        // ヘッダーは候補一覧の上に 1 行だけ表示される領域であり、折り返させない
+        let header = selection_header("Pick a stash", "drop it after a confirmation");
+
+        assert_eq!(header.lines().count(), 1, "1 行に収める: {header}");
+        assert!(
+            header.contains(HEADER_SEPARATOR),
+            "the sections should be separated: {header}"
+        );
     }
 
     #[test]

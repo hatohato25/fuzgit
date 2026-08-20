@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result, anyhow};
 use crate::commands::file_selection::{FileCandidate, RenameOrigin, resolve_changes};
 use crate::commands::restore::RestoreTarget;
 use crate::commands::stash::UntrackedFiles;
-use crate::commands::{add, commit, restore, stash, status_preview_args};
+use crate::commands::{HEADER_SEPARATOR, add, commit, restore, stash, status_preview_args};
 use crate::error::Error;
 use crate::finder::{
     FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with, select_one,
@@ -24,9 +24,6 @@ use crate::i18n::{Language, Messages};
 
 /// detached HEAD（ブランチを指していない状態）のヘッダー表示。
 const DETACHED_LABEL: &str = "detached HEAD";
-
-/// ヘッダーの各区画の区切り。
-const HEADER_SEPARATOR: &str = "  |  ";
 
 /// staged の変更を見せるプレビューセクションの見出し。
 const STAGED_LABEL: &str = "staged";

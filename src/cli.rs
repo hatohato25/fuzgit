@@ -304,6 +304,13 @@ pub enum WorktreeCommand {
     Add {
         /// Path of the worktree to create (no directory name is suggested)
         path: PathBuf,
+
+        /// Do not install dependencies after creating it (no lockfile is looked up either)
+        //
+        // 短縮形は設けない（git に対応する綴りが無いため。
+        // requirements.md「オプションの短縮形の方針」）
+        #[arg(long)]
+        no_install: bool,
     },
 
     /// Pick a worktree and remove it (the main worktree is not offered)
@@ -523,6 +530,9 @@ fn localize_worktree(command: ClapCommand, cli: &dyn CliMessages) -> ClapCommand
             add.about(cli.worktree_add_about())
                 .mut_arg("path", |argument| {
                     argument.help(cli.worktree_add_path_help())
+                })
+                .mut_arg("no_install", |argument| {
+                    argument.help(cli.worktree_add_no_install_help())
                 })
         })
         .mut_subcommand("remove", |remove| remove.about(cli.worktree_remove_about()))
@@ -1194,6 +1204,7 @@ mod tests {
                 command,
                 Some(WorktreeCommand::Add {
                     path: PathBuf::from("../feature"),
+                    no_install: false,
                 })
             ),
             other => panic!("unexpected subcommand: {other:?}"),
@@ -1211,6 +1222,33 @@ mod tests {
                 other => panic!("unexpected subcommand: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn worktree_add_installs_dependencies_unless_it_is_told_not_to() {
+        // 既定は有効。`gz worktree add` を打った直後にだけ起きる実行であり、
+        // 既定で無効にすると FR-30 の目的（作った直後に動かせる worktree）が失われる
+        let cli = Cli::try_parse_from(["gz", "worktree", "add", "--no-install", "../feature"])
+            .expect("`--no-install` should parse");
+
+        match cli.command {
+            Command::Worktree { command } => assert_eq!(
+                command,
+                Some(WorktreeCommand::Add {
+                    path: PathBuf::from("../feature"),
+                    no_install: true,
+                })
+            ),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worktree_add_has_no_short_flag_for_no_install() {
+        // 短縮形は git に同じ意味の綴りが実在するものだけに付ける
+        // （requirements.md「オプションの短縮形の方針」）
+        Cli::try_parse_from(["gz", "worktree", "add", "-n", "../feature"])
+            .expect_err("`--no-install` must not have a short form");
     }
 
     #[test]

@@ -11,10 +11,10 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 
-use crate::commands::command_display;
 use crate::commands::confirmation::confirm;
 use crate::commands::in_progress;
-use crate::finder::{FinderItem, PreviewSource, select_one};
+use crate::commands::{command_display, selection_header};
+use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one_with};
 use crate::git::exec::{MergeTreeOutcome, capture_git_with_status_in, run_git};
 use crate::git::read::{BranchInfo, commit_count, operation_in_progress, other_branches};
 use crate::git::repo::workdir;
@@ -137,7 +137,11 @@ pub fn run(
         .iter()
         .map(|branch| to_item(language, branch))
         .collect();
-    let selected = select_one(items)?;
+    let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
+        messages.merge().header_subject(),
+        messages.merge().header_outcome(),
+    ));
+    let selected = select_one_with(items, &options)?;
 
     // `git merge` はブランチ名を位置引数に取り `--` で保護できないため、
     // 選択結果が候補一覧に含まれることを確かめてから引数に渡す（design.md セキュリティ設計）
@@ -663,6 +667,8 @@ mod tests {
             let merge = language.messages().merge();
 
             for text in [
+                merge.header_subject(),
+                merge.header_outcome(),
                 merge.conflicting_modes(),
                 merge.no_candidates(),
                 merge.prediction_clean(),
@@ -721,6 +727,8 @@ mod tests {
         let japanese = Language::Japanese.messages().merge();
         let english = Language::English.messages().merge();
 
+        assert_ne!(japanese.header_subject(), english.header_subject());
+        assert_ne!(japanese.header_outcome(), english.header_outcome());
         assert_ne!(japanese.conflicting_modes(), english.conflicting_modes());
         assert_ne!(japanese.no_candidates(), english.no_candidates());
         assert_ne!(

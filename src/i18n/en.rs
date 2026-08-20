@@ -9,9 +9,9 @@ use super::Language;
 use super::messages::{
     BranchManageMessages, BranchMessages, CherryPickMessages, CliMessages, CommitMessages,
     CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
-    FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, MergeMessages,
-    Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages, RevertMessages,
-    StashMessages, StatusMessages, SyncMessages, TagMessages, WorktreeMessages,
+    FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, LogMessages,
+    MergeMessages, Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages,
+    RevertMessages, StashMessages, StatusMessages, SyncMessages, TagMessages, WorktreeMessages,
 };
 use crate::error::{Error, stderr_suffix};
 use crate::git::read::{BRANCH_REF_PREFIX, MalformedOutput, ReadOperation, WORKTREE_LABEL};
@@ -128,6 +128,10 @@ impl Messages for EnglishMessages {
 
     fn pull(&self) -> &dyn PullMessages {
         &EnglishPullMessages
+    }
+
+    fn log(&self) -> &dyn LogMessages {
+        &EnglishLogMessages
     }
 }
 
@@ -513,6 +517,14 @@ impl ConfirmMessages for EnglishConfirmMessages {
 pub struct EnglishBranchMessages;
 
 impl BranchMessages for EnglishBranchMessages {
+    fn header_subject(&self) -> &'static str {
+        "Pick the branch to switch to"
+    }
+
+    fn header_outcome(&self) -> &'static str {
+        "switch to it"
+    }
+
     fn selection_not_found(&self, selected: &str) -> String {
         format!("The selected branch `{selected}` is not among the candidates")
     }
@@ -528,6 +540,18 @@ impl BranchMessages for EnglishBranchMessages {
 pub struct EnglishBranchManageMessages;
 
 impl BranchManageMessages for EnglishBranchManageMessages {
+    fn base_header_subject(&self) -> &'static str {
+        "Pick what the new branch starts from"
+    }
+
+    fn base_header_outcome_switch(&self) -> &'static str {
+        "create the branch and switch to it"
+    }
+
+    fn base_header_outcome_stay(&self) -> &'static str {
+        "create the branch without switching"
+    }
+
     fn base_selection_not_found(&self, selected: &str) -> String {
         format!("The selected base `{selected}` is not among the candidates")
     }
@@ -658,6 +682,24 @@ impl FileSelectionMessages for EnglishFileSelectionMessages {
 pub struct EnglishTagMessages;
 
 impl TagMessages for EnglishTagMessages {
+    fn header_subject(&self) -> &'static str {
+        "Pick a tag"
+    }
+
+    fn header_outcome_print(&self) -> &'static str {
+        "print its name"
+    }
+
+    /// `detached HEAD` は git の語彙であり訳さない。
+    fn header_outcome_switch(&self) -> &'static str {
+        "switch to it as a detached HEAD"
+    }
+
+    /// `HEAD` は git の語彙であり訳さない。
+    fn header_outcome_diff(&self) -> &'static str {
+        "show the diff against HEAD"
+    }
+
     /// オプション名は訳さない（design.md「翻訳しないもの」）。
     fn conflicting_actions(&self) -> &'static str {
         "`--switch` and `--diff` cannot be given at the same time"
@@ -681,6 +723,19 @@ impl TagMessages for EnglishTagMessages {
 pub struct EnglishReflogMessages;
 
 impl ReflogMessages for EnglishReflogMessages {
+    /// `reflog` は git の語彙であり訳さない。
+    fn header_subject(&self) -> &'static str {
+        "Pick a reflog entry"
+    }
+
+    fn header_outcome_print(&self) -> &'static str {
+        "print its full hash"
+    }
+
+    fn header_outcome_restore(&self, name: &str) -> String {
+        format!("create the branch `{name}` at that commit")
+    }
+
     fn read_failed(&self) -> &'static str {
         "Failed to read the reflog"
     }
@@ -763,6 +818,23 @@ impl RevertMessages for EnglishRevertMessages {
 pub struct EnglishStashMessages;
 
 impl StashMessages for EnglishStashMessages {
+    /// `stash` は git の語彙であり訳さない。
+    fn header_subject(&self) -> &'static str {
+        "Pick a stash"
+    }
+
+    fn header_outcome_apply(&self) -> &'static str {
+        "apply it and keep the stash"
+    }
+
+    fn header_outcome_pop(&self) -> &'static str {
+        "apply it and drop the stash"
+    }
+
+    fn header_outcome_drop(&self) -> &'static str {
+        "drop it after a confirmation"
+    }
+
     fn drop_confirmation(&self) -> &'static str {
         "The following stash will be dropped (this cannot be undone):"
     }
@@ -803,6 +875,15 @@ immediately and the message is treated as empty"
 pub struct EnglishFixupMessages;
 
 impl FixupMessages for EnglishFixupMessages {
+    fn header_subject(&self) -> &'static str {
+        "Pick the commit to correct"
+    }
+
+    /// `label`（`fixup` / `squash`）は作成されるコミットの接頭辞と同じ綴りであり訳さない。
+    fn header_outcome(&self, label: &str) -> String {
+        format!("create the {label} commit")
+    }
+
     fn staged_changes_read_failed(&self) -> &'static str {
         "Failed to read the staged changes"
     }
@@ -877,6 +958,15 @@ impl StatusMessages for EnglishStatusMessages {
 pub struct EnglishMergeMessages;
 
 impl MergeMessages for EnglishMergeMessages {
+    /// `merge` は git のサブコマンド名であり訳さない。
+    fn header_subject(&self) -> &'static str {
+        "Pick the branch to merge"
+    }
+
+    fn header_outcome(&self) -> &'static str {
+        "run the merge"
+    }
+
     /// オプション名は訳さない（design.md「翻訳しないもの」）。
     fn conflicting_modes(&self) -> &'static str {
         "`--no-ff`, `--squash` and `--ff-only` cannot be given at the same time"
@@ -946,6 +1036,15 @@ fn commits(count: usize) -> &'static str {
 pub struct EnglishRebaseMessages;
 
 impl RebaseMessages for EnglishRebaseMessages {
+    /// `rebase` は git のサブコマンド名であり訳さない。
+    fn header_subject(&self) -> &'static str {
+        "Pick the branch to rebase onto"
+    }
+
+    fn header_outcome(&self) -> &'static str {
+        "run the rebase"
+    }
+
     fn no_candidates(&self) -> &'static str {
         "There is no branch to rebase onto \
 (a local or remote-tracking branch other than the current one is needed)"
@@ -1083,6 +1182,47 @@ impl WorktreeMessages for EnglishWorktreeMessages {
 
     fn nothing_to_prune(&self) -> &'static str {
         "There is no worktree to prune"
+    }
+
+    fn install_running(&self, directory: &Path, command: &str) -> String {
+        format!(
+            "Running `{command}` in {directory}",
+            directory = directory.display()
+        )
+    }
+
+    /// エコシステム名・lockfile 名は固有名詞であり訳さない。
+    fn install_ambiguous(&self, ecosystem: &str, lockfiles: &str) -> String {
+        format!(
+            "Skipping the {ecosystem} dependencies: more than one lockfile is present ({lockfiles})"
+        )
+    }
+
+    /// オプション名は訳さない（design.md「翻訳しないもの」）。
+    fn install_flavour_unknown(&self, lockfile: &str) -> String {
+        format!(
+            "Skipping the dependencies: the Yarn version cannot be told from {lockfile} \
+(`--immutable` is Yarn 2 and later, `--frozen-lockfile` is Yarn 1)"
+        )
+    }
+
+    fn install_command_missing(&self, program: &str) -> String {
+        format!("Skipped the dependencies: `{program}` was not found")
+    }
+
+    fn install_failed(&self, command: &str) -> String {
+        format!(
+            "Failed to install the dependencies \
+(the worktree was created; run `{command}` again to retry)"
+        )
+    }
+
+    /// `git worktree list` はユーザーが打ち込むコマンドであり訳さない。
+    fn install_directory_not_found(&self, path: &str) -> String {
+        format!(
+            "Skipped the dependencies: the new worktree `{path}` is not listed by \
+`git worktree list`"
+        )
     }
 }
 
@@ -1227,6 +1367,14 @@ Pick the revisions with `gz diff --branch`, or use plain `git diff`"
 pub struct EnglishFetchMessages;
 
 impl FetchMessages for EnglishFetchMessages {
+    fn remote_header_subject(&self) -> &'static str {
+        "Pick the remote to fetch from"
+    }
+
+    fn remote_header_outcome(&self) -> &'static str {
+        "fetch"
+    }
+
     fn all_remotes_label(&self) -> &'static str {
         "all remotes"
     }
@@ -1397,6 +1545,20 @@ Push with `git push -u <remote> <branch>`, or set one with `git branch --set-ups
 
     fn notification_title(&self) -> &'static str {
         "gz pull finished"
+    }
+}
+
+/// `gz log`（[`crate::commands::log`]）の英語表示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnglishLogMessages;
+
+impl LogMessages for EnglishLogMessages {
+    fn header_subject(&self) -> &'static str {
+        "Pick a commit"
+    }
+
+    fn header_outcome(&self) -> &'static str {
+        "print its full hash"
     }
 }
 
@@ -1671,5 +1833,9 @@ impl CliMessages for EnglishCliMessages {
 
     fn worktree_prune_about(&self) -> &'static str {
         "Tidy up the bookkeeping of worktrees whose directory is gone"
+    }
+
+    fn worktree_add_no_install_help(&self) -> &'static str {
+        "Do not install dependencies after creating it (no lockfile is looked up either)"
     }
 }
