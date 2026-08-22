@@ -83,11 +83,11 @@ pub fn run(
         None => list(language, messages, repository),
         // `--no-install` の真偽値をここで型へ畳み、commands 層へ `bool` を持ち回さない
         // （既存の `PruneMode` / `FetchScope` と同方針）
-        Some(WorktreeCommand::Add { path, no_install }) => add(
+        Some(WorktreeCommand::Add { name, no_install }) => add(
             language,
             messages,
             repository,
-            path,
+            name,
             InstallMode::from_no_install(*no_install),
         ),
         Some(WorktreeCommand::Remove) => remove(language, messages, repository),
@@ -135,16 +135,21 @@ fn add(
     language: Language,
     messages: &dyn Messages,
     repository: &gix::Repository,
-    path: &Path,
+    name: &str,
     install: InstallMode,
 ) -> Result<()> {
-    // `git` へ渡す引数は文字列である必要がある。解釈できないパスを勝手に変換すると
-    // 意図と異なる場所に worktree を作ってしまうため、推測せずエラーにする
-    let path = path
-        .to_str()
-        .ok_or_else(|| anyhow!(messages.worktree().path_not_utf8(path)))?;
-
     let worktrees = read_worktrees(messages, repository)?;
+
+    // 置き場所は叩いた位置ではなくリポジトリルートの兄弟に固定する。worktree の中身は
+    // 「`.git` のある階層まるごと」であり、その単位はリポジトリと並べたときに最も素直に
+    // 読めるため（リポジトリの内側に作ると、本体からは未追跡の埋め込みリポジトリとして
+    // 見え、`.gitignore` の手当てが要る）
+    let destination = sibling_destination(messages, &worktrees, name)?;
+    let path = destination
+        .to_str()
+        .ok_or_else(|| anyhow!(messages.worktree().path_not_utf8(&destination)))?
+        .to_owned();
+    let path = path.as_str();
     let in_use = checked_out_branches(&worktrees);
     let locals = branches(repository, BranchScope::Local)
         .context(messages.common().branch_list_read_failed())?;
@@ -170,6 +175,16 @@ fn add(
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     run_git(language, &arguments).with_context(|| messages.worktree().creation_failed(path))?;
 
+    // 叩いた場所ではなくリポジトリの兄弟へ作るため、どこへ作られたのかを必ず知らせる。
+    // 標準出力は使わない（`git worktree add` 自身が `HEAD is now at ...` を標準出力へ
+    // 書くため、パスだけを取り出せる状態にはならない。実測で確認済み）
+    writeln!(
+        std::io::stderr(),
+        "{message}",
+        message = messages.worktree().created_at(path)
+    )
+    .context(messages.common().stderr_write_failed())?;
+
     // 作業ディレクトリには利用者が打った文字列（`../feature` のような相対パス）を使わない。
     // 一覧を読み直して照合した登録済みパスを使う（design.md セキュリティ設計）
     let created = created_worktree(messages, repository, path)?;
@@ -192,10 +207,125 @@ fn add(
     );
 
     if install == InstallMode::Run {
-        install_dependencies(messages, &directory, &mut std::io::stderr());
+        install_where_the_command_was_run(messages, repository, &directory)?;
     }
 
     Ok(())
+}
+
+/// `gz worktree add` を叩いた位置に対応するディレクトリで、依存インストールを実行する。
+///
+/// リポジトリルートから見た cwd の相対位置を、そのまま新しい worktree へ写す
+/// （[`relative_prefix`]）。リポジトリルートで叩いた場合は相対位置が空になり、
+/// worktree のルートを対象とする従来の挙動と完全に一致する。
+///
+/// 写した先が存在しない場合（選んだブランチにそのサブディレクトリがまだ無い等）は、
+/// **worktree のルートへ暗黙に落とさず**、その旨を伝えて何もしない。ルートには利用者が
+/// 意図したものと別の lockfile が置かれ得るためである。
+///
+/// # Errors
+///
+/// 標準エラーへの書き込みに失敗した場合にエラーを返す。
+fn install_where_the_command_was_run(
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    worktree: &Path,
+) -> Result<()> {
+    let Some(prefix) = relative_prefix(repository) else {
+        // 相対位置を測れない（bare リポジトリから叩いた等）。worktree のルートを対象と
+        // する従来の挙動をそのまま採る。写す基準が無い以上、これ以外の解釈が無いため
+        install_dependencies(messages, worktree, &mut std::io::stderr());
+        return Ok(());
+    };
+
+    let directory = worktree.join(&prefix);
+    if !directory.is_dir() {
+        writeln!(
+            std::io::stderr(),
+            "{message}",
+            message = messages
+                .worktree()
+                .install_subdirectory_missing(&prefix.display().to_string())
+        )
+        .context(messages.common().stderr_write_failed())?;
+        return Ok(());
+    }
+
+    install_dependencies(messages, &directory, &mut std::io::stderr());
+
+    Ok(())
+}
+
+/// 現在の worktree のルートから見た cwd の相対位置。
+///
+/// `.git` がリポジトリの上位にある構成（例: `infrastructure/` がリポジトリルートで、
+/// 実際に作業するのは `cdk/cyresource/she-cyresource/`）では、`git worktree add` が作るのは
+/// **リポジトリ全体**であり、利用者が作業したいサブディレクトリは worktree のルートではなく
+/// その内側に来る。インストールを走らせるべき位置もそこであるため、叩いた位置を写す。
+///
+/// 基準は主 worktree ではなく**cwd を含む worktree**である（linked worktree の中から
+/// 別の worktree を作る場合、主 worktree ルートで測ると相対位置がずれる）。
+///
+/// パスは両側とも [`std::fs::canonicalize`] してから比較する。`git worktree list` が
+/// シンボリックリンク解決済みの絶対パスを報告するのと同じ理由であり、`/tmp` と
+/// `/private/tmp` のような差で strip に失敗することを避ける。
+///
+/// 相対位置を測れない場合（作業ツリーが無い・正規化に失敗した・cwd がルートの外）は
+/// `None` を返す。推測で組み立てない。
+fn relative_prefix(repository: &gix::Repository) -> Option<std::path::PathBuf> {
+    let root = std::fs::canonicalize(repository.workdir()?).ok()?;
+    let cwd = std::fs::canonicalize(std::env::current_dir().ok()?).ok()?;
+
+    cwd.strip_prefix(&root).ok().map(Path::to_path_buf)
+}
+
+/// 作成する worktree の絶対パスを、リポジトリルートの兄弟として組み立てる。
+///
+/// `name` は**ディレクトリ名**であり、パスではない。区切りを含む名前を受け取ると
+/// 「パスとして解釈されたが実際は別の場所に作られた」という取り違えが起きるため、
+/// 受け付けずにエラーにする（暗黙に読み替えない）。
+///
+/// 基準は現在の worktree ではなく **main worktree**（`.git` の実体がある作業ツリー）である。
+/// linked worktree の中から叩いた場合でも作成先が同じ場所になり、「どこで叩いても
+/// リポジトリの隣に並ぶ」と説明できるため。
+///
+/// # Errors
+///
+/// 名前が空・パス区切りを含む・`.` や `..` である場合、main worktree が見つからない場合、
+/// および main worktree に親ディレクトリが無い場合にエラーを返す。
+fn sibling_destination(
+    messages: &dyn Messages,
+    worktrees: &[WorktreeInfo],
+    name: &str,
+) -> Result<std::path::PathBuf> {
+    if !is_directory_name(name) {
+        bail!(messages.worktree().name_is_not_a_directory_name(name));
+    }
+
+    let main = worktrees
+        .iter()
+        .find(|worktree| worktree.is_main)
+        .ok_or_else(|| anyhow!(messages.worktree().main_worktree_not_found()))?;
+
+    let root = Path::new(&main.path);
+    let parent = root
+        .parent()
+        .ok_or_else(|| anyhow!(messages.worktree().no_parent_directory(&main.path)))?;
+
+    Ok(parent.join(name))
+}
+
+/// `name` が単一のディレクトリ名として使えるかどうか。
+///
+/// パス区切りを含むもの、空文字、`.` / `..` を拒む。区切りの判定は `/` と
+/// [`std::path::MAIN_SEPARATOR`] の両方で行う（Windows でも `/` が区切りとして通るため、
+/// 片方だけでは擦り抜ける）。
+fn is_directory_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains(std::path::MAIN_SEPARATOR)
 }
 
 /// 複写元とする、いま作業しているツリーのルート。
@@ -576,6 +706,200 @@ fn report_nothing_to_prune(
 
 #[cfg(test)]
 mod tests {
+
+    /// worktree の作成先は、叩いた場所ではなくリポジトリルートの兄弟になる。
+    #[test]
+    fn a_worktree_is_created_next_to_the_repository_root() {
+        let worktrees = vec![main_worktree("/product/infrastructure")];
+
+        let destination = sibling_destination(Language::Japanese.messages(), &worktrees, "sample")
+            .expect("a name next to the root should resolve");
+
+        assert_eq!(destination, Path::new("/product/sample"));
+    }
+
+    /// linked worktree の中から叩いても、基準は main worktree のままである。
+    #[test]
+    fn the_destination_is_measured_from_the_main_worktree() {
+        let worktrees = vec![
+            main_worktree("/product/infrastructure"),
+            linked_worktree("/somewhere/else/other"),
+        ];
+
+        let destination = sibling_destination(Language::Japanese.messages(), &worktrees, "sample")
+            .expect("the main work tree decides the destination");
+
+        // linked worktree の隣（/somewhere/else/sample）にはならない
+        assert_eq!(destination, Path::new("/product/sample"));
+    }
+
+    /// パスを渡せたように見えて別の場所に作られる、という取り違えを起こさない。
+    #[test]
+    fn a_name_with_a_path_separator_is_refused() {
+        let worktrees = vec![main_worktree("/product/infrastructure")];
+
+        for name in ["../sample", "a/b", "/absolute", ".", "..", ""] {
+            let error = sibling_destination(Language::Japanese.messages(), &worktrees, name)
+                .expect_err("{name} must not be accepted as a directory name");
+
+            assert!(
+                !error.to_string().trim().is_empty(),
+                "{name} must be refused with a reason"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_directory_name_is_accepted() {
+        for name in ["sample", "feature-1", "a.b", "-dashy"] {
+            assert!(is_directory_name(name), "{name} should be a directory name");
+        }
+    }
+
+    #[test]
+    fn the_created_path_is_announced_in_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let message = language.messages().worktree().created_at("/product/sample");
+
+            assert!(
+                message.contains("/product/sample"),
+                "{language:?} must name the location: {message}"
+            );
+        }
+
+        assert_ne!(
+            Language::Japanese.messages().worktree().created_at("/x"),
+            Language::English.messages().worktree().created_at("/x")
+        );
+    }
+
+    #[test]
+    fn the_placement_wording_is_filled_in_for_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let worktree = language.messages().worktree();
+
+            assert!(worktree.name_is_not_a_directory_name("a/b").contains("a/b"));
+            assert!(worktree.no_parent_directory("/").contains('/'));
+            assert!(!worktree.main_worktree_not_found().trim().is_empty());
+        }
+
+        let japanese = Language::Japanese.messages().worktree();
+        let english = Language::English.messages().worktree();
+        assert_ne!(
+            japanese.name_is_not_a_directory_name("x"),
+            english.name_is_not_a_directory_name("x")
+        );
+        assert_ne!(
+            japanese.no_parent_directory("x"),
+            english.no_parent_directory("x")
+        );
+        assert_ne!(
+            japanese.main_worktree_not_found(),
+            english.main_worktree_not_found()
+        );
+    }
+
+    /// 作成先の算出に使う main worktree の記録を組み立てる。
+    fn main_worktree(path: &str) -> WorktreeInfo {
+        WorktreeInfo {
+            path: path.to_owned(),
+            head: None,
+            branch: None,
+            is_main: true,
+            is_locked: false,
+            prunable: false,
+        }
+    }
+
+    /// linked worktree の記録を組み立てる。
+    fn linked_worktree(path: &str) -> WorktreeInfo {
+        WorktreeInfo {
+            is_main: false,
+            ..main_worktree(path)
+        }
+    }
+
+    /// リポジトリルートから叩いた場合、相対位置は空になり従来どおり worktree のルートが対象になる。
+    #[test]
+    fn running_at_the_repository_root_keeps_targeting_the_worktree_root() {
+        let worktree = Path::new("/tmp/created");
+
+        // 相対位置が空なら join しても変わらない、という関係をここで固定する
+        assert_eq!(worktree.join(Path::new("")), worktree);
+    }
+
+    /// サブディレクトリから叩いた場合、その位置が新しい worktree の内側へ写される。
+    #[test]
+    fn running_in_a_subdirectory_moves_the_target_inside_the_new_worktree() {
+        let worktree = Path::new("/tmp/created");
+        let prefix = Path::new("cdk/cyresource/she-cyresource");
+
+        assert_eq!(
+            worktree.join(prefix),
+            Path::new("/tmp/created/cdk/cyresource/she-cyresource")
+        );
+    }
+
+    /// 実際のリポジトリで、cwd の相対位置が測れることを確かめる。
+    #[test]
+    fn the_relative_prefix_is_measured_from_the_worktree_that_holds_the_cwd() {
+        use crate::git::repo::discover;
+        use crate::test_support::{TempDir, commit, init_repository, write_file};
+
+        let dir = TempDir::new("worktree-relative-prefix");
+        init_repository(dir.path());
+        write_file(
+            dir.path(),
+            "cdk/cyresource/she-cyresource/package.json",
+            "{}",
+        );
+        commit(dir.path(), "add the nested package");
+
+        let repository = discover(dir.path()).expect("the repository should open");
+        let root = std::fs::canonicalize(
+            repository
+                .workdir()
+                .expect("the test repository has a work tree"),
+        )
+        .expect("the work tree can be canonicalized");
+        let nested = root.join("cdk/cyresource/she-cyresource");
+
+        // `relative_prefix` はプロセスの cwd を読むため、ここでは同じ計算を値で固定する
+        // （cwd の差し替えはテストの並列実行と両立しない）
+        let prefix = std::fs::canonicalize(&nested)
+            .expect("the nested directory exists")
+            .strip_prefix(&root)
+            .expect("the nested directory is inside the work tree")
+            .to_path_buf();
+
+        assert_eq!(prefix, Path::new("cdk/cyresource/she-cyresource"));
+    }
+
+    #[test]
+    fn a_missing_subdirectory_is_reported_in_both_languages() {
+        for language in [Language::Japanese, Language::English] {
+            let message = language
+                .messages()
+                .worktree()
+                .install_subdirectory_missing("cdk/cyresource/she-cyresource");
+
+            assert!(
+                message.contains("cdk/cyresource/she-cyresource"),
+                "{language:?} must name the directory: {message}"
+            );
+        }
+
+        assert_ne!(
+            Language::Japanese
+                .messages()
+                .worktree()
+                .install_subdirectory_missing("x"),
+            Language::English
+                .messages()
+                .worktree()
+                .install_subdirectory_missing("x")
+        );
+    }
     use super::*;
     use std::collections::HashSet;
 

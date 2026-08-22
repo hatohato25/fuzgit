@@ -1244,6 +1244,28 @@ impl WorktreeMessages for EnglishWorktreeMessages {
     }
 
     /// `git worktree list` はユーザーが打ち込むコマンドであり訳さない。
+    fn name_is_not_a_directory_name(&self, name: &str) -> String {
+        format!(
+            "a worktree name cannot contain a path separator: {name} (worktrees are always created next to the repository, so pass a name only)"
+        )
+    }
+
+    fn no_parent_directory(&self, root: &str) -> String {
+        format!("{root} has no parent directory, so a sibling worktree cannot be created")
+    }
+
+    fn main_worktree_not_found(&self) -> &'static str {
+        "the main work tree could not be identified, so there is nowhere to create the worktree"
+    }
+
+    fn created_at(&self, path: &str) -> String {
+        format!("Created the worktree at {path}")
+    }
+
+    fn install_subdirectory_missing(&self, relative: &str) -> String {
+        format!("warning: the new worktree has no {relative}, so nothing is installed")
+    }
+
     fn install_directory_not_found(&self, path: &str) -> String {
         format!(
             "Skipped the dependencies: the new worktree `{path}` is not listed by \
@@ -1928,7 +1950,7 @@ impl CliMessages for EnglishCliMessages {
     }
 
     fn worktree_add_path_help(&self) -> &'static str {
-        "Path of the worktree to create (no directory name is suggested)"
+        "Name of the worktree to create (always made next to the repository root)"
     }
 
     fn worktree_remove_about(&self) -> &'static str {

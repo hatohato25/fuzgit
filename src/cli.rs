@@ -13,8 +13,6 @@
 //! 以降を `clap` が `long_about` / `long_help` として `--help` へ出してしまい、**実行時に
 //! 差し替えない文言がヘルプに増える**ため（この方針により `-h` と `--help` の内容も一致する）。
 
-use std::path::PathBuf;
-
 use clap::{Command as ClapCommand, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::i18n::Messages;
@@ -310,8 +308,8 @@ pub enum BranchCommand {
 pub enum WorktreeCommand {
     /// Pick a branch and create a new worktree for it
     Add {
-        /// Path of the worktree to create (no directory name is suggested)
-        path: PathBuf,
+        /// Name of the worktree to create (always made next to the repository root)
+        name: String,
 
         /// Do not install dependencies after creating it (no lockfile is looked up either)
         //
@@ -538,7 +536,7 @@ fn localize_worktree(command: ClapCommand, cli: &dyn CliMessages) -> ClapCommand
         .about(cli.worktree_about())
         .mut_subcommand("add", |add| {
             add.about(cli.worktree_add_about())
-                .mut_arg("path", |argument| {
+                .mut_arg("name", |argument| {
                     argument.help(cli.worktree_add_path_help())
                 })
                 .mut_arg("no_install", |argument| {
@@ -1213,13 +1211,13 @@ mod tests {
 
     #[test]
     fn worktree_exposes_add_remove_and_prune() {
-        let cli = Cli::try_parse_from(["gz", "worktree", "add", "../feature"])
+        let cli = Cli::try_parse_from(["gz", "worktree", "add", "feature"])
             .expect("`gz worktree add` should parse");
         match cli.command {
             Command::Worktree { command } => assert_eq!(
                 command,
                 Some(WorktreeCommand::Add {
-                    path: PathBuf::from("../feature"),
+                    name: "feature".to_owned(),
                     no_install: false,
                 })
             ),
@@ -1244,14 +1242,14 @@ mod tests {
     fn worktree_add_installs_dependencies_unless_it_is_told_not_to() {
         // 既定は有効。`gz worktree add` を打った直後にだけ起きる実行であり、
         // 既定で無効にすると FR-30 の目的（作った直後に動かせる worktree）が失われる
-        let cli = Cli::try_parse_from(["gz", "worktree", "add", "--no-install", "../feature"])
+        let cli = Cli::try_parse_from(["gz", "worktree", "add", "--no-install", "feature"])
             .expect("`--no-install` should parse");
 
         match cli.command {
             Command::Worktree { command } => assert_eq!(
                 command,
                 Some(WorktreeCommand::Add {
-                    path: PathBuf::from("../feature"),
+                    name: "feature".to_owned(),
                     no_install: true,
                 })
             ),
@@ -1263,14 +1261,14 @@ mod tests {
     fn worktree_add_has_no_short_flag_for_no_install() {
         // 短縮形は git に同じ意味の綴りが実在するものだけに付ける
         // （requirements.md「オプションの短縮形の方針」）
-        Cli::try_parse_from(["gz", "worktree", "add", "-n", "../feature"])
+        Cli::try_parse_from(["gz", "worktree", "add", "-n", "feature"])
             .expect_err("`--no-install` must not have a short form");
     }
 
     #[test]
-    fn worktree_add_requires_a_path() {
+    fn worktree_add_requires_a_name() {
         Cli::try_parse_from(["gz", "worktree", "add"])
-            .expect_err("the worktree path is required (no automatic suggestion)");
+            .expect_err("the worktree name is required (no automatic suggestion)");
     }
 
     #[test]

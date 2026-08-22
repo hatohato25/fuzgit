@@ -2966,7 +2966,7 @@ gz sync --merge    # fetch → upstream を merge</code></pre>
           <div lang="en">
             <pre><code>gz worktree                  # pick from the list and print the path to stdout
 cd "$(gz worktree)"          # shell integration (move to the picked worktree)
-gz worktree add &lt;path&gt;       # pick a branch and create a new worktree
+gz worktree add &lt;name&gt;       # pick a branch and create a new worktree next to the repository
 gz worktree remove           # pick a worktree and remove it (with confirmation)
 gz worktree prune            # tidy up bookkeeping for worktrees whose directory is gone (with confirmation)</code></pre>
 
@@ -2988,19 +2988,35 @@ gz worktree prune            # tidy up bookkeeping for worktrees whose directory
               </p>
             </blockquote>
 
-            <h3><code>gz worktree add &lt;path&gt;</code></h3>
+            <h3><code>gz worktree add &lt;name&gt;</code></h3>
             <div class="table-wrap">
               <table>
                 <thead><tr><th scope="col">Argument</th><th scope="col">Description</th></tr></thead>
                 <tbody>
-                  <tr><td><code>&lt;PATH&gt;</code></td><td>Path of the worktree to create (required positional argument)</td></tr>
+                  <tr><td><code>&lt;NAME&gt;</code></td><td>Name of the worktree to create (required positional argument). A <strong>name</strong>, not a path &mdash; separators are refused</td></tr>
                 </tbody>
               </table>
             </div>
             <ul>
               <li>What you pick in the fuzzy finder is the branch to check out. Candidates are limited to local branches <strong>not in use by another worktree</strong> (git cannot check out the same branch in two worktrees at once).</li>
-              <li>It runs <code>git worktree add -- &lt;path&gt; &lt;branch&gt;</code>. <strong>Directory names are never suggested automatically.</strong></li>
-              <li>For a path starting with <code>-</code>, write <code>gz worktree add -- -dashy</code> (that <code>--</code> is clap&rsquo;s; fuzgit adds its own <code>--</code> when calling git).</li>
+              <li>
+                <strong>The worktree is always created next to the repository root</strong>, whatever
+                directory you run the command from. Given a repository at
+                <code>product/infrastructure/</code>, <code>gz worktree add sample</code> creates
+                <code>product/sample/</code>. A worktree holds the whole tree below <code>.git</code>,
+                so placing it beside the repository reads more naturally than nesting it inside &mdash;
+                and a worktree inside the repository shows up as an untracked embedded repository
+                that you then have to gitignore.
+              </li>
+              <li>
+                Because that is not where you ran the command, <strong>the resulting path is printed
+                to stderr</strong> once the worktree exists. (Not stdout: <code>git worktree add</code>
+                writes <code>HEAD is now at ...</code> there itself, so stdout could never carry the
+                path alone.)
+              </li>
+              <li>The argument is a <strong>name</strong>. Anything containing a path separator (<code>../sample</code>, <code>a/b</code>, an absolute path), as well as <code>.</code> and <code>..</code>, is refused with an explanation rather than being reinterpreted.</li>
+              <li>It runs <code>git worktree add -- &lt;resolved path&gt; &lt;branch&gt;</code>. <strong>Names are never suggested automatically.</strong></li>
+              <li>For a name starting with <code>-</code>, write <code>gz worktree add -- -dashy</code> (that <code>--</code> is clap&rsquo;s; fuzgit adds its own <code>--</code> when calling git).</li>
               <li>
                 Afterwards the <code>.claude/</code> directory of the worktree you
                 ran the command from is <strong>copied</strong> into the new one.
@@ -3030,7 +3046,7 @@ gz worktree prune            # tidy up bookkeeping for worktrees whose directory
           <div lang="ja">
             <pre><code>gz worktree                  # 一覧から選んでパスを標準出力へ出す
 cd "$(gz worktree)"          # シェル連携（選んだ worktree へ移動する）
-gz worktree add &lt;path&gt;       # ブランチを選んで新しい worktree を作る
+gz worktree add &lt;name&gt;       # ブランチを選び、リポジトリの兄弟として worktree を作る
 gz worktree remove           # worktree を選んで削除する（確認あり）
 gz worktree prune            # 実体を失った worktree の管理情報を整理する（確認あり）</code></pre>
 
@@ -3050,7 +3066,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
               </p>
             </blockquote>
 
-            <h3><code>gz worktree add &lt;path&gt;</code></h3>
+            <h3><code>gz worktree add &lt;name&gt;</code></h3>
             <div class="table-wrap">
               <table>
                 <thead><tr><th scope="col">引数</th><th scope="col">説明</th></tr></thead>
@@ -3065,7 +3081,22 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 <strong>他の worktree で使用中でない</strong>ローカルブランチに限ります
                 （git は同じブランチを複数の worktree で同時にチェックアウトできないため）。
               </li>
-              <li>実行するのは <code>git worktree add -- &lt;path&gt; &lt;branch&gt;</code> です。<strong>ディレクトリ名の自動提案は行いません。</strong></li>
+              <li>
+                <strong>worktree は必ずリポジトリルートの兄弟に作成します。</strong>どのディレクトリで
+                コマンドを叩いても変わりません。リポジトリが <code>product/infrastructure/</code> に
+                あるとき、<code>gz worktree add sample</code> は <code>product/sample/</code> を作ります。
+                worktree の中身は <code>.git</code> のある階層まるごとなので、リポジトリと並べたほうが
+                素直に読めるためです（内側に作ると、本体からは未追跡の埋め込みリポジトリとして見え、
+                <code>.gitignore</code> の手当てが必要になります）。
+              </li>
+              <li>
+                叩いた場所とは違うところに作られるため、<strong>作成後にそのパスを標準エラーへ表示します</strong>。
+                （標準出力は使いません。<code>git worktree add</code> 自身が
+                <code>HEAD is now at ...</code> をそちらへ書くため、パスだけを取り出せる状態には
+                ならないからです。）
+              </li>
+              <li>引数は<strong>名前</strong>です。パス区切りを含むもの（<code>../sample</code> / <code>a/b</code> / 絶対パス）と <code>.</code> / <code>..</code> は、読み替えずに理由を示して拒否します。</li>
+              <li>実行するのは <code>git worktree add -- &lt;解決後のパス&gt; &lt;branch&gt;</code> です。<strong>名前の自動提案は行いません。</strong></li>
               <li>
                 <code>-</code> で始まるパスを指定する場合は <code>gz worktree add -- -dashy</code> のように
                 書きます（clap 側の <code>--</code> であり、fuzgit は git へ渡す際にも別途
@@ -3578,7 +3609,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                   </tr>
                   <tr>
                     <td>A text input UI for branch names and worktree paths</td>
-                    <td>skim has no text input UI. Names and paths are positional arguments (<code>gz branch create &lt;name&gt;</code> / <code>gz worktree add &lt;path&gt;</code>) and the fuzzy selection is limited to the starting point / the branch. <code>gz worktree add</code> also never suggests a directory name automatically</td>
+                    <td>skim has no text input UI. Names and paths are positional arguments (<code>gz branch create &lt;name&gt;</code> / <code>gz worktree add &lt;name&gt;</code>) and the fuzzy selection is limited to the starting point / the branch. <code>gz worktree add</code> also never suggests a directory name automatically</td>
                   </tr>
                   <tr>
                     <td>Hunk-level partial commit / stage</td>
@@ -3706,7 +3737,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                     <td>ブランチ名・worktree パスのテキスト入力 UI</td>
                     <td>
                       skim にテキスト入力 UI は無い。名前・パスは位置引数
-                      （<code>gz branch create &lt;name&gt;</code> / <code>gz worktree add &lt;path&gt;</code>）とし、
+                      （<code>gz branch create &lt;name&gt;</code> / <code>gz worktree add &lt;name&gt;</code>）とし、
                       fuzzy 選択は作成元・ブランチに限定する。<code>gz worktree add</code> のディレクトリ名の
                       自動提案も行わない
                     </td>

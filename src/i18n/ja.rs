@@ -1139,6 +1139,28 @@ impl WorktreeMessages for JapaneseWorktreeMessages {
         )
     }
 
+    fn name_is_not_a_directory_name(&self, name: &str) -> String {
+        format!(
+            "worktree の名前にパス区切りは使えません: {name}（作成先はリポジトリの兄弟に固定されているため、名前だけを指定してください）"
+        )
+    }
+
+    fn no_parent_directory(&self, root: &str) -> String {
+        format!("{root} に親ディレクトリが無いため、兄弟として worktree を作成できません")
+    }
+
+    fn main_worktree_not_found(&self) -> &'static str {
+        "リポジトリ本体の作業ツリーを特定できないため、作成先を決められません"
+    }
+
+    fn created_at(&self, path: &str) -> String {
+        format!("worktree を作成しました: {path}")
+    }
+
+    fn install_subdirectory_missing(&self, relative: &str) -> String {
+        format!("警告: 新しい worktree に {relative} が無いため、依存インストールを行いません")
+    }
+
     fn install_directory_not_found(&self, path: &str) -> String {
         format!(
             "作成した worktree `{path}` が worktree の一覧に見つからないため\
@@ -1795,7 +1817,7 @@ impl CliMessages for JapaneseCliMessages {
     }
 
     fn worktree_add_path_help(&self) -> &'static str {
-        "作成する worktree のパス（ディレクトリ名の自動提案は行わない）"
+        "作成する worktree の名前（必ずリポジトリルートの兄弟として作成する）"
     }
 
     fn worktree_remove_about(&self) -> &'static str {

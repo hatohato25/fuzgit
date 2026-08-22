@@ -241,7 +241,7 @@ git config --global fuzgit.notify true
 | [`gz fetch`](https://hatohato25.github.io/fuzgit/docs.html#fetch) | fetch の対象を決めて取得する（`--siblings` で隣のリポジトリも一括取得。**ネットワークを使う**） |
 | [`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) | ブランチを選んで upstream へまとめて追随させる（fast-forward のみ。**ネットワークを使う**） |
 | [`gz sync`](https://hatohato25.github.io/fuzgit/docs.html#sync) | 現在ブランチを upstream と同期する（**ネットワークを使う**） |
-| [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | worktree を一覧・管理する（`add` は `.claude/` を新しい worktree へ複写する） |
+| [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | worktree を一覧・管理する（`add <名前>` はリポジトリの兄弟に作成し、`.claude/` を複写する） |
 
 オプション・候補の作り方・プレビューの内容・確認プロンプトの有無は
 [ドキュメント](https://hatohato25.github.io/fuzgit/docs.html)に記載しています。

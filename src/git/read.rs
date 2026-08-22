@@ -1508,7 +1508,10 @@ fn parse_stash_list(output: &[u8]) -> Result<Vec<StashEntry>> {
     }
 
     let mut entries = Vec::with_capacity(records.len() / 2);
-    for pair in records.chunks_exact(2) {
+    // 直前に偶数であることを確かめてあるため、余り（`.1`）は必ず空である。
+    // 固定長の配列として受け取ると `pair[0]` / `pair[1]` の添字が境界検査を伴わない
+    let (pairs, _) = records.as_chunks::<2>();
+    for pair in pairs {
         let selector = to_utf8(pair[0].as_bstr(), ReadOperation::StashSelectorDecode)?;
         let index = parse_stash_selector(&selector).ok_or_else(|| {
             malformed_output(

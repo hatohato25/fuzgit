@@ -94,20 +94,45 @@ const DEFAULT_SSH_COMMAND: &str = "ssh";
 /// ssh へ対話を禁じるオプション。passphrase や未知のホストの確認を待たずに失敗させる。
 const SSH_BATCH_MODE_OPTION: &str = "-o BatchMode=yes";
 
-/// ssh の接続多重化（ControlMaster）を使わせないオプション。
+/// ssh に**マスター接続を作らせない**オプション。
 ///
 /// 利用者が `ControlMaster auto` を設定していると、同時に起動した ssh がいずれも
 /// 「マスター接続はまだ無い」と判断して同じ ControlPath を作りに行き、先に作れた 1 つ以外は
 /// `ControlSocket ... already exists, disabling multiplexing` を出して通常接続へ落ちる。
-/// 並列実行では多重化はそもそも成立しないため、**競合させたうえで警告を読ませるより、
-/// 初めから使わないことを明示する**（`man ssh_config` の ControlMaster は `auto` を
-/// 「マスターがあれば使い、無ければ作る」日和見的な多重化と説明している）。
+/// これを避けるために付ける。
 ///
-/// 無効化はこの経路に閉じており、直列フォールバックでは利用者の設定がそのまま効く。
+/// **これだけでは多重化から降りたことにならない。**`ControlMaster=no` が止めるのは
+/// 「自分がマスターになること」だけであり、**既に生きているマスターへの相乗りは止まらない**。
+/// 相乗りまで断つには [`SSH_NO_CONTROL_PATH_OPTION`] が要る。
 const SSH_NO_MULTIPLEXING_OPTION: &str = "-o ControlMaster=no";
 
+/// 既存のマスター接続へ**相乗りさせない**オプション。
+///
+/// `ControlPath` が生きたソケットを指していると、ssh は `ControlMaster=no` でもそのマスターへ
+/// 繋ぎに行き、1 本の接続の上に並列数ぶんのセッションを開こうとする。リモートの
+/// `MaxSessions`（sshd の既定は 10）を超えた分は拒否され、
+/// `mux_client_request_session: session request failed: Session open refused by peer`
+/// が並列数ぶん端末へ流れる。
+///
+/// **実測（2026-08-23、github.com・OpenSSH クライアント / macOS）**: 生きたマスターがある状態で
+/// 16 並列の `git ls-remote` を実行すると、`-o ControlMaster=no` だけでは 16 件中 6 件が
+/// 上記メッセージを出した。`-o ControlPath=none` を足すと 0 件になった。
+///
+/// なお**このメッセージが出ても処理は失敗しない**（拒否された ssh は自前で新しい接続を
+/// 張り直す。実測でも終了コードはすべて 0 だった）。それでも黙らせるのは、fuzgit が
+/// 並列度を上げたことによって生じた警告であり、利用者から見れば「fuzgit が出したエラー」に
+/// しか見えないためである。
+///
+/// 無効化はこの経路（並列フェーズ）に閉じており、直列フォールバックでは利用者の設定が
+/// そのまま効く。
+const SSH_NO_CONTROL_PATH_OPTION: &str = "-o ControlPath=none";
+
 /// 並列フェーズの ssh へ必ず付けるオプション（この順に後ろへ足す）。
-const SSH_PARALLEL_OPTIONS: [&str; 2] = [SSH_BATCH_MODE_OPTION, SSH_NO_MULTIPLEXING_OPTION];
+const SSH_PARALLEL_OPTIONS: [&str; 3] = [
+    SSH_BATCH_MODE_OPTION,
+    SSH_NO_MULTIPLEXING_OPTION,
+    SSH_NO_CONTROL_PATH_OPTION,
+];
 
 /// 子プロセス `git` のメッセージ言語をどう扱うか（FR-26 の (A)/(B) 分類）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,7 +274,10 @@ fn apply_locale(command: &mut Command, intent: LocaleIntent) -> LocaleEnvironmen
 /// - `GIT_SSH_COMMAND`: [`SSH_PARALLEL_OPTIONS`] を付けた ssh を使わせる。
 ///   `-o BatchMode=yes` は、ssh が passphrase を**標準入力ではなく `/dev/tty` から読む**ため
 ///   `stdin` を閉じるだけでは防げないことへの対処（実 pty 配下でも端末へ何も書かずに失敗する）。
-///   `-o ControlMaster=no` は並列起動どうしの接続多重化の競合を避けるため。
+///   `-o ControlMaster=no` は並列起動どうしの接続多重化の競合を避けるため、
+///   `-o ControlPath=none` は既に生きているマスター接続への相乗りを断つため
+///   （前者だけでは相乗りが残り、リモートの `MaxSessions` を超えて
+///   `mux_client_request_session ... Session open refused by peer` が並ぶ）。
 ///   親環境に値があればそれへ追記し、利用者の ssh 設定を捨てない
 ///
 /// **`GIT_TERMINAL_PROMPT` と `GIT_ASKPASS` はどちらか一方では足りない。**前者だけでは
@@ -1441,7 +1469,7 @@ mod tests {
                 (GIT_ASKPASS_ENV, OsString::new()),
                 (
                     GIT_SSH_COMMAND_ENV,
-                    OsString::from("ssh -o BatchMode=yes -o ControlMaster=no")
+                    OsString::from("ssh -o BatchMode=yes -o ControlMaster=no -o ControlPath=none")
                 ),
             ]
         );
@@ -1455,7 +1483,7 @@ mod tests {
         assert_eq!(
             ssh_command_of(&environment),
             Some(OsStr::new(
-                "ssh -i /tmp/key -o BatchMode=yes -o ControlMaster=no"
+                "ssh -i /tmp/key -o BatchMode=yes -o ControlMaster=no -o ControlPath=none"
             ))
         );
     }
@@ -1467,7 +1495,9 @@ mod tests {
 
         assert_eq!(
             ssh_command_of(&environment),
-            Some(OsStr::new("ssh -o BatchMode=yes -o ControlMaster=no"))
+            Some(OsStr::new(
+                "ssh -o BatchMode=yes -o ControlMaster=no -o ControlPath=none"
+            ))
         );
     }
 
@@ -1482,6 +1512,21 @@ mod tests {
         assert!(
             ssh.to_string_lossy().contains("-o ControlMaster=no"),
             "multiplexing must be turned off explicitly: {ssh:?}"
+        );
+    }
+
+    #[test]
+    fn the_parallel_phase_does_not_join_an_existing_master_connection() {
+        // `ControlMaster=no` が止めるのは「自分がマスターになること」だけで、既に生きている
+        // マスターへの相乗りは止まらない。相乗りするとリモートの MaxSessions（既定 10）を
+        // 超え、`mux_client_request_session ... Session open refused by peer` が並列数ぶん
+        // 端末へ流れる（実測: 16 並列で 16 件中 6 件。`ControlPath=none` を足すと 0 件）
+        let environment = noninteractive_environment(Some(OsStr::new("ssh")));
+
+        let ssh = ssh_command_of(&environment).expect("the ssh command should be built");
+        assert!(
+            ssh.to_string_lossy().contains("-o ControlPath=none"),
+            "an existing control socket must not be reused: {ssh:?}"
         );
     }
 
@@ -1522,6 +1567,10 @@ mod tests {
         assert!(
             ssh.contains("-o ControlMaster=no"),
             "ssh must not fight over the control socket: {ssh}"
+        );
+        assert!(
+            ssh.contains("-o ControlPath=none"),
+            "ssh must not join an existing control socket either: {ssh}"
         );
 
         // (B) 系であり、表示言語は従来どおり子プロセスへ伝わる

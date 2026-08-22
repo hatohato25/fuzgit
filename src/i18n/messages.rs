@@ -1124,6 +1124,32 @@ pub trait WorktreeMessages: Sync + std::fmt::Debug {
     /// パスとの照合を経てから実行する（design.md セキュリティ設計）。照合できない場合に
     /// パスを推測で組み立てない。
     fn install_directory_not_found(&self, path: &str) -> String;
+
+    /// `gz worktree add` を叩いた位置に対応するディレクトリが、新しい worktree に
+    /// 存在しないためインストールを行わないことを伝える。
+    ///
+    /// 選んだブランチにそのサブディレクトリがまだ無い場合に起こる。worktree のルートへ
+    /// 暗黙に落とさないのは、そこには利用者が意図したものと別の（あるいは何も）
+    /// lockfile が無く、意図と違う依存を入れてしまうためである。
+    fn install_subdirectory_missing(&self, relative: &str) -> String;
+
+    /// worktree の名前にパス区切りが含まれており、受け付けられないことを伝える。
+    ///
+    /// `gz worktree add` が受け取るのは**ディレクトリ名**であり、置き場所はリポジトリの
+    /// 兄弟に固定されている。パスを渡せたように見えて別の場所へ作られるより、
+    /// 受け付けない理由を示して止めるほうが取り違えが起きない。
+    fn name_is_not_a_directory_name(&self, name: &str) -> String;
+
+    /// リポジトリルートに親ディレクトリが無く、兄弟として作れないことを伝える。
+    fn no_parent_directory(&self, root: &str) -> String;
+
+    /// main worktree（`.git` の実体がある作業ツリー）を特定できなかったことを伝える。
+    fn main_worktree_not_found(&self) -> &'static str;
+
+    /// 作成した worktree の場所を知らせる。
+    ///
+    /// 叩いた場所ではなくリポジトリの兄弟に作るため、どこへ作られたのかを必ず示す。
+    fn created_at(&self, path: &str) -> String;
 }
 
 /// `gz sync`（[`crate::commands::sync`]）の文言。

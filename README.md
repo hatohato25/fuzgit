@@ -247,7 +247,7 @@ way you learn the result**.
 | [`gz fetch`](https://hatohato25.github.io/fuzgit/docs.html#fetch) | Choose what to fetch (`--siblings` fetches neighboring repositories too. **uses the network**) |
 | [`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) | Pick branches and bring them up to their upstream at once (fast-forward only. **uses the network**) |
 | [`gz sync`](https://hatohato25.github.io/fuzgit/docs.html#sync) | Sync the current branch with its upstream (**uses the network**) |
-| [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | List and manage worktrees (`add` copies `.claude/` into the new worktree) |
+| [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | List and manage worktrees (`add <name>` creates it next to the repository and copies `.claude/` into it) |
 
 Options, how candidates are built, what the preview shows, and whether a confirmation prompt appears
 are all described in the [documentation](https://hatohato25.github.io/fuzgit/docs.html).
