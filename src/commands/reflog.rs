@@ -4,7 +4,8 @@ use std::io::Write as _;
 
 use anyhow::{Context as _, Result, anyhow};
 
-use crate::commands::selection_header;
+use crate::commands::commit_menu::{MenuAction, Target};
+use crate::commands::{commit_menu, commit_preview_args, selection_header};
 use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one_with};
 use crate::git::exec::run_git;
 use crate::git::read::{ReflogEntry, head_reflog};
@@ -13,20 +14,81 @@ use crate::i18n::{Language, Messages};
 /// 一覧に表示する短縮ハッシュの桁数。
 const SHORT_ID_LENGTH: usize = 7;
 
-/// reflog エントリを 1 件選び、そのコミットを出力またはブランチとして復元する。
+/// `gz reflog --action` のメニューに載せる操作（表示順）。
 ///
-/// `branch` を指定した場合はその名前で新規ブランチを作成し、未指定の場合は
-/// 選択したコミットのフルハッシュを標準出力へ書き出す。
+/// `Revert` / `Fixup` を**載せない**のは、reflog の主用途が「失ったものを取り戻す」ことで
+/// あり、打ち消しや fixup は到達可能なコミットに対して行う操作だからである。逆に
+/// `ResetHard` を載せるのは、ここでの reset が「捨てたものへ戻る」操作であり
+/// `gz log` での意味と性質が違うため（requirements.md「スコープ外」）。
+const MENU: [MenuAction; 5] = [
+    MenuAction::Show,
+    MenuAction::SwitchDetach,
+    MenuAction::CherryPick,
+    MenuAction::ResetHard,
+    MenuAction::PrintHash,
+];
+
+/// 候補を決定したときに何をするか。
+///
+/// `--restore` と `--action` はどちらも既定（ハッシュの出力）を置き換えるため、
+/// 同時には指定できない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision<'a> {
+    /// フルハッシュを標準出力へ書き出す（既定）。
+    Print,
+    /// 指定名のブランチを作成する（`--restore <NAME>`）。
+    Restore(&'a str),
+    /// アクションメニューを開く（`--action`）。
+    Menu,
+}
+
+impl<'a> Decision<'a> {
+    /// フラグの組み合わせから決定内容を導く。
+    ///
+    /// `clap` の `conflicts_with` でも排他は担保されるが、ここでも二重に拒否する。
+    /// フラグの意味の排他は fuzgit 側の決定であり、`clap` の設定漏れで
+    /// 黙って一方が無視される形にしないため（`TagAction::from_flags` と同じ理由）。
+    ///
+    /// # Errors
+    ///
+    /// `--restore` と `--action` が同時に指定された場合にエラーを返す。
+    pub fn from_flags(
+        messages: &dyn Messages,
+        restore: Option<&'a str>,
+        action: bool,
+    ) -> Result<Self> {
+        match (restore, action) {
+            (Some(_), true) => Err(anyhow!(messages.reflog().conflicting_actions())),
+            (Some(name), false) => Ok(Self::Restore(name)),
+            (None, true) => Ok(Self::Menu),
+            (None, false) => Ok(Self::Print),
+        }
+    }
+
+    /// 候補一覧のヘッダーに示す「決定すると何が起きるのか」。
+    ///
+    /// ワイルドカードの腕を置かないのは、決定内容を増やしたときにヘッダーの
+    /// 追加漏れがコンパイルエラーになるようにするため。
+    fn header_outcome(&self, messages: &dyn Messages) -> String {
+        match self {
+            Self::Print => messages.reflog().header_outcome_print().to_owned(),
+            Self::Restore(name) => messages.reflog().header_outcome_restore(name),
+            Self::Menu => messages.reflog().header_outcome_menu().to_owned(),
+        }
+    }
+}
+
+/// reflog エントリを 1 件選び、`decision` に応じて出力・復元・メニューのいずれかを行う。
 ///
 /// # Errors
 ///
-/// reflog の取得、選択（中断を含む）、標準出力への書き込み、`git branch` の実行に
-/// 失敗した場合にエラーを返す。
+/// reflog の取得、選択（中断を含む）、標準出力への書き込み、`git branch` の実行、
+/// メニューから実行した操作に失敗した場合にエラーを返す。
 pub fn run(
     language: Language,
     messages: &dyn Messages,
     repository: &gix::Repository,
-    branch: Option<&str>,
+    decision: Decision<'_>,
 ) -> Result<()> {
     let candidates = head_reflog(repository).context(messages.reflog().read_failed())?;
 
@@ -36,7 +98,7 @@ pub fn run(
         .collect();
     let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
         messages.reflog().header_subject(),
-        &header_outcome(messages, branch),
+        &decision.header_outcome(messages),
     ));
     let selected = select_one_with(items, &options)?;
 
@@ -45,8 +107,8 @@ pub fn run(
         .find(|candidate| candidate.selector() == selected)
         .ok_or_else(|| anyhow!(messages.reflog().selection_not_found(&selected)))?;
 
-    match branch {
-        Some(name) => {
+    match decision {
+        Decision::Restore(name) => {
             let arguments = branch_args(name, &entry.id);
             let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
             run_git(language, &arguments)
@@ -61,26 +123,25 @@ pub fn run(
             )
             .context(messages.common().stderr_write_failed())?;
         }
-        None => {
+        Decision::Print => {
             // パイプ利用を想定し、stdout にはフルハッシュ以外を混ぜない。
             // パイプ先が先に閉じた場合に panic しないよう、書き込みエラーは明示的に伝播する
             writeln!(std::io::stdout(), "{id}", id = entry.id)
                 .context(messages.common().stdout_write_failed())?;
         }
+        Decision::Menu => {
+            // メニューへ渡るのは解決済みのフルハッシュだけであり、
+            // `HEAD@{n}` セレクタはこのモジュールの外へ出さない
+            let target = Target {
+                id: &entry.id,
+                short_id: short_id(&entry.id),
+                label: &display_line(entry),
+            };
+            commit_menu::run(language, messages, repository, &target, &MENU)?;
+        }
     }
 
     Ok(())
-}
-
-/// 候補一覧のヘッダーで示す「決定すると何が起きるのか」。
-///
-/// `--restore` の有無で結果が変わる。既定は標準出力へ書くだけだが、指定された場合は
-/// リポジトリにブランチが増えるため、作成される名前まで選択前に示す。
-fn header_outcome(messages: &dyn Messages, branch: Option<&str>) -> String {
-    match branch {
-        Some(name) => messages.reflog().header_outcome_restore(name),
-        None => messages.reflog().header_outcome_print().to_owned(),
-    }
 }
 
 /// 表示用の短縮ハッシュ。
@@ -109,11 +170,7 @@ fn display_line(entry: &ReflogEntry) -> String {
 
 /// プレビュー用の `git show` の引数を組み立てる。
 fn preview_args(entry: &ReflogEntry) -> Vec<String> {
-    // 末尾の `--` により、ハッシュがパスではなくリビジョンとして解釈されることを保証する
-    ["show", "--color=always", &entry.id, "--"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
+    commit_preview_args(&entry.id)
 }
 
 /// `git branch -- <name> <hash>` の引数を組み立てる。
@@ -208,7 +265,7 @@ mod tests {
         // `--restore` はリポジトリに参照を増やすため、既定と同じ文言では嘘になる
         for language in [Language::Japanese, Language::English] {
             let messages = language.messages();
-            let restore = header_outcome(messages, Some("recovered"));
+            let restore = Decision::Restore("recovered").header_outcome(messages);
 
             assert!(
                 restore.contains("recovered"),
@@ -216,10 +273,84 @@ mod tests {
             );
             assert_ne!(
                 restore,
-                header_outcome(messages, None),
+                Decision::Print.header_outcome(messages),
                 "{language:?} must tell the two apart"
             );
         }
+    }
+
+    #[test]
+    fn each_decision_announces_a_different_outcome() {
+        // 選択前に見えている説明と決定後の挙動が食い違うと、承知しない操作を実行させてしまう
+        for language in [Language::Japanese, Language::English] {
+            let messages = language.messages();
+            let outcomes = [
+                Decision::Print.header_outcome(messages),
+                Decision::Restore("recovered").header_outcome(messages),
+                Decision::Menu.header_outcome(messages),
+            ];
+
+            let mut unique: Vec<&str> = outcomes.iter().map(String::as_str).collect();
+            let count = unique.len();
+            unique.sort_unstable();
+            unique.dedup();
+
+            assert_eq!(
+                unique.len(),
+                count,
+                "{language:?}: {outcomes:?} must differ"
+            );
+        }
+    }
+
+    #[test]
+    fn restore_and_action_cannot_be_combined() {
+        // clap の conflicts_with とは別に、フラグの意味の排他はここでも拒否する
+        for language in [Language::Japanese, Language::English] {
+            let messages = language.messages();
+
+            let error = Decision::from_flags(messages, Some("recovered"), true)
+                .expect_err("the two flags must not be combined");
+            assert!(!error.to_string().trim().is_empty());
+
+            assert_eq!(
+                Decision::from_flags(messages, Some("recovered"), false)
+                    .expect("restore alone is valid"),
+                Decision::Restore("recovered")
+            );
+            assert_eq!(
+                Decision::from_flags(messages, None, true).expect("action alone is valid"),
+                Decision::Menu
+            );
+            assert_eq!(
+                Decision::from_flags(messages, None, false).expect("no flag is valid"),
+                Decision::Print
+            );
+        }
+    }
+
+    #[test]
+    fn the_menu_never_offers_revert_or_fixup() {
+        // reflog の主用途は「失ったものを取り戻す」ことであり、打ち消しや fixup は
+        // 到達可能なコミットに対して行う操作である（requirements.md「スコープ外」）
+        assert!(!MENU.contains(&MenuAction::Revert));
+        assert!(!MENU.contains(&MenuAction::Fixup));
+        assert!(MENU.contains(&MenuAction::ResetHard));
+    }
+
+    #[test]
+    fn the_menu_receives_the_full_hash_and_never_the_selector() {
+        // `HEAD@{n}` は候補のキーであって git へ渡す値ではない
+        let entry = entry(12, "commit: first");
+        let target = Target {
+            id: &entry.id,
+            short_id: short_id(&entry.id),
+            label: &display_line(&entry),
+        };
+
+        assert_eq!(target.id, COMMIT_ID);
+        assert!(!target.id.contains("HEAD@"));
+        assert_eq!(target.short_id, "1f0c9a4");
     }
 
     #[test]
@@ -230,6 +361,8 @@ mod tests {
             for text in [
                 reflog.header_subject(),
                 reflog.header_outcome_print(),
+                reflog.header_outcome_menu(),
+                reflog.conflicting_actions(),
                 reflog.read_failed(),
             ] {
                 assert!(!text.trim().is_empty(), "{language:?} left a message empty");
@@ -268,6 +401,14 @@ mod tests {
         assert_ne!(
             japanese.header_outcome_print(),
             english.header_outcome_print()
+        );
+        assert_ne!(
+            japanese.header_outcome_menu(),
+            english.header_outcome_menu()
+        );
+        assert_ne!(
+            japanese.conflicting_actions(),
+            english.conflicting_actions()
         );
         assert_ne!(
             japanese.header_outcome_restore("recovered"),

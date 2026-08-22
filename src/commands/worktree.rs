@@ -18,6 +18,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 
 use crate::cli::WorktreeCommand;
 use crate::commands::confirmation::confirm;
+use crate::commands::worktree_claude::copy_agent_config;
 use crate::commands::worktree_install::{InstallMode, install_dependencies};
 use crate::commands::{COLUMN_SEPARATOR, aligned_candidates};
 use crate::finder::{FinderItem, PreviewSource, select_one};
@@ -169,19 +170,43 @@ fn add(
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     run_git(language, &arguments).with_context(|| messages.worktree().creation_failed(path))?;
 
-    if install == InstallMode::Skip {
-        return Ok(());
-    }
-
     // 作業ディレクトリには利用者が打った文字列（`../feature` のような相対パス）を使わない。
     // 一覧を読み直して照合した登録済みパスを使う（design.md セキュリティ設計）
     let created = created_worktree(messages, repository, path)?;
-    match created {
-        Some(directory) => install_dependencies(messages, &directory, &mut std::io::stderr()),
-        None => report_install_directory_not_found(messages, path, &mut std::io::stderr())?,
+    let Some(directory) = created else {
+        // 照合できない以上、複写もインストールも実行できない
+        if install == InstallMode::Run {
+            report_install_directory_not_found(messages, path, &mut std::io::stderr())?;
+        }
+        return Ok(());
+    };
+
+    // エージェント設定（`.claude/`）は gitignore されていることが多く、`git worktree add`
+    // では現れない。**`--no-install` では抑止しない**（依存インストールと違って外部
+    // コマンドを起動せず、ファイルを複写するだけであり、抑止したい理由が別であるため）
+    copy_agent_config(
+        messages,
+        current_worktree(repository),
+        &directory,
+        &mut std::io::stderr(),
+    );
+
+    if install == InstallMode::Run {
+        install_dependencies(messages, &directory, &mut std::io::stderr());
     }
 
     Ok(())
+}
+
+/// 複写元とする、いま作業しているツリーのルート。
+///
+/// 主 worktree ではなく**現在の worktree**を複写元にする。利用者が見ている `.claude/` が
+/// そのまま複写されるほうが結果を予測しやすく、linked worktree から
+/// `gz worktree add` を実行した場合にも「手元にあるものが持って行かれる」で一貫するため。
+fn current_worktree(repository: &gix::Repository) -> &Path {
+    // bare リポジトリには作業ツリーが無く、そこには複写元となる `.claude/` も無い。
+    // 存在しないパスを渡せば `copy_agent_config` が何もせずに戻る
+    repository.workdir().unwrap_or(Path::new(""))
 }
 
 /// 作成した worktree の登録済みパスを、利用者が打ったパスとの照合を経て求める。

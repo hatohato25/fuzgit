@@ -78,9 +78,23 @@ cargo build --release
 gz branch              # pick a branch and switch to it
 gz status              # pick changed files, then add / restore / stash / commit them
 git show "$(gz log)"   # pick a commit and get its full hash
+gz log --action        # pick a commit, then pick what to do with it
 ```
 
 Running `gz` with no arguments, or `gz --help`, lists the subcommands.
+
+### Carrying on from the commit you found
+
+`gz log` and `gz reflog` print a full hash and stop, which is what makes `$(gz log)` work.
+Add `--action` and they show a second menu instead — show the commit, switch to it as a
+detached HEAD, cherry-pick, revert, create a fixup commit, or (from `gz reflog`) reset the
+current branch back to it after a `y/N` confirmation. Printing the hash is one of the menu
+entries, so you can still get back to the piping workflow.
+
+**Without `--action` nothing changes**: the default output is exactly what it has always
+been, so `git show "$(gz log)"` keeps working. `gz reflog --restore <NAME>` is not deprecated
+either — use `--restore` when the operation needs a name you have to type, and `--action`
+for everything that does not. The two cannot be combined.
 
 ## Language
 
@@ -216,13 +230,13 @@ way you learn the result**.
 | Subcommand | Description |
 |---|---|
 | [`gz branch`](https://hatohato25.github.io/fuzgit/docs.html#branch) | Pick a branch and switch to it (subcommands also create, delete, and tidy up) |
-| [`gz log`](https://hatohato25.github.io/fuzgit/docs.html#log) | Trace commit history and print the full hash to stdout |
+| [`gz log`](https://hatohato25.github.io/fuzgit/docs.html#log) | Trace commit history and print the full hash to stdout (`--action` to pick what to do next) |
 | [`gz cherry-pick`](https://hatohato25.github.io/fuzgit/docs.html#cherry-pick) | Pick a commit and cherry-pick it |
 | [`gz restore`](https://hatohato25.github.io/fuzgit/docs.html#restore) | Pick files to restore or unstage |
 | [`gz add`](https://hatohato25.github.io/fuzgit/docs.html#add) | Pick unstaged and untracked files to stage |
 | [`gz stash <subcommand>`](https://hatohato25.github.io/fuzgit/docs.html#stash) | Stash changes, then search stashes to apply or drop them |
 | [`gz tag`](https://hatohato25.github.io/fuzgit/docs.html#tag) | Pick a tag to print, switch to, or diff |
-| [`gz reflog`](https://hatohato25.github.io/fuzgit/docs.html#reflog) | Trace the HEAD reflog and recover lost commits |
+| [`gz reflog`](https://hatohato25.github.io/fuzgit/docs.html#reflog) | Trace the HEAD reflog and recover lost commits (`--action` to pick what to do next) |
 | [`gz commit`](https://hatohato25.github.io/fuzgit/docs.html#commit) | Pick changed files and commit only those |
 | [`gz fixup`](https://hatohato25.github.io/fuzgit/docs.html#fixup) | Pick the commit to amend and create a fixup commit |
 | [`gz merge`](https://hatohato25.github.io/fuzgit/docs.html#merge) | Pick a branch to merge (resume menu while one is in progress) |
@@ -233,7 +247,7 @@ way you learn the result**.
 | [`gz fetch`](https://hatohato25.github.io/fuzgit/docs.html#fetch) | Choose what to fetch (`--siblings` fetches neighboring repositories too. **uses the network**) |
 | [`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) | Pick branches and bring them up to their upstream at once (fast-forward only. **uses the network**) |
 | [`gz sync`](https://hatohato25.github.io/fuzgit/docs.html#sync) | Sync the current branch with its upstream (**uses the network**) |
-| [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | List and manage worktrees |
+| [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | List and manage worktrees (`add` copies `.claude/` into the new worktree) |
 
 Options, how candidates are built, what the preview shows, and whether a confirmation prompt appears
 are all described in the [documentation](https://hatohato25.github.io/fuzgit/docs.html).

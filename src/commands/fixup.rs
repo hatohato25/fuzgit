@@ -11,7 +11,7 @@ use crate::cli::DEFAULT_COMMIT_LIMIT;
 use crate::commands::{commit_highlights, commit_line, selection_header};
 use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one_with};
 use crate::git::exec::run_git;
-use crate::git::read::{ChangeScope, CommitInfo, CommitScope, changes, commits};
+use crate::git::read::{ChangeScope, CommitInfo, CommitScope, changes, commit_by_id, commits};
 use crate::i18n::{Language, Messages};
 
 /// 作成するコミットの種類。
@@ -108,6 +108,55 @@ pub fn run(
         .find(|candidate| candidate.id == selected)
         .ok_or_else(|| anyhow!(messages.fixup().selection_not_found(&selected)))?;
 
+    apply(language, messages, repository, kind, commit)
+}
+
+/// 選択済みの 1 コミットに対する fixup / squash コミットを作る。
+///
+/// コミット選択後のアクションメニュー（FR-32）から呼ぶための入口であり、`gz fixup` を
+/// 直接使った場合と同じ実行部（[`apply`]）を通る。**ステージ済みの変更が無ければ
+/// ここで停止する**。
+///
+/// `gz fixup` は finder を出す前にも同じ検査を行うため、そちらの経路では検査が 2 回走る。
+/// いずれも `gix` によるプロセス内の読み取りであり、`git` の起動回数は増えない。
+///
+/// # Errors
+///
+/// ステージ済みの変更が無い場合、コミットの読み取り、`git commit --fixup` の実行、
+/// 標準エラーへの書き込みに失敗した場合にエラーを返す。
+pub fn run_on_commit(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    kind: FixupKind,
+    id: &str,
+) -> Result<()> {
+    let staged = changes(repository, ChangeScope::Staged)
+        .context(messages.fixup().staged_changes_read_failed())?;
+    if staged.is_empty() {
+        bail!(messages.fixup().staged_required(kind.label()));
+    }
+
+    // メニューから渡るのはフルハッシュだけなので、rebase の起点を求めるために読み直す
+    let commit =
+        commit_by_id(repository, id).with_context(|| messages.common().commit_read_failed(id))?;
+
+    apply(language, messages, repository, kind, &commit)
+}
+
+/// 対象コミットに対する fixup / squash コミットを作り、autosquash の手順を知らせる。
+///
+/// # Errors
+///
+/// rebase の起点の解決、`git commit --fixup` の実行、標準エラーへの書き込みに
+/// 失敗した場合にエラーを返す。
+fn apply(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    kind: FixupKind,
+    commit: &CommitInfo,
+) -> Result<()> {
     // 親の有無の判定に失敗したときにコミットだけが作られることのないよう、実行前に解決する
     let start = rebase_start(messages, repository, commit)?;
 

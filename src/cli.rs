@@ -90,6 +90,10 @@ pub enum Command {
         /// Maximum number of commits to read
         #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_COMMIT_LIMIT)]
         limit: usize,
+
+        /// Pick what to do with the chosen commit from a menu
+        #[arg(long)]
+        action: bool,
     },
 
     /// Pick a commit and cherry-pick it
@@ -140,6 +144,10 @@ pub enum Command {
         /// Create a new branch with the given name from the picked commit
         #[arg(long, value_name = "NAME")]
         restore: Option<String>,
+
+        /// Pick what to do with the chosen commit from a menu
+        #[arg(long, conflicts_with = "restore")]
+        action: bool,
     },
 
     /// Pick the files to commit and commit them
@@ -378,6 +386,7 @@ pub fn localized_command(messages: &dyn Messages) -> ClapCommand {
             command
                 .about(cli.log_about())
                 .mut_arg("limit", |argument| argument.help(cli.log_limit_help()))
+                .mut_arg("action", |argument| argument.help(cli.log_action_help()))
         })
         .mut_subcommand("cherry-pick", |command| {
             command
@@ -410,6 +419,7 @@ pub fn localized_command(messages: &dyn Messages) -> ClapCommand {
                 .mut_arg("restore", |argument| {
                     argument.help(cli.reflog_restore_help())
                 })
+                .mut_arg("action", |argument| argument.help(cli.reflog_action_help()))
         })
         .mut_subcommand("commit", |command| {
             command
@@ -658,7 +668,10 @@ mod tests {
         let cli = Cli::try_parse_from(["gz", "log"]).expect("log should parse without options");
 
         match cli.command {
-            Command::Log { limit } => assert_eq!(limit, DEFAULT_COMMIT_LIMIT),
+            Command::Log { limit, action } => {
+                assert_eq!(limit, DEFAULT_COMMIT_LIMIT);
+                assert!(!action, "the menu must stay opt-in");
+            }
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
@@ -758,7 +771,10 @@ mod tests {
             .expect("reflog should parse");
 
         match cli.command {
-            Command::Reflog { restore } => assert_eq!(restore.as_deref(), Some("recovered")),
+            Command::Reflog { restore, action } => {
+                assert_eq!(restore.as_deref(), Some("recovered"));
+                assert!(!action, "the menu must stay opt-in");
+            }
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }

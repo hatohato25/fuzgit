@@ -951,6 +951,25 @@ pub fn commits(
     Ok(commits)
 }
 
+/// フルハッシュを指定して 1 件のコミットを読み取る。
+///
+/// コミット選択後のアクションメニュー（FR-32）から `gz revert` / `gz fixup` の実行部を
+/// 呼ぶために用いる。メニューへ渡るのはフルハッシュだけであり、候補一覧を引き直さずに
+/// [`CommitInfo`] を得る必要があるため。
+///
+/// # Errors
+///
+/// ハッシュを解釈できない場合、またはコミットを読み取れない場合にエラーを返す。
+pub fn commit_by_id(repository: &gix::Repository, id: &str) -> Result<CommitInfo> {
+    let object = gix::ObjectId::from_hex(id.as_bytes())
+        .map_err(|source| read_error(ReadOperation::CommitObjectFetch, source))?;
+    let commit = repository
+        .find_commit(object)
+        .map_err(|source| read_error(ReadOperation::CommitObjectFetch, source))?;
+
+    commit_info(&commit)
+}
+
 /// `gix` のコミットオブジェクトを [`CommitInfo`] へ変換する。
 fn commit_info(commit: &gix::Commit<'_>) -> Result<CommitInfo> {
     let short_id = commit

@@ -968,12 +968,14 @@ gz branch cleanup          # merged なブランチを一括で削除する</cod
           <div lang="en">
             <pre><code>gz log                 # 1000 commits by default
 gz log --limit 200     # limit how many commits are listed (-n also works)
-git show "$(gz log)"   # use the full hash of the picked commit directly</code></pre>
+git show "$(gz log)"   # use the full hash of the picked commit directly
+gz log --action        # pick a commit, then pick what to do with it</code></pre>
             <div class="table-wrap">
               <table>
                 <thead><tr><th scope="col">Option</th><th scope="col">Default</th><th scope="col">Description</th></tr></thead>
                 <tbody>
                   <tr><td><code>-n</code>, <code>--limit &lt;N&gt;</code></td><td><code>1000</code></td><td>Maximum number of commits to list</td></tr>
+                  <tr><td><code>--action</code></td><td><code>off</code></td><td>After picking a commit, show a menu of what to do with it</td></tr>
                 </tbody>
               </table>
             </div>
@@ -985,17 +987,36 @@ git show "$(gz log)"   # use the full hash of the picked commit directly</code><
                 commit</strong> goes to stdout, for pipes and copying. Messages
                 go to stderr, so <code>$(gz log)</code> is safe.
               </li>
+              <li>
+                <code>--action</code> opens a second menu after the commit is
+                picked: <em>show the commit</em>, <em>switch to it as a detached
+                HEAD</em>, <em>cherry-pick</em>, <em>revert</em>, <em>create a
+                fixup commit</em>, and <em>print the full hash</em>. The
+                cherry-pick, revert, and fixup entries run the same code as
+                <code>gz cherry-pick</code> / <code>gz revert</code> /
+                <code>gz fixup</code>, so their safeguards still apply.
+              </li>
+              <li>
+                <strong>Without <code>--action</code> nothing changes.</strong>
+                The default output is byte for byte what it has always been, so
+                <code>git show "$(gz log)"</code> keeps working. There is no
+                <code>reset --hard</code> entry here &mdash; these commits are
+                ancestors of <code>HEAD</code>, and <em>revert</em> already
+                covers the same need without discarding anything.
+              </li>
             </ul>
           </div>
           <div lang="ja">
             <pre><code>gz log                 # 既定 1000 件を候補にする
 gz log --limit 200     # 取得件数を制限する（-n でも可）
-git show "$(gz log)"   # 選んだコミットのフルハッシュをそのまま使う</code></pre>
+git show "$(gz log)"   # 選んだコミットのフルハッシュをそのまま使う
+gz log --action        # コミットを選んで、続けて行う操作も選ぶ</code></pre>
             <div class="table-wrap">
               <table>
                 <thead><tr><th scope="col">オプション</th><th scope="col">既定値</th><th scope="col">説明</th></tr></thead>
                 <tbody>
                   <tr><td><code>-n</code>, <code>--limit &lt;N&gt;</code></td><td><code>1000</code></td><td>取得するコミットの最大件数</td></tr>
+                  <tr><td><code>--action</code></td><td><code>off</code></td><td>コミットを選んだあと、続けて行う操作をメニューから選ぶ</td></tr>
                 </tbody>
               </table>
             </div>
@@ -1006,6 +1027,21 @@ git show "$(gz log)"   # 選んだコミットのフルハッシュをそのま�
                 決定すると<strong>選択コミットのフルハッシュだけ</strong>を標準出力へ出します
                 （パイプ・コピー用途）。メッセージ類は標準エラーへ出すため、<code>$(gz log)</code> で
                 安全に受け取れます。
+              </li>
+              <li>
+                <code>--action</code> を付けると、コミットを選んだあとに 2 つ目のメニューが出ます
+                &mdash; <em>詳細を表示する</em>・<em>detached HEAD で切り替える</em>・
+                <em>cherry-pick する</em>・<em>revert する</em>・<em>fixup コミットを作る</em>・
+                <em>フルハッシュを出力する</em>。cherry-pick / revert / fixup は
+                <code>gz cherry-pick</code> / <code>gz revert</code> / <code>gz fixup</code> と
+                同じ実装を呼ぶため、各コマンドの安全策がそのまま働きます。
+              </li>
+              <li>
+                <strong><code>--action</code> を付けなければ挙動は一切変わりません。</strong>
+                既定の標準出力は従来と 1 バイトも変わらないため、
+                <code>git show "$(gz log)"</code> はそのまま動きます。ここに
+                <code>reset --hard</code> の項目はありません &mdash; <code>gz log</code> の候補は
+                <code>HEAD</code> の祖先であり、同じ用途は破棄を伴わない <em>revert</em> が満たすためです。
               </li>
             </ul>
           </div>
@@ -1302,12 +1338,14 @@ gz tag --diff           # 選んだタグと HEAD の差分を表示する</code
           </h2>
           <div lang="en">
             <pre><code>gz reflog                            # print the commit hash of the picked entry to stdout
-gz reflog --restore recovered        # create a new branch `recovered` from the picked commit</code></pre>
+gz reflog --restore recovered        # create a new branch `recovered` from the picked commit
+gz reflog --action                   # pick an entry, then pick what to do with it</code></pre>
             <div class="table-wrap">
               <table>
                 <thead><tr><th scope="col">Option</th><th scope="col">Description</th></tr></thead>
                 <tbody>
                   <tr><td><code>--restore &lt;NAME&gt;</code></td><td>Create a new branch with the given name from the picked commit</td></tr>
+                  <tr><td><code>--action</code></td><td>After picking an entry, show a menu of what to do with it (cannot be combined with <code>--restore</code>)</td></tr>
                 </tbody>
               </table>
             </div>
@@ -1318,16 +1356,37 @@ gz reflog --restore recovered        # create a new branch `recovered` from the 
                 The result of <code>--restore</code> goes to stderr, leaving
                 stdout free for pipes.
               </li>
+              <li>
+                <code>--action</code> opens a second menu: <em>show the
+                commit</em>, <em>switch to it as a detached HEAD</em>,
+                <em>cherry-pick</em>, <em>reset the current branch back to
+                it</em>, and <em>print the full hash</em>. The reset is
+                destructive, so it asks for an explicit <code>y/N</code>
+                confirmation first and runs nothing if you decline.
+              </li>
+              <li>
+                <code>--restore</code> is <strong>not deprecated</strong> and the
+                two flags cannot be combined. Use <code>--restore</code> when the
+                operation needs a name you have to type &mdash; a finder has no
+                text input &mdash; and <code>--action</code> for everything else.
+              </li>
+              <li>
+                An entry can point at an object that <code>git gc</code> has
+                already removed; such entries are still listed on purpose. Running
+                an action on one fails with git's own message and a non-zero exit.
+              </li>
             </ul>
           </div>
           <div lang="ja">
             <pre><code>gz reflog                            # 選んだエントリのコミットハッシュを標準出力へ出す
-gz reflog --restore recovered        # 選んだコミットから新規ブランチ `recovered` を作成する</code></pre>
+gz reflog --restore recovered        # 選んだコミットから新規ブランチ `recovered` を作成する
+gz reflog --action                   # エントリを選んで、続けて行う操作も選ぶ</code></pre>
             <div class="table-wrap">
               <table>
                 <thead><tr><th scope="col">オプション</th><th scope="col">説明</th></tr></thead>
                 <tbody>
                   <tr><td><code>--restore &lt;NAME&gt;</code></td><td>選択したコミットから指定名の新規ブランチを作成する</td></tr>
+                  <tr><td><code>--action</code></td><td>エントリを選んだあと、続けて行う操作をメニューから選ぶ（<code>--restore</code> とは同時に指定できません）</td></tr>
                 </tbody>
               </table>
             </div>
@@ -1336,6 +1395,24 @@ gz reflog --restore recovered        # 選んだコミットから新規ブラ�
               <li>
                 既定では<strong>フルハッシュだけ</strong>を標準出力へ出します。<code>--restore</code> の
                 実行結果は標準エラーへ出るため、標準出力はパイプ用途のまま空けてあります。
+              </li>
+              <li>
+                <code>--action</code> を付けると 2 つ目のメニューが出ます &mdash;
+                <em>詳細を表示する</em>・<em>detached HEAD で切り替える</em>・
+                <em>cherry-pick する</em>・<em>現在のブランチをこのコミットへ戻す</em>・
+                <em>フルハッシュを出力する</em>。戻す操作は破壊的なため、実行前に
+                <code>y/N</code> の明示同意を求め、同意が得られなければ git を一切実行しません。
+              </li>
+              <li>
+                <code>--restore</code> は<strong>非推奨ではありません</strong>。両者は同時に
+                指定できません。finder にテキスト入力が無いため、<strong>入力が必要な名前を渡すなら
+                <code>--restore</code>、名前を要さない操作なら <code>--action</code></strong> と
+                使い分けてください。
+              </li>
+              <li>
+                エントリは <code>git gc</code> で実体を失っている場合があります（意図的に候補へ
+                出しています）。その場合に操作を実行すると、git 自身のエラーがそのまま出て
+                非ゼロ終了します。
               </li>
             </ul>
           </div>
@@ -2924,6 +3001,16 @@ gz worktree prune            # tidy up bookkeeping for worktrees whose directory
               <li>What you pick in the fuzzy finder is the branch to check out. Candidates are limited to local branches <strong>not in use by another worktree</strong> (git cannot check out the same branch in two worktrees at once).</li>
               <li>It runs <code>git worktree add -- &lt;path&gt; &lt;branch&gt;</code>. <strong>Directory names are never suggested automatically.</strong></li>
               <li>For a path starting with <code>-</code>, write <code>gz worktree add -- -dashy</code> (that <code>--</code> is clap&rsquo;s; fuzgit adds its own <code>--</code> when calling git).</li>
+              <li>
+                Afterwards the <code>.claude/</code> directory of the worktree you
+                ran the command from is <strong>copied</strong> into the new one.
+                <code>git worktree add</code> only writes out tracked files, so a
+                gitignored <code>.claude/</code> would otherwise be missing. Files
+                that already exist on the other side are <strong>left alone</strong>,
+                symlinks are not followed, and a failure is reported on stderr
+                without failing the command &mdash; the worktree itself was created.
+                This is a copy, not a link, so the two sides can diverge.
+              </li>
             </ul>
 
             <h3><code>gz worktree remove</code></h3>
@@ -2983,6 +3070,15 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 <code>-</code> で始まるパスを指定する場合は <code>gz worktree add -- -dashy</code> のように
                 書きます（clap 側の <code>--</code> であり、fuzgit は git へ渡す際にも別途
                 <code>--</code> で保護します）。
+              </li>
+              <li>
+                作成後、コマンドを実行した worktree の <code>.claude/</code> を新しい worktree へ
+                <strong>複写</strong>します。<code>git worktree add</code> は追跡ファイルしか
+                書き出さないため、gitignore された <code>.claude/</code> はそのままでは現れません。
+                複写先に既にあるファイルは<strong>上書きせず残し</strong>、シンボリックリンクは
+                辿りません。失敗しても標準エラーへ知らせるだけでコマンドは失敗しません
+                （worktree の作成自体は成功しているため）。リンクではなく複写なので、
+                両者は独立して変化します。
               </li>
             </ul>
 

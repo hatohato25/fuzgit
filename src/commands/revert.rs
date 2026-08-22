@@ -9,7 +9,7 @@ use crate::cli::DEFAULT_COMMIT_LIMIT;
 use crate::commands::{commit_highlights, commit_line};
 use crate::finder::{FinderItem, PreviewSource, select_many};
 use crate::git::exec::run_git;
-use crate::git::read::{CommitInfo, CommitScope, commits};
+use crate::git::read::{CommitInfo, CommitScope, commit_by_id, commits};
 use crate::i18n::{Language, Messages};
 
 /// `git revert` にエディタを起動させないオプション。
@@ -66,9 +66,48 @@ pub fn run(
 
     let ordered = newest_first(messages, &candidates, &selected)?;
 
+    apply(language, messages, repository, editing, &ordered)
+}
+
+/// 選択済みの 1 コミットを revert する。
+///
+/// コミット選択後のアクションメニュー（FR-32）から呼ぶための入口であり、`gz revert` を
+/// 直接使った場合と同じ実行部（[`apply`]）を通る。**マージコミットの事前停止もここで働く**。
+///
+/// # Errors
+///
+/// コミットの読み取り、マージコミットの判定、`git revert` の実行に失敗した場合、
+/// および対象がマージコミットだった場合にエラーを返す。
+pub fn run_on_commit(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    editing: MessageEditing,
+    id: &str,
+) -> Result<()> {
+    // メニューから渡るのはフルハッシュだけなので、マージ判定と案内文のために読み直す
+    let commit =
+        commit_by_id(repository, id).with_context(|| messages.common().commit_read_failed(id))?;
+
+    apply(language, messages, repository, editing, &[&commit])
+}
+
+/// 新しい順に並べ替え済みのコミットを 1 回の `git revert` で打ち消す。
+///
+/// # Errors
+///
+/// マージコミットの判定、`git revert` の実行に失敗した場合、および選択に
+/// マージコミットが含まれる場合にエラーを返す。
+fn apply(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    editing: MessageEditing,
+    ordered: &[&CommitInfo],
+) -> Result<()> {
     // マージコミットが 1 件でも含まれていれば、他のコミットも revert せずに停止する。
     // 一部だけ適用してから失敗すると、どこまで進んだのかをユーザーが追う必要が出るため
-    let merges = merge_commits(messages, repository, &ordered)?;
+    let merges = merge_commits(messages, repository, ordered)?;
     if !merges.is_empty() {
         bail!(merge_commit_message(messages, &merges));
     }

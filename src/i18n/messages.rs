@@ -128,6 +128,15 @@ pub trait Messages: Sync + std::fmt::Debug {
 
     /// `gz log`（[`crate::commands::log`]）の文言。
     fn log(&self) -> &dyn LogMessages;
+
+    /// コミット選択後のアクションメニュー（[`crate::commands::commit_menu`]）の文言。
+    ///
+    /// [`Messages::log`] / [`Messages::reflog`] の下へ入れず独立したアクセサにするのは、
+    /// このメニューが `gz log --action` と `gz reflog --action` の双方から使われるため。
+    /// どちらか一方のコマンドの trait にぶら下げると、reflog のメニューの文言を
+    /// `messages.log()` から引くような対応が生まれ、trait の粒度（モジュール単位）が崩れる
+    /// （[`Messages::in_progress`] と同じ理由）。
+    fn commit_menu(&self) -> &dyn CommitMenuMessages;
 }
 
 /// 複数のコマンドで共有する語彙（design.md の `Messages::common`）。
@@ -293,6 +302,9 @@ pub trait CliMessages: Sync + std::fmt::Debug {
     /// `gz log --limit` の説明。
     fn log_limit_help(&self) -> &'static str;
 
+    /// `gz log --action` の説明。
+    fn log_action_help(&self) -> &'static str;
+
     /// `gz cherry-pick` の説明。
     fn cherry_pick_about(&self) -> &'static str;
 
@@ -350,6 +362,9 @@ pub trait CliMessages: Sync + std::fmt::Debug {
 
     /// `gz reflog --restore` の説明。
     fn reflog_restore_help(&self) -> &'static str;
+
+    /// `gz reflog --action` の説明。
+    fn reflog_action_help(&self) -> &'static str;
 
     // `gz commit` / `gz fixup`
 
@@ -662,6 +677,15 @@ pub trait ReflogMessages: Sync + std::fmt::Debug {
     /// 作成されるブランチ名を含めるのは、標準出力へ書くだけの既定と違って
     /// リポジトリに参照が増えるため。
     fn header_outcome_restore(&self, name: &str) -> String;
+
+    /// アクションメニューを開く場合（`--action`）のヘッダーの結果節。
+    fn header_outcome_menu(&self) -> &'static str;
+
+    /// `--restore` と `--action` が同時に指定されたことを伝える。
+    ///
+    /// `clap` の `conflicts_with` でも弾かれるが、フラグの組み合わせを解釈する側でも
+    /// 二重に拒否する（`TagAction::from_flags` と同じ理由）。
+    fn conflicting_actions(&self) -> &'static str;
 
     /// reflog を読み取れなかったことを伝える。
     fn read_failed(&self) -> &'static str;
@@ -1077,6 +1101,22 @@ pub trait WorktreeMessages: Sync + std::fmt::Debug {
     /// worktree の作成そのものは成功しているため、`gz worktree add` は非ゼロ終了しない。
     fn install_failed(&self, command: &str) -> String;
 
+    /// エージェント設定ディレクトリ（`.claude/`）をコピーした結果を伝える。
+    ///
+    /// `git worktree add` が新しい作業ツリーへ置くのは追跡ファイルだけであり、
+    /// gitignore された `.claude/` は現れない。fuzgit がこれを補う。
+    ///
+    /// `skipped` は**既に同名のファイルがあったため触れなかった**件数である。
+    /// worktree 側の編集を上書きしないことがこの機能の前提であり、黙って握り潰すと
+    /// 「コピーしたのに内容が違う」という取り違えを招くため件数を示す。
+    fn agent_config_copied(&self, copied: usize, skipped: usize) -> String;
+
+    /// エージェント設定のコピーに失敗したことを伝える。
+    ///
+    /// worktree の作成そのものは成功しているため、`gz worktree add` は非ゼロ終了しない
+    /// （[`WorktreeMessages::install_failed`] と同じ扱い）。
+    fn agent_config_copy_failed(&self, path: &str) -> String;
+
     /// 作成した worktree が `git worktree list` に見つからず、インストールを
     /// 実行しないことを伝える。
     ///
@@ -1425,11 +1465,78 @@ pub trait LogMessages: Sync + std::fmt::Debug {
     /// [`crate::commands::selection_header`] が付ける。
     fn header_subject(&self) -> &'static str;
 
-    /// 候補一覧のヘッダーのうち、決定すると何が起きるのかを示す節。
+    /// 候補一覧のヘッダーのうち、決定するとハッシュが出力されることを示す節（`--action` なし）。
     ///
     /// 候補行に見えているのは短縮ハッシュだが、出力されるのはフルハッシュである。
     /// パイプ先へ渡る値を取り違えないよう、どちらが出るのかまで示す。
-    fn header_outcome(&self) -> &'static str;
+    fn header_outcome_print(&self) -> &'static str;
+
+    /// 候補一覧のヘッダーのうち、決定するとアクションメニューが開くことを示す節（`--action`）。
+    ///
+    /// 同じ候補一覧でもフラグで結果が変わるため、選択前に見えている説明と決定後の挙動が
+    /// 食い違わないよう、`--action` の有無で結果節を分ける
+    /// （[`crate::commands::selection_header`] の規約）。
+    fn header_outcome_menu(&self) -> &'static str;
+
+    /// 選択されたコミットが候補一覧に見つからなかったことを伝える。
+    fn selection_not_found(&self, selected: &str) -> String;
+}
+
+/// コミット選択後のアクションメニュー（[`crate::commands::commit_menu`]）の文言。
+///
+/// `gz log --action` と `gz reflog --action` が共有する（FR-32）。表示に含める git の
+/// コマンド名（`git show` 等）は**翻訳しない**。何が実行されるのかを示すためであり、
+/// [`StatusMessages::add_action`] と同じ扱いである。
+///
+/// 照合に使うキー（`show` / `switch` / `cherry-pick` 等）は表示と分離されており、
+/// ここでの翻訳の影響を受けない。
+pub trait CommitMenuMessages: Sync + std::fmt::Debug {
+    /// メニューのヘッダーのうち、何に対する操作を選ぶのかを示す節。
+    ///
+    /// どのコミットを選んだのかを見失わないよう短縮ハッシュを含める。
+    fn subject(&self, short_id: &str) -> String;
+
+    /// メニューのヘッダーのうち、決定すると何が起きるのかを示す節。
+    fn outcome(&self) -> &'static str;
+
+    /// 「コミットの詳細を表示する」アクションの表示。
+    fn show_action(&self) -> &'static str;
+
+    /// 「detached HEAD で切り替える」アクションの表示。
+    fn switch_action(&self) -> &'static str;
+
+    /// 「現在のブランチへ取り込む」アクションの表示。
+    fn cherry_pick_action(&self) -> &'static str;
+
+    /// 「打ち消すコミットを作る」アクションの表示。
+    fn revert_action(&self) -> &'static str;
+
+    /// 「ステージ済みの変更で fixup コミットを作る」アクションの表示。
+    fn fixup_action(&self) -> &'static str;
+
+    /// 「現在のブランチをこのコミットへ戻す」アクションの表示（**破壊的**）。
+    fn reset_action(&self) -> &'static str;
+
+    /// 「フルハッシュを標準出力へ出力する」アクションの表示。
+    fn print_action(&self) -> &'static str;
+
+    /// 選択されたアクションがメニューに見つからなかったことを伝える。
+    fn menu_selection_not_found(&self, selected: &str) -> String;
+
+    /// `git reset --hard` で何が失われるのかを示す、確認プロンプトの見出し。
+    ///
+    /// 対象のコミットは [`crate::commands::confirmation::confirm`] が別途列挙するため、
+    /// ここには失われるものだけを書く。
+    fn reset_confirmation(&self) -> &'static str;
+
+    /// `git show` の実行に失敗したことを伝える。
+    fn show_failed(&self, id: &str) -> String;
+
+    /// `git switch --detach` の実行に失敗したことを伝える。
+    fn switch_failed(&self, id: &str) -> String;
+
+    /// `git reset --hard` の実行に失敗したことを伝える。
+    fn reset_failed(&self, id: &str) -> String;
 }
 
 /// [`crate::error::Error`] をユーザー向けの 1 文へ整形する文言。

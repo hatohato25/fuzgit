@@ -4,8 +4,8 @@ use std::path::Path;
 
 use super::Language;
 use super::messages::{
-    BranchManageMessages, BranchMessages, CherryPickMessages, CliMessages, CommitMessages,
-    CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
+    BranchManageMessages, BranchMessages, CherryPickMessages, CliMessages, CommitMenuMessages,
+    CommitMessages, CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
     FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, LogMessages,
     MergeMessages, Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages,
     RevertMessages, StashMessages, StatusMessages, SyncMessages, TagMessages, WorktreeMessages,
@@ -129,6 +129,10 @@ impl Messages for JapaneseMessages {
 
     fn log(&self) -> &dyn LogMessages {
         &JapaneseLogMessages
+    }
+
+    fn commit_menu(&self) -> &dyn CommitMenuMessages {
+        &JapaneseCommitMenuMessages
     }
 }
 
@@ -681,6 +685,14 @@ impl ReflogMessages for JapaneseReflogMessages {
         "フルハッシュを出力"
     }
 
+    fn header_outcome_menu(&self) -> &'static str {
+        "操作を選ぶ"
+    }
+
+    fn conflicting_actions(&self) -> &'static str {
+        "--restore と --action は同時に指定できません"
+    }
+
     fn header_outcome_restore(&self, name: &str) -> String {
         format!("ブランチ `{name}` を作成")
     }
@@ -1107,6 +1119,20 @@ impl WorktreeMessages for JapaneseWorktreeMessages {
         format!("`{program}` が見つからないため依存インストールを実行しませんでした")
     }
 
+    fn agent_config_copied(&self, copied: usize, skipped: usize) -> String {
+        if skipped == 0 {
+            format!(".claude/ を {copied} 件コピーしました")
+        } else {
+            format!(
+                ".claude/ を {copied} 件コピーしました（既存の {skipped} 件はそのまま残しました）"
+            )
+        }
+    }
+
+    fn agent_config_copy_failed(&self, path: &str) -> String {
+        format!("警告: .claude/ のコピーに失敗しました: {path}")
+    }
+
     fn install_failed(&self, command: &str) -> String {
         format!(
             "依存インストールに失敗しました（worktree は作成済みです。`{command}` で実行し直せます）"
@@ -1424,8 +1450,78 @@ impl LogMessages for JapaneseLogMessages {
         "コミットを選択"
     }
 
-    fn header_outcome(&self) -> &'static str {
+    fn header_outcome_print(&self) -> &'static str {
         "フルハッシュを出力"
+    }
+
+    fn header_outcome_menu(&self) -> &'static str {
+        "操作を選ぶ"
+    }
+
+    fn selection_not_found(&self, selected: &str) -> String {
+        format!("選択されたコミット {selected} が候補一覧に見つかりません")
+    }
+}
+
+/// コミット選択後のアクションメニュー（[`CommitMenuMessages`]）の日本語表示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JapaneseCommitMenuMessages;
+
+impl CommitMenuMessages for JapaneseCommitMenuMessages {
+    fn subject(&self, short_id: &str) -> String {
+        format!("コミット {short_id} に対する操作を選択")
+    }
+
+    fn outcome(&self) -> &'static str {
+        "選んだ操作を実行"
+    }
+
+    fn show_action(&self) -> &'static str {
+        "コミットの詳細を表示する (git show)"
+    }
+
+    fn switch_action(&self) -> &'static str {
+        "detached HEAD で切り替える (git switch --detach)"
+    }
+
+    fn cherry_pick_action(&self) -> &'static str {
+        "現在のブランチへ取り込む (git cherry-pick)"
+    }
+
+    fn revert_action(&self) -> &'static str {
+        "打ち消すコミットを作る (git revert)"
+    }
+
+    fn fixup_action(&self) -> &'static str {
+        "ステージ済みの変更で fixup コミットを作る (git commit --fixup)"
+    }
+
+    fn reset_action(&self) -> &'static str {
+        "現在のブランチをこのコミットへ戻す (git reset --hard)"
+    }
+
+    fn print_action(&self) -> &'static str {
+        "フルハッシュを標準出力へ出力する"
+    }
+
+    fn menu_selection_not_found(&self, selected: &str) -> String {
+        format!("選択されたメニュー項目 {selected} が見つかりません")
+    }
+
+    fn reset_confirmation(&self) -> &'static str {
+        "作業ツリーとインデックスの未コミットの変更をすべて破棄し、現在のブランチを次のコミットへ移動します（移動元のコミットは reflog に残ります）"
+    }
+
+    fn show_failed(&self, id: &str) -> String {
+        format!("コミット {id} の表示に失敗しました")
+    }
+
+    fn switch_failed(&self, id: &str) -> String {
+        format!("コミット {id} への切り替えに失敗しました")
+    }
+
+    fn reset_failed(&self, id: &str) -> String {
+        format!("コミット {id} への reset に失敗しました")
     }
 }
 
@@ -1494,6 +1590,10 @@ impl CliMessages for JapaneseCliMessages {
 
     fn log_limit_help(&self) -> &'static str {
         "取得するコミットの最大件数"
+    }
+
+    fn log_action_help(&self) -> &'static str {
+        "選択したコミットに対して行う操作をメニューから選ぶ"
     }
 
     fn cherry_pick_about(&self) -> &'static str {
@@ -1570,6 +1670,10 @@ impl CliMessages for JapaneseCliMessages {
 
     fn reflog_restore_help(&self) -> &'static str {
         "選択したコミットから指定名の新規ブランチを作成する"
+    }
+
+    fn reflog_action_help(&self) -> &'static str {
+        "選択したコミットに対して行う操作をメニューから選ぶ"
     }
 
     // `gz commit` / `gz fixup`

@@ -26,6 +26,7 @@ pub mod branch;
 pub mod branch_manage;
 pub mod cherry_pick;
 pub mod commit;
+pub mod commit_menu;
 pub mod confirmation;
 pub mod diff;
 pub mod fetch;
@@ -44,6 +45,7 @@ pub mod status;
 pub mod sync;
 pub mod tag;
 pub mod worktree;
+pub mod worktree_claude;
 pub mod worktree_install;
 
 /// 候補一覧の列を区切る空白。
@@ -207,6 +209,21 @@ pub(crate) fn command_display(args: &[&str]) -> String {
     format!("git {args}", args = args.join(" "))
 }
 
+/// 選択中のコミットを色付きで示す `git show` の引数を組み立てる（プレビュー用）。
+///
+/// `gz log` / `gz reflog` の候補一覧と、コミット選択後のアクションメニュー（FR-32）が
+/// 同じプレビューを出すため、組み立てを 1 か所に持つ。
+///
+/// 末尾の `--` により、ハッシュがパスではなくリビジョンとして解釈されることを保証する。
+/// 出力をキャプチャして実行する場合 git は色付けを止めるため、明示的に有効化する
+/// （**実行用の `git show` には付けない**。そちらは端末へ直接出るため git が自ら判断する）。
+pub(crate) fn commit_preview_args(id: &str) -> Vec<String> {
+    ["show", "--color=always", id, "--"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
 /// 現在の状態を色付きで示す `git status` の引数を組み立てる。
 ///
 /// 固定項目のメニュー（FR-14 の復帰メニュー、FR-16 のアクションメニュー）で、
@@ -253,7 +270,13 @@ pub fn dispatch(
             }
             Some(command) => branch_manage::run(language, messages, &repository, command),
         },
-        Command::Log { limit } => log::run(language, messages, &repository, *limit),
+        Command::Log { limit, action } => log::run(
+            language,
+            messages,
+            &repository,
+            *limit,
+            log::Decision::from_flag(*action),
+        ),
         Command::CherryPick { branch } => {
             let scope = match branch {
                 Some(name) => CommitScope::Branch(name),
@@ -298,8 +321,9 @@ pub fn dispatch(
             &repository,
             TagAction::from_flags(messages, *switch, *diff)?,
         ),
-        Command::Reflog { restore } => {
-            reflog::run(language, messages, &repository, restore.as_deref())
+        Command::Reflog { restore, action } => {
+            let decision = reflog::Decision::from_flags(messages, restore.as_deref(), *action)?;
+            reflog::run(language, messages, &repository, decision)
         }
         Command::Commit { message } => {
             commit::run(language, messages, &repository, message.as_deref())

@@ -839,6 +839,7 @@ fn stash_tag_and_reflog_report_when_there_is_nothing_to_select() {
         vec!["tag", "--diff"],
         vec!["reflog"],
         vec!["reflog", "--restore", "recovered"],
+        vec!["reflog", "--action"],
     ] {
         let output = gz()
             .args(&arguments)
@@ -861,6 +862,86 @@ fn stash_tag_and_reflog_report_when_there_is_nothing_to_select() {
             "nothing should be written to stdout for gz {arguments:?}"
         );
     }
+}
+
+/// `--action` を付けない `gz log` / `gz reflog` の非対話パスが従来どおりであることを固定する。
+///
+/// **本要件（FR-32）で最も壊してはいけない性質**は、既定の標準出力が 1 バイトも変わらない
+/// ことである（`$(gz log)` によるコマンド置換を壊さない）。候補が 1 件も無いリポジトリでは
+/// TUI を起動せずに終了するため、対話なしでこの経路を検査できる。
+#[test]
+fn the_default_output_of_log_and_reflog_is_unchanged_by_the_action_flag() {
+    let dir = empty_repository("action-flag-keeps-the-default");
+
+    for arguments in [vec!["log"], vec!["reflog"]] {
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {arguments:?}: {err}"));
+
+        // 候補が無い場合は選択を始めず、標準出力は空のまま終了する
+        assert!(
+            !output.status.success(),
+            "gz {arguments:?} should exit non-zero when there is nothing to select"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "gz {arguments:?} must not write anything to stdout"
+        );
+
+        // `--action` を足しても、候補が無い段階での挙動は変わらない
+        let mut with_flag = arguments.clone();
+        with_flag.push("--action");
+        let menu = gz()
+            .args(&with_flag)
+            .current_dir(dir.path())
+            .output()
+            .unwrap_or_else(|err| panic!("failed to run gz {with_flag:?}: {err}"));
+
+        assert_eq!(
+            output.status.code(),
+            menu.status.code(),
+            "gz {with_flag:?} must exit like gz {arguments:?}"
+        );
+        assert_eq!(
+            output.stdout, menu.stdout,
+            "gz {with_flag:?} must not change what reaches stdout"
+        );
+        assert_eq!(
+            output.stderr, menu.stderr,
+            "gz {with_flag:?} must not change what reaches stderr"
+        );
+    }
+}
+
+/// `gz reflog --restore` と `--action` が同時に指定できないことを確認する。
+#[test]
+fn the_reflog_restore_and_action_options_are_mutually_exclusive() {
+    let dir = empty_repository("reflog-exclusive-options");
+
+    let output = gz()
+        .args(["reflog", "--restore", "recovered", "--action"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz reflog --restore recovered --action");
+
+    assert!(
+        !output.status.success(),
+        "gz reflog --restore recovered --action should be rejected"
+    );
+
+    // clap 由来の英語の文言であり、表示言語の影響を受けない
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        stderr.contains("cannot be used with"),
+        "the conflict should be explained:\n{stderr}"
+    );
+
+    assert!(
+        output.stdout.is_empty(),
+        "nothing should be written to stdout"
+    );
 }
 
 /// 排他オプションを同時に指定した場合、選択を始める前に拒否されることを確認する。

@@ -77,9 +77,23 @@ cargo build --release
 gz branch              # ブランチを選んで切り替える
 gz status              # 変更ファイルを選んで、add / restore / stash / commit などを行う
 git show "$(gz log)"   # コミットを選んでフルハッシュを受け取る
+gz log --action        # コミットを選んで、続けて行う操作も選ぶ
 ```
 
 引数なしの `gz` および `gz --help` でサブコマンド一覧を表示します。
+
+### 見つけたコミットから次の操作へ
+
+`gz log` と `gz reflog` はフルハッシュを 1 行出して終わります。これがあるおかげで
+`$(gz log)` が成立します。`--action` を付けると、その後にもう 1 つメニューが出ます
+— 詳細を表示する、detached HEAD で切り替える、cherry-pick する、revert する、
+fixup コミットを作る、（`gz reflog` なら）`y/N` の確認を経て現在のブランチをそこへ戻す。
+「フルハッシュを出力する」もメニューの項目なので、パイプの使い方へいつでも戻れます。
+
+**`--action` を付けなければ挙動は一切変わりません。**既定の標準出力は従来のままなので、
+`git show "$(gz log)"` はそのまま動きます。`gz reflog --restore <NAME>` も非推奨には
+なりません。**入力が必要な名前を渡すなら `--restore`、名前を要さない操作なら `--action`**
+と使い分けてください（両者は同時に指定できません）。
 
 ## 表示言語
 
@@ -210,13 +224,13 @@ git config --global fuzgit.notify true
 | サブコマンド | 概要 |
 |---|---|
 | [`gz branch`](https://hatohato25.github.io/fuzgit/docs.html#branch) | ブランチを選んで切り替える（サブコマンドで作成・削除・整理も行う） |
-| [`gz log`](https://hatohato25.github.io/fuzgit/docs.html#log) | コミット履歴を辿り、フルハッシュを標準出力へ出す |
+| [`gz log`](https://hatohato25.github.io/fuzgit/docs.html#log) | コミット履歴を辿り、フルハッシュを標準出力へ出す（`--action` で次の操作を選ぶ） |
 | [`gz cherry-pick`](https://hatohato25.github.io/fuzgit/docs.html#cherry-pick) | コミットを選んで cherry-pick する |
 | [`gz restore`](https://hatohato25.github.io/fuzgit/docs.html#restore) | ファイルを選んで復元・アンステージする |
 | [`gz add`](https://hatohato25.github.io/fuzgit/docs.html#add) | 未ステージ・未追跡ファイルを選んでステージする |
 | [`gz stash <サブコマンド>`](https://hatohato25.github.io/fuzgit/docs.html#stash) | 変更を stash へ退避し、stash を検索して適用・破棄する |
 | [`gz tag`](https://hatohato25.github.io/fuzgit/docs.html#tag) | タグを選んで出力・切替・差分表示する |
-| [`gz reflog`](https://hatohato25.github.io/fuzgit/docs.html#reflog) | HEAD の reflog を辿り、失われたコミットを取り出す |
+| [`gz reflog`](https://hatohato25.github.io/fuzgit/docs.html#reflog) | HEAD の reflog を辿り、失われたコミットを取り出す（`--action` で次の操作を選ぶ） |
 | [`gz commit`](https://hatohato25.github.io/fuzgit/docs.html#commit) | 変更ファイルを選んで、選んだものだけをコミットする |
 | [`gz fixup`](https://hatohato25.github.io/fuzgit/docs.html#fixup) | 修正対象のコミットを選んで fixup コミットを作る |
 | [`gz merge`](https://hatohato25.github.io/fuzgit/docs.html#merge) | merge するブランチを選ぶ（進行中は復帰メニュー） |
@@ -227,7 +241,7 @@ git config --global fuzgit.notify true
 | [`gz fetch`](https://hatohato25.github.io/fuzgit/docs.html#fetch) | fetch の対象を決めて取得する（`--siblings` で隣のリポジトリも一括取得。**ネットワークを使う**） |
 | [`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) | ブランチを選んで upstream へまとめて追随させる（fast-forward のみ。**ネットワークを使う**） |
 | [`gz sync`](https://hatohato25.github.io/fuzgit/docs.html#sync) | 現在ブランチを upstream と同期する（**ネットワークを使う**） |
-| [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | worktree を一覧・管理する |
+| [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | worktree を一覧・管理する（`add` は `.claude/` を新しい worktree へ複写する） |
 
 オプション・候補の作り方・プレビューの内容・確認プロンプトの有無は
 [ドキュメント](https://hatohato25.github.io/fuzgit/docs.html)に記載しています。

@@ -30,7 +30,33 @@ pub fn run(
     let selected = select_many(items)?;
 
     let ordered = oldest_first(messages, &candidates, &selected)?;
-    let arguments = cherry_pick_args(&ordered);
+
+    apply(language, messages, &ordered)
+}
+
+/// 選択済みの 1 コミットを cherry-pick する。
+///
+/// コミット選択後のアクションメニュー（FR-32）から呼ぶための入口であり、`gz cherry-pick` を
+/// 直接使った場合と同じ実行部（[`apply`]）を通る。
+///
+/// # Errors
+///
+/// `git cherry-pick` の実行に失敗した場合にエラーを返す。
+pub fn run_on_commit(language: Language, messages: &dyn Messages, id: &str) -> Result<()> {
+    apply(language, messages, std::slice::from_ref(&id.to_owned()))
+}
+
+/// 履歴順に並べ替え済みのハッシュを 1 回の `git cherry-pick` で適用する。
+///
+/// 複数コミットを 1 回の実行にまとめるのは、途中で失敗したときに git 自身の
+/// `--continue` / `--abort` で再開・中止できるようにするためであり、
+/// 1 件ずつ呼び分けない。
+///
+/// # Errors
+///
+/// `git cherry-pick` の実行に失敗した場合にエラーを返す。
+fn apply(language: Language, messages: &dyn Messages, hashes: &[String]) -> Result<()> {
+    let arguments = cherry_pick_args(hashes);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
 
     // 継承 stdio で実行するため、コンフリクト時の git のメッセージはそのまま端末へ表示される

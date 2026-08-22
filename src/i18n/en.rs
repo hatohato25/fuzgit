@@ -7,8 +7,8 @@ use std::path::Path;
 
 use super::Language;
 use super::messages::{
-    BranchManageMessages, BranchMessages, CherryPickMessages, CliMessages, CommitMessages,
-    CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
+    BranchManageMessages, BranchMessages, CherryPickMessages, CliMessages, CommitMenuMessages,
+    CommitMessages, CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
     FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, LogMessages,
     MergeMessages, Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages,
     RevertMessages, StashMessages, StatusMessages, SyncMessages, TagMessages, WorktreeMessages,
@@ -132,6 +132,10 @@ impl Messages for EnglishMessages {
 
     fn log(&self) -> &dyn LogMessages {
         &EnglishLogMessages
+    }
+
+    fn commit_menu(&self) -> &dyn CommitMenuMessages {
+        &EnglishCommitMenuMessages
     }
 }
 
@@ -732,6 +736,14 @@ impl ReflogMessages for EnglishReflogMessages {
         "print its full hash"
     }
 
+    fn header_outcome_menu(&self) -> &'static str {
+        "pick what to do next"
+    }
+
+    fn conflicting_actions(&self) -> &'static str {
+        "--restore and --action cannot be combined"
+    }
+
     fn header_outcome_restore(&self, name: &str) -> String {
         format!("create the branch `{name}` at that commit")
     }
@@ -1210,6 +1222,20 @@ impl WorktreeMessages for EnglishWorktreeMessages {
         format!("Skipped the dependencies: `{program}` was not found")
     }
 
+    fn agent_config_copied(&self, copied: usize, skipped: usize) -> String {
+        if skipped == 0 {
+            format!("Copied {copied} file(s) into .claude/")
+        } else {
+            format!(
+                "Copied {copied} file(s) into .claude/ ({skipped} already there were left alone)"
+            )
+        }
+    }
+
+    fn agent_config_copy_failed(&self, path: &str) -> String {
+        format!("warning: failed to copy .claude/: {path}")
+    }
+
     fn install_failed(&self, command: &str) -> String {
         format!(
             "Failed to install the dependencies \
@@ -1557,8 +1583,78 @@ impl LogMessages for EnglishLogMessages {
         "Pick a commit"
     }
 
-    fn header_outcome(&self) -> &'static str {
+    fn header_outcome_print(&self) -> &'static str {
         "print its full hash"
+    }
+
+    fn header_outcome_menu(&self) -> &'static str {
+        "pick what to do next"
+    }
+
+    fn selection_not_found(&self, selected: &str) -> String {
+        format!("The picked commit {selected} was not found among the candidates")
+    }
+}
+
+/// コミット選択後のアクションメニュー（[`CommitMenuMessages`]）の英語表示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnglishCommitMenuMessages;
+
+impl CommitMenuMessages for EnglishCommitMenuMessages {
+    fn subject(&self, short_id: &str) -> String {
+        format!("Pick what to do with commit {short_id}")
+    }
+
+    fn outcome(&self) -> &'static str {
+        "run the picked action"
+    }
+
+    fn show_action(&self) -> &'static str {
+        "Show the commit (git show)"
+    }
+
+    fn switch_action(&self) -> &'static str {
+        "Switch to it as a detached HEAD (git switch --detach)"
+    }
+
+    fn cherry_pick_action(&self) -> &'static str {
+        "Apply it onto the current branch (git cherry-pick)"
+    }
+
+    fn revert_action(&self) -> &'static str {
+        "Create a commit that undoes it (git revert)"
+    }
+
+    fn fixup_action(&self) -> &'static str {
+        "Create a fixup commit from the staged changes (git commit --fixup)"
+    }
+
+    fn reset_action(&self) -> &'static str {
+        "Move the current branch back to it (git reset --hard)"
+    }
+
+    fn print_action(&self) -> &'static str {
+        "Print the full hash to stdout"
+    }
+
+    fn menu_selection_not_found(&self, selected: &str) -> String {
+        format!("The picked menu entry {selected} was not found")
+    }
+
+    fn reset_confirmation(&self) -> &'static str {
+        "This discards every uncommitted change in the working tree and the index, and moves the current branch to the commit below (the commit you leave stays in the reflog)"
+    }
+
+    fn show_failed(&self, id: &str) -> String {
+        format!("Failed to show commit {id}")
+    }
+
+    fn switch_failed(&self, id: &str) -> String {
+        format!("Failed to switch to commit {id}")
+    }
+
+    fn reset_failed(&self, id: &str) -> String {
+        format!("Failed to reset to commit {id}")
     }
 }
 
@@ -1627,6 +1723,10 @@ impl CliMessages for EnglishCliMessages {
 
     fn log_limit_help(&self) -> &'static str {
         "Maximum number of commits to read"
+    }
+
+    fn log_action_help(&self) -> &'static str {
+        "Pick what to do with the chosen commit from a menu"
     }
 
     fn cherry_pick_about(&self) -> &'static str {
@@ -1703,6 +1803,10 @@ impl CliMessages for EnglishCliMessages {
 
     fn reflog_restore_help(&self) -> &'static str {
         "Create a new branch with the given name from the picked commit"
+    }
+
+    fn reflog_action_help(&self) -> &'static str {
+        "Pick what to do with the chosen commit from a menu"
     }
 
     // `gz commit` / `gz fixup`
