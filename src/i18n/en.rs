@@ -11,7 +11,7 @@ use super::messages::{
     CommitMessages, CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
     FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, LogMessages,
     MergeMessages, Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages,
-    RevertMessages, StashMessages, StatusMessages, SyncMessages, TagMessages, WorktreeMessages,
+    RevertMessages, StashMessages, StatusMessages, SyncMessages, WorktreeMessages,
 };
 use crate::error::{Error, stderr_suffix};
 use crate::git::read::{BRANCH_REF_PREFIX, MalformedOutput, ReadOperation, WORKTREE_LABEL};
@@ -64,10 +64,6 @@ impl Messages for EnglishMessages {
 
     fn file_selection(&self) -> &dyn FileSelectionMessages {
         &EnglishFileSelectionMessages
-    }
-
-    fn tag(&self) -> &dyn TagMessages {
-        &EnglishTagMessages
     }
 
     fn reflog(&self) -> &dyn ReflogMessages {
@@ -578,6 +574,10 @@ impl BranchManageMessages for EnglishBranchManageMessages {
         format!("tracking: {upstream}")
     }
 
+    fn protected(&self) -> &'static str {
+        "trunk, not preselected"
+    }
+
     fn no_tracking(&self) -> &'static str {
         "no tracking branch"
     }
@@ -678,47 +678,6 @@ impl FileSelectionMessages for EnglishFileSelectionMessages {
     /// `paths` の件数に依存しない言い回しにする（[`EnglishCherryPickMessages`] と同じ理由）。
     fn selection_not_found(&self, paths: &str) -> String {
         format!("Selected files not found among the candidates: {paths}")
-    }
-}
-
-/// `gz tag`（[`crate::commands::tag`]）の英語表示。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EnglishTagMessages;
-
-impl TagMessages for EnglishTagMessages {
-    fn header_subject(&self) -> &'static str {
-        "Pick a tag"
-    }
-
-    fn header_outcome_print(&self) -> &'static str {
-        "print its name"
-    }
-
-    /// `detached HEAD` は git の語彙であり訳さない。
-    fn header_outcome_switch(&self) -> &'static str {
-        "switch to it as a detached HEAD"
-    }
-
-    /// `HEAD` は git の語彙であり訳さない。
-    fn header_outcome_diff(&self) -> &'static str {
-        "show the diff against HEAD"
-    }
-
-    /// オプション名は訳さない（design.md「翻訳しないもの」）。
-    fn conflicting_actions(&self) -> &'static str {
-        "`--switch` and `--diff` cannot be given at the same time"
-    }
-
-    fn selection_not_found(&self, selected: &str) -> String {
-        format!("The selected tag `{selected}` is not among the candidates")
-    }
-
-    fn switch_failed(&self, name: &str) -> String {
-        format!("Failed to switch to the tag `{name}`")
-    }
-
-    fn diff_failed(&self, name: &str) -> String {
-        format!("Failed to show the diff against the tag `{name}`")
     }
 }
 
@@ -1805,19 +1764,7 @@ impl CliMessages for EnglishCliMessages {
         "Pick a stash and drop it"
     }
 
-    // `gz tag` / `gz reflog`
-
-    fn tag_about(&self) -> &'static str {
-        "Pick a tag (prints the tag name by default)"
-    }
-
-    fn tag_switch_help(&self) -> &'static str {
-        "Switch to the picked tag as a detached HEAD"
-    }
-
-    fn tag_diff_help(&self) -> &'static str {
-        "Show the diff between the picked tag and HEAD"
-    }
+    // `gz reflog`
 
     fn reflog_about(&self) -> &'static str {
         "Trace the reflog of HEAD and print the hash of the picked commit"

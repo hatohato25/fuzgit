@@ -67,7 +67,6 @@
           <li><a href="#restore">gz restore</a></li>
           <li><a href="#add">gz add</a></li>
           <li><a href="#stash">gz stash</a></li>
-          <li><a href="#tag">gz tag</a></li>
           <li><a href="#reflog">gz reflog</a></li>
           <li><a href="#commit">gz commit</a></li>
           <li><a href="#fixup">gz fixup</a></li>
@@ -217,6 +216,44 @@
             <a class="anchor" href="#install" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
+            <h3>macOS &mdash; Homebrew</h3>
+            <pre><code>brew install hatohato25/fuzgit/fuzgit</code></pre>
+
+            <h3>Linux / WSL &mdash; install script</h3>
+            <pre><code>curl -fsSL https://raw.githubusercontent.com/hatohato25/fuzgit/main/install.sh | sh</code></pre>
+            <p>
+              It downloads the release tarball for your machine,
+              <strong>verifies its SHA-256 checksum</strong>, and installs
+              <code>gz</code> into <code>~/.local/bin</code> &mdash; no
+              <code>sudo</code>, and nothing is written outside that directory.
+              When <code>~/.local/bin</code> is not on <code>PATH</code> the
+              script says so and prints the line to add;
+              <strong>it does not edit your shell profile for you</strong>.
+            </p>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th scope="col">Option</th><th scope="col">Environment variable</th><th scope="col">Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>--version &lt;TAG&gt;</code></td><td><code>FUZGIT_VERSION</code></td><td>Release to install (defaults to the latest)</td></tr>
+                  <tr><td><code>--bin-dir &lt;DIR&gt;</code></td><td><code>FUZGIT_BIN_DIR</code></td><td>Where to put <code>gz</code> (defaults to <code>~/.local/bin</code>)</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <pre><code>curl -fsSL .../install.sh | sh -s -- --bin-dir /usr/local/bin</code></pre>
+            <p>
+              Only <strong>x86_64</strong> is published for Linux today. On
+              <code>aarch64</code> the script stops and points at the source
+              build, rather than installing a binary that cannot run.
+            </p>
+            <blockquote>
+              <p>
+                Piping a script into a shell runs code you have not read. The
+                script is <code>install.sh</code> at the root of the repository
+                &mdash; read it first if you would rather, then run it locally.
+              </p>
+            </blockquote>
+
+            <h3>From source</h3>
             <p>
               fuzgit is not published to crates.io, so clone the repository and
               install from the local checkout.
@@ -233,6 +270,42 @@ cargo install --path .</code></pre>
 ./target/release/gz --help</code></pre>
           </div>
           <div lang="ja">
+            <h3>macOS &mdash; Homebrew</h3>
+            <pre><code>brew install hatohato25/fuzgit/fuzgit</code></pre>
+
+            <h3>Linux / WSL &mdash; インストールスクリプト</h3>
+            <pre><code>curl -fsSL https://raw.githubusercontent.com/hatohato25/fuzgit/main/install.sh | sh</code></pre>
+            <p>
+              実行環境に合うリリース資産を取得し、<strong>SHA-256 チェックサムを検証</strong>した
+              うえで <code>gz</code> を <code>~/.local/bin</code> へ配置します。
+              <code>sudo</code> は不要で、そのディレクトリの外には何も書きません。
+              <code>~/.local/bin</code> が <code>PATH</code> に無い場合は追加すべき行を
+              表示します（<strong>シェルの設定ファイルを勝手に書き換えることはしません</strong>）。
+            </p>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th scope="col">オプション</th><th scope="col">環境変数</th><th scope="col">説明</th></tr></thead>
+                <tbody>
+                  <tr><td><code>--version &lt;TAG&gt;</code></td><td><code>FUZGIT_VERSION</code></td><td>導入するリリース（既定は最新）</td></tr>
+                  <tr><td><code>--bin-dir &lt;DIR&gt;</code></td><td><code>FUZGIT_BIN_DIR</code></td><td><code>gz</code> の配置先（既定は <code>~/.local/bin</code>）</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <pre><code>curl -fsSL .../install.sh | sh -s -- --bin-dir /usr/local/bin</code></pre>
+            <p>
+              現在 Linux 向けに配布しているのは <strong>x86_64 のみ</strong>です。
+              <code>aarch64</code> では動かないバイナリを入れずに停止し、ソースからの
+              ビルドを案内します。
+            </p>
+            <blockquote>
+              <p>
+                スクリプトをシェルへパイプするのは、読んでいないコードを実行することでも
+                あります。中身はリポジトリ直下の <code>install.sh</code> です。先に読んでから
+                手元で実行しても構いません。
+              </p>
+            </blockquote>
+
+            <h3>ソースからインストール</h3>
             <p>
               crates.io へは未公開のため、リポジトリを取得してローカルからインストールします。
             </p>
@@ -277,8 +350,8 @@ cargo install --path .</code></pre>
               (<code>git pull -r</code>), <code>gz branch delete -f</code>
               (<code>git branch -f</code>) and so on. fuzgit-specific options are
               long-only, and a letter git already uses for something else is
-              never reused: <code>gz tag --diff</code> has no <code>-d</code>
-              because <code>git tag -d</code> deletes a tag.
+              never reused: <code>gz worktree add</code> takes no short form
+              because git has no short spelling for it either.
             </p>
           </div>
           <div lang="ja">
@@ -289,8 +362,8 @@ cargo install --path .</code></pre>
               <code>git fetch -p</code>、<code>gz sync -r</code> =
               <code>git pull -r</code>、<code>gz branch delete -f</code> =
               <code>git branch -f</code> など）。fuzgit 固有のオプションは長い綴りだけとし、
-              git が別の意味で使っている文字は流用しません。<code>gz tag --diff</code> に
-              <code>-d</code> が無いのは、<code>git tag -d</code> がタグの削除だからです。
+              git が別の意味で使っている文字は流用しません。<code>gz worktree add</code> に
+              短縮形が無いのは、git 側にも対応する綴りが無いからです。
             </p>
           </div>
 
@@ -357,14 +430,6 @@ cargo install --path .</code></pre>
                     <span lang="en">depends on subcommand</span>
                     <span lang="ja">サブコマンド次第</span>
                   </td>
-                </tr>
-                <tr>
-                  <td><a href="#tag"><code>gz tag</code></a></td>
-                  <td>
-                    <span lang="en">Pick a tag to print, switch to, or diff</span>
-                    <span lang="ja">タグを選んで出力・切替・差分表示する</span>
-                  </td>
-                  <td><span lang="en">single</span><span lang="ja">単一</span></td>
                 </tr>
                 <tr>
                   <td><a href="#reflog"><code>gz reflog</code></a></td>
@@ -821,9 +886,21 @@ gz branch cleanup          # delete every merged branch in one go</code></pre>
             </div>
             <ul>
               <li>
-                Candidates are limited to merged branches, and
-                <strong>all of them start out selected</strong> (use
-                <kbd>Tab</kbd> to deselect).
+                Candidates are limited to merged branches, and they
+                <strong>start out selected &mdash; except the trunk</strong> (use
+                <kbd>Tab</kbd> to select or deselect).
+              </li>
+              <li>
+                <strong>The trunk is never preselected.</strong> That means the
+                repository&rsquo;s default branch (whatever
+                <code>refs/remotes/&lt;remote&gt;/HEAD</code> points at) plus the
+                conventional names <code>main</code> and <code>master</code>.
+                Since <code>--into</code> defaults to <code>HEAD</code>, running
+                this from a feature branch makes its ancestor <code>main</code>
+                count as merged &mdash; with everything preselected, two
+                keystrokes would delete your trunk. It still appears in the list,
+                labelled so you can see why it is unselected, and you can select
+                it deliberately if you really mean to delete it.
               </li>
               <li>
                 After the confirmation prompt they are deleted with
@@ -947,8 +1024,17 @@ gz branch cleanup          # merged なブランチを一括で削除する</cod
             </div>
             <ul>
               <li>
-                候補を merged のブランチのみに絞り、<strong>全件を起動時から選択済み</strong>で
-                表示します（<kbd>Tab</kbd> で外せます）。
+                候補を merged のブランチのみに絞り、<strong>幹を除いて選択済み</strong>の状態で
+                表示します（<kbd>Tab</kbd> で選択・解除できます）。
+              </li>
+              <li>
+                <strong>幹は事前選択しません。</strong>対象はリポジトリの既定ブランチ
+                （<code>refs/remotes/&lt;remote&gt;/HEAD</code> が指す先）と、慣習的な名前である
+                <code>main</code> / <code>master</code> です。<code>--into</code> の既定が
+                <code>HEAD</code> であるため、feature ブランチから実行するとその祖先である
+                <code>main</code> も merged に該当します。全件選択済みのままだと 2 打鍵で幹が
+                消えてしまうため、この扱いにしています。候補一覧には理由のラベル付きで残るので、
+                本当に消したい場合は選択できます。
               </li>
               <li>
                 確認プロンプトを経て <code>git branch -d</code> で一括削除します。
@@ -1280,52 +1366,6 @@ gz stash drop                      # 選んだ stash を破棄する（確認あ
                 プレビューは <code>git stash show -p --color=always</code>。
               </li>
               <li><strong><code>drop</code> は元に戻せないため、実行前に確認プロンプト（<code>[y/N]</code>）を表示します。</strong></li>
-            </ul>
-          </div>
-        </section>
-
-        <section id="tag">
-          <h2>
-            <span lang="en"><code>gz tag</code> &mdash; picking a tag</span>
-            <span lang="ja"><code>gz tag</code> &mdash; タグの選択</span>
-            <a class="anchor" href="#tag" aria-label="Link to this section">#</a>
-          </h2>
-          <div lang="en">
-            <pre><code>gz tag                  # print the tag name to stdout (default)
-gz tag --switch         # switch to the picked tag as a detached HEAD
-gz tag --diff           # show the diff between the picked tag and HEAD</code></pre>
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th scope="col">Option</th><th scope="col">Description</th></tr></thead>
-                <tbody>
-                  <tr><td><code>--switch</code></td><td>Switch to the picked tag as a detached HEAD</td></tr>
-                  <tr><td><code>--diff</code></td><td>Show the diff between the picked tag and HEAD</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <ul>
-              <li><code>--switch</code> and <code>--diff</code> cannot be combined.</li>
-              <li>Annotated tags show their tag message on the candidate line and in the preview.</li>
-              <li>By default <strong>only the tag name</strong> is printed to stdout.</li>
-            </ul>
-          </div>
-          <div lang="ja">
-            <pre><code>gz tag                  # タグ名を標準出力へ出す（既定）
-gz tag --switch         # 選んだタグへ detached HEAD で切り替える
-gz tag --diff           # 選んだタグと HEAD の差分を表示する</code></pre>
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th scope="col">オプション</th><th scope="col">説明</th></tr></thead>
-                <tbody>
-                  <tr><td><code>--switch</code></td><td>選択したタグへ detached HEAD で切り替える</td></tr>
-                  <tr><td><code>--diff</code></td><td>選択したタグと HEAD の差分を表示する</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <ul>
-              <li><code>--switch</code> と <code>--diff</code> は同時に指定できません。</li>
-              <li>annotated tag は候補行にタグメッセージを併記し、プレビューにもタグメッセージを含めます。</li>
-              <li>既定では<strong>タグ名だけ</strong>を標準出力へ出します。</li>
             </ul>
           </div>
         </section>
@@ -3601,7 +3641,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                   </tr>
                   <tr>
                     <td>tag vs tag in <code>gz diff</code></td>
-                    <td>Rarely needed; tag vs HEAD is available as <code>gz tag --diff</code></td>
+                    <td>Rarely needed. Tags are still offered as the base of <code>gz branch create</code>, which is where they earn their place</td>
                   </tr>
                   <tr>
                     <td><code>gz worktree</code> move / lock / unlock / repair, and <code>remove --force</code></td>
@@ -3727,7 +3767,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                   </tr>
                   <tr>
                     <td><code>gz diff</code> の tag vs tag</td>
-                    <td>使用頻度が低く、tag vs HEAD は <code>gz tag --diff</code> で行える</td>
+                    <td>使用頻度が低い。タグは <code>gz branch create</code> のベース候補として引き続き選べる</td>
                   </tr>
                   <tr>
                     <td><code>gz worktree</code> の move / lock / unlock / repair、<code>remove --force</code></td>

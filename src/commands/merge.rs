@@ -51,7 +51,7 @@ impl MergeMode {
     ///
     /// 排他性は `clap` の `conflicts_with_all` でも担保しているが、複数が立った状態を
     /// 暗黙にどれか 1 つへ倒すことがないよう、ここでも明示的に拒否する
-    /// （[`crate::commands::tag::TagAction::from_flags`] と同方針）。
+    /// （[`crate::commands::reflog::Decision::from_flags`] と同方針）。
     ///
     /// # Errors
     ///

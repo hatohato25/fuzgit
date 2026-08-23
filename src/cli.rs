@@ -126,17 +126,6 @@ pub enum Command {
         command: StashCommand,
     },
 
-    /// Pick a tag (prints the tag name by default)
-    Tag {
-        /// Switch to the picked tag as a detached HEAD
-        #[arg(long, conflicts_with = "diff")]
-        switch: bool,
-
-        /// Show the diff between the picked tag and HEAD
-        #[arg(long)]
-        diff: bool,
-    },
-
     /// Trace the reflog of HEAD and print the hash of the picked commit
     Reflog {
         /// Create a new branch with the given name from the picked commit
@@ -405,12 +394,6 @@ pub fn localized_command(messages: &dyn Messages) -> ClapCommand {
         })
         .mut_subcommand("add", |command| command.about(cli.add_about()))
         .mut_subcommand("stash", |command| localize_stash(command, cli))
-        .mut_subcommand("tag", |command| {
-            command
-                .about(cli.tag_about())
-                .mut_arg("switch", |argument| argument.help(cli.tag_switch_help()))
-                .mut_arg("diff", |argument| argument.help(cli.tag_diff_help()))
-        })
         .mut_subcommand("reflog", |command| {
             command
                 .about(cli.reflog_about())
@@ -758,12 +741,6 @@ mod tests {
     }
 
     #[test]
-    fn tag_switch_and_diff_are_mutually_exclusive() {
-        Cli::try_parse_from(["gz", "tag", "--switch", "--diff"])
-            .expect_err("--switch and --diff must not be combined");
-    }
-
-    #[test]
     fn reflog_restore_takes_the_new_branch_name() {
         let cli = Cli::try_parse_from(["gz", "reflog", "--restore", "recovered"])
             .expect("reflog should parse");
@@ -1082,12 +1059,7 @@ mod tests {
     fn the_options_without_a_git_counterpart_have_no_short_form() {
         // `git tag -d` はタグ削除、`git tag -s` は GPG 署名、`git commit -s` は signoff。
         // 同じ綴りに別の意味を与えると誤操作を招くため、これらには短縮形を付けない
-        for arguments in [
-            ["gz", "tag", "-d"],
-            ["gz", "tag", "-s"],
-            ["gz", "fixup", "-s"],
-            ["gz", "sync", "-m"],
-        ] {
+        for arguments in [["gz", "fixup", "-s"], ["gz", "sync", "-m"]] {
             assert!(
                 Cli::try_parse_from(arguments).is_err(),
                 "{arguments:?} must not be accepted as a short form"

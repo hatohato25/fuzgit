@@ -13,13 +13,6 @@ fuzzy finder で「選ぶ」「探す」「辿る」ことを軸にした git �
 - パッケージ名: **`fuzgit`**
 - 実行コマンド名（バイナリ名）: **`gz`**
 
-## ドキュメント
-
-**各コマンドの詳細・キー操作・ネットワーク操作・終了コード・設計方針は、ドキュメントサイトを参照してください。**
-
-- **<https://hatohato25.github.io/fuzgit/>** — ランディングページ
-- **<https://hatohato25.github.io/fuzgit/docs.html>** — ドキュメント（English / 日本語）
-
 ## 前提条件
 
 - **システムに `git` がインストールされていること（必須）**
@@ -34,14 +27,9 @@ fuzzy finder で「選ぶ」「探す」「辿る」ことを軸にした git �
 ### Homebrew（推奨）
 
 ```sh
-brew install hatohato25/fuzgit/fuzgit
-```
-
-先に tap を追加してからでも構いません。
-
-```sh
 brew tap hatohato25/fuzgit
-brew install fuzgit
+brew trust --formula hatohato25/fuzgit/fuzgit
+brew install hatohato25/fuzgit/fuzgit
 ```
 
 Formula 名は `fuzgit` ですが、**インストールされるコマンドは `gz`** です。
@@ -51,6 +39,38 @@ gz --version
 ```
 
 ビルド済みバイナリは macOS（Apple Silicon / Intel）と Linux（x86_64）向けに提供しています。
+
+### Linux / WSL（インストールスクリプト）
+
+macOS は Homebrew、Linux と WSL はこちらを使ってください。
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hatohato25/fuzgit/main/install.sh | sh
+```
+
+実行環境に合うリリース資産を取得し、**SHA-256 チェックサムを検証**したうえで `gz` を
+`~/.local/bin` へ配置します。`sudo` は不要で、そのディレクトリの外には何も書きません。
+`~/.local/bin` が `PATH` に無い場合は、追加すべき行を表示します（**シェルの設定ファイルを
+勝手に書き換えることはしません**）。
+
+オプション:
+
+```sh
+# 最新ではなく特定のバージョンを入れる
+curl -fsSL .../install.sh | sh -s -- --version v0.5.0
+
+# 配置先を変える（ディレクトリによっては sudo が必要）
+curl -fsSL .../install.sh | sh -s -- --bin-dir /usr/local/bin
+```
+
+環境変数 `FUZGIT_VERSION` / `FUZGIT_BIN_DIR` でも同じ指定ができます。
+
+現在 Linux 向けに配布しているのは **x86_64 のみ**です。`aarch64` では動かないバイナリを
+入れずに停止し、ソースからのビルドを案内します。
+
+> スクリプトをシェルへパイプするのは、読んでいないコードを実行することでもあります。
+> 中身はこのリポジトリの [`install.sh`](install.sh) です。先に読んでから手元で実行しても
+> 構いません。
 
 ### ソースからインストール
 
@@ -229,7 +249,6 @@ git config --global fuzgit.notify true
 | [`gz restore`](https://hatohato25.github.io/fuzgit/docs.html#restore) | ファイルを選んで復元・アンステージする |
 | [`gz add`](https://hatohato25.github.io/fuzgit/docs.html#add) | 未ステージ・未追跡ファイルを選んでステージする |
 | [`gz stash <サブコマンド>`](https://hatohato25.github.io/fuzgit/docs.html#stash) | 変更を stash へ退避し、stash を検索して適用・破棄する |
-| [`gz tag`](https://hatohato25.github.io/fuzgit/docs.html#tag) | タグを選んで出力・切替・差分表示する |
 | [`gz reflog`](https://hatohato25.github.io/fuzgit/docs.html#reflog) | HEAD の reflog を辿り、失われたコミットを取り出す（`--action` で次の操作を選ぶ） |
 | [`gz commit`](https://hatohato25.github.io/fuzgit/docs.html#commit) | 変更ファイルを選んで、選んだものだけをコミットする |
 | [`gz fixup`](https://hatohato25.github.io/fuzgit/docs.html#fixup) | 修正対象のコミットを選んで fixup コミットを作る |

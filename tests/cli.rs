@@ -22,14 +22,13 @@ use fuzgit::i18n::messages::CliMessages;
 const BIN_NAME: &str = "gz";
 
 /// `gz` のすべてのサブコマンド名。ヘルプ出力の検証に用いる。
-const SUBCOMMANDS: [&str; 19] = [
+const SUBCOMMANDS: [&str; 18] = [
     "branch",
     "log",
     "cherry-pick",
     "restore",
     "add",
     "stash",
-    "tag",
     "reflog",
     "commit",
     "fixup",
@@ -398,7 +397,6 @@ fn help_targets(cli: &dyn CliMessages) -> Vec<(&'static [&'static str], &'static
         (&["stash", "apply"], cli.stash_apply_about()),
         (&["stash", "pop"], cli.stash_pop_about()),
         (&["stash", "drop"], cli.stash_drop_about()),
-        (&["tag"], cli.tag_about()),
         (&["reflog"], cli.reflog_about()),
         (&["commit"], cli.commit_about()),
         (&["fixup"], cli.fixup_about()),
@@ -823,9 +821,9 @@ fn nothing_to_select_is_reported_in_english() {
     );
 }
 
-/// stash / タグ / reflog が 1 件も無い場合、TUI を起動せずに終了することを確認する（**ja**）。
+/// stash / reflog が 1 件も無い場合、TUI を起動せずに終了することを確認する（**ja**）。
 #[test]
-fn stash_tag_and_reflog_report_when_there_is_nothing_to_select() {
+fn stash_and_reflog_report_when_there_is_nothing_to_select() {
     let dir = empty_repository("nothing-to-select-p3");
 
     for arguments in [
@@ -834,9 +832,6 @@ fn stash_tag_and_reflog_report_when_there_is_nothing_to_select() {
         vec!["stash", "apply"],
         vec!["stash", "pop"],
         vec!["stash", "drop"],
-        vec!["tag"],
-        vec!["tag", "--switch"],
-        vec!["tag", "--diff"],
         vec!["reflog"],
         vec!["reflog", "--restore", "recovered"],
         vec!["reflog", "--action"],
@@ -950,14 +945,14 @@ fn mutually_exclusive_options_are_rejected_before_anything_runs() {
     let dir = empty_repository("exclusive-options");
 
     let output = gz()
-        .args(["tag", "--switch", "--diff"])
+        .args(["diff", "--staged", "--head"])
         .current_dir(dir.path())
         .output()
-        .expect("failed to run gz tag --switch --diff");
+        .expect("failed to run gz diff --staged --head");
 
     assert!(
         !output.status.success(),
-        "gz tag --switch --diff should be rejected"
+        "gz diff --staged --head should be rejected"
     );
 
     let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");

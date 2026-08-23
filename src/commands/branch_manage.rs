@@ -23,7 +23,7 @@ use crate::finder::{
 use crate::git::exec::run_git;
 use crate::git::read::{
     BranchInfo, BranchScope, TagInfo, branch_activity, branches, checked_out_branches,
-    merged_branches, tags, upstream, worktrees,
+    default_branch, merged_branches, tags, upstream, worktrees,
 };
 use crate::git::repo::workdir;
 use crate::i18n::{Language, Messages};
@@ -63,6 +63,13 @@ const MERGED_LABEL: &str = "merged";
 
 /// merged でないブランチの表示。
 const UNMERGED_LABEL: &str = "unmerged";
+
+/// 幹として扱う慣習的なブランチ名。
+///
+/// リモートの既定ブランチ（`git::read::default_branch`）が分かる場合はそれも保護対象に
+/// 加えるが、`git init` したリポジトリや古いクローンには `origin/HEAD` が無い。名前だけで
+/// 判断できる幹をここに固定で持ち、**既定ブランチが取れない環境でも保護が効く**ようにする。
+const CONVENTIONAL_TRUNKS: [&str; 2] = ["main", "master"];
 
 /// ブランチ作成後に切り替えるかどうか。
 ///
@@ -182,6 +189,11 @@ struct DeleteCandidate {
     relative_date: Option<String>,
     /// upstream（リモート追跡ブランチ）の表示名。設定が無い場合は `None`。
     tracking: Option<String>,
+    /// 幹として保護する対象かどうか。
+    ///
+    /// `gz branch cleanup` の**事前選択から外す**ために使う。候補からは外さない
+    /// （名前を変えた後の古い `master` を消したい、といった正当な用途があるため）。
+    is_protected: bool,
 }
 
 /// ブランチ管理のサブコマンドを対応する処理へ振り分ける。
@@ -565,8 +577,9 @@ fn delete_candidates(
     let locals: Vec<BranchInfo> = all.into_iter().filter(|branch| !branch.is_remote).collect();
     let tracking = tracking_names(messages, repository, &locals)?;
 
-    Ok(build_candidates(
-        &locals, &merged, &activity, &in_use, &tracking,
+    Ok(with_protection(
+        build_candidates(&locals, &merged, &activity, &in_use, &tracking),
+        &protected_branches(repository),
     ))
 }
 
@@ -627,9 +640,52 @@ fn build_candidates(
             is_merged: merged.contains(&branch.name),
             relative_date: activity.get(&branch.name).cloned(),
             tracking: tracking.get(&branch.name).cloned(),
+            // 保護の判定は [`with_protection`] が別途行う。候補の組み立て（どれを載せるか）と
+            // 保護（どれを事前選択から外すか）は別の関心事であり、混ぜると片方だけを
+            // 単体テストできなくなる
+            is_protected: false,
             name: branch.name.clone(),
         })
         .collect()
+}
+
+/// 幹にあたる候補へ保護の印を付ける。
+///
+/// 候補一覧からは**外さない**。名前を変えた後の古い `master` を消したい、といった正当な
+/// 用途があるためであり、外すのではなく[事前選択から落とす][`preselect`]ことで
+/// 「意図しない限り消えない」を満たす。
+fn with_protection(
+    candidates: Vec<DeleteCandidate>,
+    protected: &HashSet<String>,
+) -> Vec<DeleteCandidate> {
+    candidates
+        .into_iter()
+        .map(|candidate| DeleteCandidate {
+            is_protected: protected.contains(&candidate.name),
+            ..candidate
+        })
+        .collect()
+}
+
+/// 幹として保護するブランチ名を集める。
+///
+/// **なぜ要るか**: `--into` の既定は `HEAD` であり、feature ブランチから
+/// `gz branch cleanup` を実行すると、その祖先である `main` も「取り込み済み」に該当する。
+/// 全候補を事前選択する仕様と噛み合うと、Enter → `y` の 2 打鍵で幹が消える。素の
+/// `git branch --merged | xargs git branch -d` が持つのと同じ穴であり、確認プロンプトが
+/// あるだけでは塞ぎきれない（読まずに `y` を押せる位置に置かないことが必要）。
+///
+/// リモートの既定ブランチと、慣習的な幹の名前（[`CONVENTIONAL_TRUNKS`]）の和を返す。
+/// 既定ブランチが取れない場合でも後者だけで保護が働く。
+fn protected_branches(repository: &gix::Repository) -> HashSet<String> {
+    let mut protected: HashSet<String> =
+        CONVENTIONAL_TRUNKS.into_iter().map(str::to_owned).collect();
+
+    if let Some(default) = default_branch(repository) {
+        protected.insert(default);
+    }
+
+    protected
 }
 
 /// 一覧に表示する 1 行を列へ分解する。連結した文字列がそのまま絞り込みの対象になる。
@@ -655,11 +711,20 @@ fn cells(messages: &dyn Messages, candidate: &DeleteCandidate) -> Vec<String> {
         None => messages.branch_manage().no_tracking().to_owned(),
     };
 
+    // 保護対象は事前選択から外れる。選ばれていない理由が一覧から読めるよう列で示す
+    // （保護対象でない候補は空欄になり、[`aligned_candidates`] が幅を揃える）
+    let protection = if candidate.is_protected {
+        messages.branch_manage().protected()
+    } else {
+        ""
+    };
+
     vec![
         candidate.name.clone(),
         state.to_owned(),
         date.to_owned(),
         tracking,
+        protection.to_owned(),
     ]
 }
 
@@ -681,16 +746,28 @@ fn display_lines<'a>(
 ) -> Vec<(&'a DeleteCandidate, String)> {
     aligned_candidates(candidates, |candidate| cells(messages, candidate))
         .into_iter()
-        .map(|(candidate, line)| (*candidate, line))
+        // 保護の列は該当する候補だけが埋まるため、そうでない行には右端の余白が残る。
+        // 行末の空白は読み手にも finder の絞り込みにも意味を持たないので落とす
+        // （事前選択は表示文字列の完全一致で判定されるが、両者ともこの関数を通る）
+        .map(|(candidate, line)| (*candidate, line.trim_end().to_owned()))
         .collect()
 }
 
-/// 起動時に選択済みにする候補の表示文字列を集める（`cleanup` は候補全件が対象）。
+/// 起動時に選択済みにする候補の表示文字列を集める。
 ///
 /// 受け取るのは [`display_lines`] が組み立てた候補と表示行の対であり、
 /// finder へ渡す候補行と同じ文字列がそのまま事前選択になる。
+///
+/// **幹として保護された候補は除く。**`--into` の既定が `HEAD` である以上、feature ブランチから
+/// `cleanup` を叩くと祖先である `main` も「取り込み済み」に該当してしまう。全件を選択済みに
+/// したままだと Enter → `y` の 2 打鍵で幹が消えるため、意図して選び直さない限り対象に
+/// ならないようにする（候補一覧には残るので、本当に消したい場合は選択できる）。
 fn preselect(candidates: &[(&DeleteCandidate, String)]) -> Vec<String> {
-    candidates.iter().map(|(_, line)| line.clone()).collect()
+    candidates
+        .iter()
+        .filter(|(candidate, _)| !candidate.is_protected)
+        .map(|(_, line)| line.clone())
+        .collect()
 }
 
 /// 削除候補を finder のアイテムへ変換する。
@@ -870,8 +947,14 @@ mod tests {
     }
 
     /// 候補 1 件だけの表示行（揃える相手が居ないため列を連結しただけの行）。
+    /// 候補 1 件分の表示行を組み立てる。
+    ///
+    /// 保護の列は該当しない候補では空になるため、`display_lines` と同じく行末を詰める。
     fn display_line(messages: &dyn Messages, candidate: &DeleteCandidate) -> String {
-        cells(messages, candidate).join(COLUMN_SEPARATOR)
+        cells(messages, candidate)
+            .join(COLUMN_SEPARATOR)
+            .trim_end()
+            .to_owned()
     }
 
     fn candidate_names(candidates: &[DeleteCandidate]) -> Vec<&str> {
@@ -887,6 +970,7 @@ mod tests {
             is_merged,
             relative_date: Some("3 days ago".to_owned()),
             tracking: None,
+            is_protected: false,
         }
     }
 
@@ -1199,12 +1283,14 @@ mod tests {
                     is_merged: true,
                     relative_date: Some("3 days ago".to_owned()),
                     tracking: Some("origin/done".to_owned()),
+                    is_protected: false,
                 },
                 DeleteCandidate {
                     name: "wip".to_owned(),
                     is_merged: false,
                     relative_date: Some("2 hours ago".to_owned()),
                     tracking: None,
+                    is_protected: false,
                 },
             ]
         );
@@ -1239,6 +1325,99 @@ mod tests {
             display_line(Language::Japanese.messages(), &candidates[0]),
             "done  merged  3 days ago  追跡: origin/done"
         );
+    }
+
+    #[test]
+    fn the_trunk_is_never_preselected_for_cleanup() {
+        // `--into` の既定は HEAD であり、feature ブランチから叩くと祖先の main も
+        // 「取り込み済み」に該当する。全件を選択済みにしたままだと 2 打鍵で幹が消える
+        let candidates = with_protection(
+            build_candidates(
+                &[local("main"), local("done-work")],
+                &set(&["main", "done-work"]),
+                &map(&[("main", "1 hour ago"), ("done-work", "3 days ago")]),
+                &HashSet::new(),
+                &HashMap::new(),
+            ),
+            &set(&["main"]),
+        );
+
+        let lines = display_lines(Language::Japanese.messages(), &references(&candidates));
+        let preselected = preselect(&lines);
+
+        // main は候補には残るが、選択済みにはならない
+        assert_eq!(candidate_names(&candidates), ["main", "done-work"]);
+        assert_eq!(preselected.len(), 1);
+        assert!(
+            preselected[0].starts_with("done-work"),
+            "only the non-trunk branch should be preselected: {preselected:?}"
+        );
+    }
+
+    #[test]
+    fn a_protected_branch_says_why_it_is_not_preselected() {
+        // 黙って選択から外すと「なぜ選ばれていないのか」が読み取れない
+        let candidates = with_protection(
+            build_candidates(
+                &[local("main")],
+                &set(&["main"]),
+                &map(&[("main", "1 hour ago")]),
+                &HashSet::new(),
+                &HashMap::new(),
+            ),
+            &set(&["main"]),
+        );
+
+        for language in [Language::Japanese, Language::English] {
+            let messages = language.messages();
+            let line = display_line(messages, &candidates[0]);
+
+            assert!(
+                line.contains(messages.branch_manage().protected()),
+                "{language:?} must say why: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_branch_that_is_not_the_trunk_carries_no_marker() {
+        let candidates = with_protection(
+            build_candidates(
+                &[local("done-work")],
+                &set(&["done-work"]),
+                &map(&[("done-work", "3 days ago")]),
+                &HashSet::new(),
+                &HashMap::new(),
+            ),
+            &set(&["main"]),
+        );
+
+        let line = display_line(Language::Japanese.messages(), &candidates[0]);
+
+        assert!(!candidates[0].is_protected);
+        // 行末に余白を残さない（保護の列が空のまま連結されるため）
+        assert_eq!(line, line.trim_end());
+        assert!(
+            !line.contains(Language::Japanese.messages().branch_manage().protected()),
+            "an ordinary branch must not be marked: {line}"
+        );
+    }
+
+    #[test]
+    fn the_conventional_trunks_are_protected_even_without_a_default_branch() {
+        // `git init` したリポジトリには origin/HEAD が無い。名前だけで守れる幹を固定で持つ
+        assert!(CONVENTIONAL_TRUNKS.contains(&"main"));
+        assert!(CONVENTIONAL_TRUNKS.contains(&"master"));
+    }
+
+    #[test]
+    fn the_protection_wording_is_translated() {
+        let japanese = Language::Japanese.messages().branch_manage();
+        let english = Language::English.messages().branch_manage();
+
+        assert!(!japanese.protected().trim().is_empty());
+        assert!(!english.protected().trim().is_empty());
+        assert_ne!(japanese.protected(), english.protected());
     }
 
     #[test]

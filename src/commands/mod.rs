@@ -15,7 +15,6 @@ use crate::commands::restore::RestoreTarget;
 use crate::commands::revert::MessageEditing;
 use crate::commands::stash::{StashAction, UntrackedFiles};
 use crate::commands::sync::SyncMode;
-use crate::commands::tag::TagAction;
 use crate::error;
 use crate::finder::{Highlight, HighlightColor};
 use crate::git::read::{BranchScope, CommitInfo, CommitScope};
@@ -43,7 +42,6 @@ pub mod revert;
 pub mod stash;
 pub mod status;
 pub mod sync;
-pub mod tag;
 pub mod worktree;
 pub mod worktree_claude;
 pub mod worktree_install;
@@ -73,7 +71,7 @@ const DECIDE_KEY: &str = "Enter: ";
 /// （Enter で起きること）を必ず対で受け取り、片方だけのヘッダーが生まれないようにする。
 ///
 /// `outcome` は**実際に行う操作**を渡すこと。同じ一覧でもフラグで結果が変わるコマンド
-/// （`gz tag` / `gz stash` / `gz reflog` / `gz branch create`）は、選択前に見えている説明と
+/// （`gz stash` / `gz reflog` / `gz log` / `gz branch create`）は、選択前に見えている説明と
 /// 決定後の挙動が食い違うと、取り返しの付かない操作を承知せずに実行させることになる。
 pub(crate) fn selection_header(subject: &str, outcome: &str) -> String {
     format!("{subject}{HEADER_SEPARATOR}{DECIDE_KEY}{outcome}")
@@ -315,12 +313,6 @@ pub fn dispatch(
             StashCommand::Pop => stash::run(language, messages, &repository, StashAction::Pop),
             StashCommand::Drop => stash::run(language, messages, &repository, StashAction::Drop),
         },
-        Command::Tag { switch, diff } => tag::run(
-            language,
-            messages,
-            &repository,
-            TagAction::from_flags(messages, *switch, *diff)?,
-        ),
         Command::Reflog { restore, action } => {
             let decision = reflog::Decision::from_flags(messages, restore.as_deref(), *action)?;
             reflog::run(language, messages, &repository, decision)

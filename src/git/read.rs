@@ -951,6 +951,38 @@ pub fn commits(
     Ok(commits)
 }
 
+/// リモートの既定ブランチ（`refs/remotes/<remote>/HEAD` が指す先）のローカル短縮名。
+///
+/// `origin/HEAD` はリモートの既定ブランチへのシンボリック参照であり、`origin/main` のような
+/// 実体を指す。ここからリモート名を落とした `main` が、そのリポジトリの幹にあたる。
+///
+/// **設定されていないことは珍しくない**（`git clone` は設定するが、`git init` した
+/// リポジトリや古いクローンには無い）。その場合は `None` を返し、**推測しない**。
+/// 呼び出し側は慣習的な名前との併用で補うこと。
+///
+/// 読み取りに失敗した参照は黙って読み飛ばす。既定ブランチが分からないことは異常ではなく、
+/// この関数の結果は「保護する名前を増やす」ためだけに使うため、失敗をエラーに昇格させる
+/// 意味が無い。
+pub fn default_branch(repository: &gix::Repository) -> Option<String> {
+    let references = repository.references().ok()?;
+
+    for reference in references.remote_branches().ok()? {
+        let Ok(reference) = reference else { continue };
+        let gix::refs::TargetRef::Symbolic(target) = reference.target() else {
+            continue;
+        };
+
+        // `origin/main` からリモート名を落として `main` を得る。区切りが無い場合は
+        // リモート名を特定できないため採用しない（推測でブランチ名を組み立てない）
+        let shortened = target.shorten().to_string();
+        if let Some((_remote, branch)) = shortened.split_once('/') {
+            return Some(branch.to_owned());
+        }
+    }
+
+    None
+}
+
 /// フルハッシュを指定して 1 件のコミットを読み取る。
 ///
 /// コミット選択後のアクションメニュー（FR-32）から `gz revert` / `gz fixup` の実行部を

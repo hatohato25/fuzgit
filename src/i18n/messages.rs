@@ -7,7 +7,7 @@
 //! [`Messages::finder`]（選択 UI のプレビュー）、
 //! [`Messages::confirm`]（破壊的操作の確認プロンプト）の共通レイヤーに加え、
 //! [`Messages::common`]（複数コマンドで共有する語彙）と
-//! `gz branch` / `gz cherry-pick` / `gz tag` / `gz reflog` / `gz restore` /
+//! `gz branch` / `gz cherry-pick` / `gz reflog` / `gz restore` /
 //! `gz revert` / `gz stash` / `gz commit` / `gz fixup` / `gz status` / `gz merge` /
 //! `gz rebase` / `gz worktree` / `gz sync` / `gz diff` / `gz fetch` / `gz pull` /
 //! `gz branch create` / `delete` / `cleanup`、および複数コマンドが共用するファイル選択・
@@ -71,9 +71,6 @@ pub trait Messages: Sync + std::fmt::Debug {
 
     /// ファイル選択（[`crate::commands::file_selection`]）の文言。
     fn file_selection(&self) -> &dyn FileSelectionMessages;
-
-    /// `gz tag`（[`crate::commands::tag`]）の文言。
-    fn tag(&self) -> &dyn TagMessages;
 
     /// `gz reflog`（[`crate::commands::reflog`]）の文言。
     fn reflog(&self) -> &dyn ReflogMessages;
@@ -145,7 +142,7 @@ pub trait Messages: Sync + std::fmt::Debug {
 /// ここへ集めると、`messages.common().…` という呼び出しから文脈が読めなくなり、
 /// trait をコマンド単位に分けた意味が失われるため。
 pub trait CommonMessages: Sync + std::fmt::Debug {
-    /// 標準出力への書き込みに失敗したことを伝える（`gz log` / `gz tag` / `gz reflog` 等）。
+    /// 標準出力への書き込みに失敗したことを伝える（`gz log` / `gz reflog` / `gz worktree` 等）。
     fn stdout_write_failed(&self) -> &'static str;
 
     /// 標準エラー出力への書き込みに失敗したことを伝える（`gz reflog` 等）。
@@ -169,7 +166,7 @@ pub trait CommonMessages: Sync + std::fmt::Debug {
     /// stash 一覧を読み取れなかったことを伝える（`gz stash` / `gz status`）。
     fn stash_list_read_failed(&self) -> &'static str;
 
-    /// タグ一覧を読み取れなかったことを伝える（`gz tag` / `gz branch create`）。
+    /// タグ一覧を読み取れなかったことを伝える（`gz branch create` のベース候補）。
     fn tag_list_read_failed(&self) -> &'static str;
 
     /// worktree 一覧を読み取れなかったことを伝える（`gz worktree` / `gz branch delete`）。
@@ -346,16 +343,7 @@ pub trait CliMessages: Sync + std::fmt::Debug {
     /// `gz stash drop` の説明。
     fn stash_drop_about(&self) -> &'static str;
 
-    // `gz tag` / `gz reflog`
-
-    /// `gz tag` の説明。
-    fn tag_about(&self) -> &'static str;
-
-    /// `gz tag --switch` の説明。
-    fn tag_switch_help(&self) -> &'static str;
-
-    /// `gz tag --diff` の説明。
-    fn tag_diff_help(&self) -> &'static str;
+    // `gz reflog`
 
     /// `gz reflog` の説明。
     fn reflog_about(&self) -> &'static str;
@@ -539,6 +527,12 @@ pub trait BranchManageMessages: Sync + std::fmt::Debug {
     /// 候補行に示す「upstream が設定されていない」の節（`delete` / `cleanup`）。
     fn no_tracking(&self) -> &'static str;
 
+    /// 幹として保護されており、事前選択から外していることを示す表示（`cleanup`）。
+    ///
+    /// 候補から消さずにラベルで示すのは、選ばれていない理由が読み取れるようにするため
+    /// （黙って一覧から消すと「なぜ出てこないのか」が分からなくなる）。
+    fn protected(&self) -> &'static str;
+
     /// 候補行に示す「最終更新日時を取得できなかった」の節（`delete` / `cleanup`）。
     ///
     /// 取得できた日時は git が出力した相対表記をそのまま載せるため文言を持たない。
@@ -623,44 +617,6 @@ pub trait FileSelectionMessages: Sync + std::fmt::Debug {
     fn selection_not_found(&self, paths: &str) -> String;
 }
 
-/// `gz tag`（[`crate::commands::tag`]）の文言。
-pub trait TagMessages: Sync + std::fmt::Debug {
-    /// 候補一覧のヘッダーのうち、何を選ぶのかを示す節。
-    ///
-    /// 節の区切りと決定キーの表記は**装飾**であり、
-    /// [`crate::commands::selection_header`] が付ける。
-    fn header_subject(&self) -> &'static str;
-
-    /// タグ名を出力する場合（フラグ指定なし）のヘッダーの結果節。
-    ///
-    /// 同じ一覧から選ばせて結果だけが `--switch` / `--diff` で変わるため、
-    /// 操作ごとに別の文言を持つ（[`StashMessages::header_outcome_apply`] と同じ扱い）。
-    fn header_outcome_print(&self) -> &'static str;
-
-    /// タグの指すコミットへ切り替える場合（`--switch`）のヘッダーの結果節。
-    ///
-    /// 切り替え先が detached HEAD であることまで含める。ブランチの切替と違い、
-    /// そのままコミットすると参照から辿れなくなるため。
-    fn header_outcome_switch(&self) -> &'static str;
-
-    /// HEAD との差分を表示する場合（`--diff`）のヘッダーの結果節。
-    fn header_outcome_diff(&self) -> &'static str;
-
-    /// `--switch` と `--diff` が同時に指定されたことを伝える。
-    ///
-    /// オプション名は翻訳しない（design.md「翻訳しないもの」）。
-    fn conflicting_actions(&self) -> &'static str;
-
-    /// 選択されたタグが候補一覧に見つからなかったことを伝える。
-    fn selection_not_found(&self, selected: &str) -> String;
-
-    /// タグの指すコミットへの切り替えに失敗したことを伝える。
-    fn switch_failed(&self, name: &str) -> String;
-
-    /// タグとの差分表示に失敗したことを伝える。
-    fn diff_failed(&self, name: &str) -> String;
-}
-
 /// `gz reflog`（[`crate::commands::reflog`]）の文言。
 pub trait ReflogMessages: Sync + std::fmt::Debug {
     /// 候補一覧のヘッダーのうち、何を選ぶのかを示す節。
@@ -684,7 +640,7 @@ pub trait ReflogMessages: Sync + std::fmt::Debug {
     /// `--restore` と `--action` が同時に指定されたことを伝える。
     ///
     /// `clap` の `conflicts_with` でも弾かれるが、フラグの組み合わせを解釈する側でも
-    /// 二重に拒否する（`TagAction::from_flags` と同じ理由）。
+    /// 二重に拒否する。
     fn conflicting_actions(&self) -> &'static str;
 
     /// reflog を読み取れなかったことを伝える。

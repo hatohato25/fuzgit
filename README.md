@@ -13,14 +13,6 @@ The fuzzy finder is [skim](https://crates.io/crates/skim) embedded as a library,
 - Package name: **`fuzgit`**
 - Executable (binary) name: **`gz`**
 
-## Documentation
-
-**For per-command details, key bindings, network operations, exit codes, and design notes, see the
-documentation site.**
-
-- **<https://hatohato25.github.io/fuzgit/>** — landing page
-- **<https://hatohato25.github.io/fuzgit/docs.html>** — documentation (English / 日本語)
-
 ## Requirements
 
 - **`git` must be installed on your system (required)**
@@ -35,14 +27,9 @@ documentation site.**
 ### Homebrew (recommended)
 
 ```sh
-brew install hatohato25/fuzgit/fuzgit
-```
-
-Or tap first, then install:
-
-```sh
 brew tap hatohato25/fuzgit
-brew install fuzgit
+brew trust --formula hatohato25/fuzgit/fuzgit
+brew install hatohato25/fuzgit/fuzgit
 ```
 
 The formula is named `fuzgit`, but **the installed command is `gz`**.
@@ -52,6 +39,38 @@ gz --version
 ```
 
 Prebuilt binaries are provided for macOS (Apple Silicon / Intel) and Linux (x86_64).
+
+### Linux / WSL (install script)
+
+Homebrew is the macOS route; on Linux and WSL use the install script instead.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hatohato25/fuzgit/main/install.sh | sh
+```
+
+It downloads the release tarball for your machine, **verifies its SHA-256
+checksum**, and installs `gz` into `~/.local/bin` — no `sudo`, nothing written
+outside that directory. If `~/.local/bin` is not on your `PATH`, the script says
+so and prints the line to add; it does not edit your shell profile for you.
+
+Options:
+
+```sh
+# Install a specific release instead of the latest
+curl -fsSL .../install.sh | sh -s -- --version v0.5.0
+
+# Install somewhere else (may need sudo depending on the directory)
+curl -fsSL .../install.sh | sh -s -- --bin-dir /usr/local/bin
+```
+
+`FUZGIT_VERSION` and `FUZGIT_BIN_DIR` do the same thing as the two flags.
+
+Only **x86_64** is published for Linux today. On `aarch64` the script stops and
+tells you to build from source rather than installing a binary that cannot run.
+
+> Piping a script into a shell means running code you have not read. The script
+> is [`install.sh`](install.sh) in this repository — read it first if you would
+> rather, then run it locally.
 
 ### From source
 
@@ -235,7 +254,6 @@ way you learn the result**.
 | [`gz restore`](https://hatohato25.github.io/fuzgit/docs.html#restore) | Pick files to restore or unstage |
 | [`gz add`](https://hatohato25.github.io/fuzgit/docs.html#add) | Pick unstaged and untracked files to stage |
 | [`gz stash <subcommand>`](https://hatohato25.github.io/fuzgit/docs.html#stash) | Stash changes, then search stashes to apply or drop them |
-| [`gz tag`](https://hatohato25.github.io/fuzgit/docs.html#tag) | Pick a tag to print, switch to, or diff |
 | [`gz reflog`](https://hatohato25.github.io/fuzgit/docs.html#reflog) | Trace the HEAD reflog and recover lost commits (`--action` to pick what to do next) |
 | [`gz commit`](https://hatohato25.github.io/fuzgit/docs.html#commit) | Pick changed files and commit only those |
 | [`gz fixup`](https://hatohato25.github.io/fuzgit/docs.html#fixup) | Pick the commit to amend and create a fixup commit |

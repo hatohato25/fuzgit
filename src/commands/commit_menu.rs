@@ -178,8 +178,8 @@ fn show_args(id: &str) -> Vec<String> {
 
 /// `git switch --detach <id>` の引数を組み立てる。
 ///
-/// 末尾に `--` を付けないのは、既存の `gz tag --switch`（`tag.rs` の `switch_args`）が
-/// その形であり、FR-32 で新しい判断を持ち込まないためである（git はどちらの形も受け付ける）。
+/// 末尾に `--` を付けない。`git switch` はパスを取らないため付ける必要がなく、git は
+/// どちらの形も受け付ける（実測確認済み）。`show` / `reset` と形が揃わないのはこのためである。
 fn switch_args(id: &str) -> Vec<String> {
     ["switch", "--detach", id]
         .into_iter()
@@ -228,7 +228,7 @@ fn run_action(
                 .with_context(|| messages.commit_menu().show_failed(target.id))
         }
         // detached HEAD は元のブランチへ戻せば復旧でき、未コミットの変更と衝突する場合は
-        // git 自身が拒否するため、確認プロンプトは挟まない（`gz tag --switch` と揃える）
+        // git 自身が拒否するため、確認プロンプトは挟まない
         MenuAction::SwitchDetach => {
             let arguments = switch_args(target.id);
             let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn switch_keeps_the_shape_of_the_existing_tag_command() {
-        // `gz tag --switch`（`tag.rs` の `switch_args`）と同形。新しい判断を持ち込まない
+        // `git switch` はパスを取らないため `--` を付けない
         assert_eq!(switch_args(COMMIT_ID), ["switch", "--detach", COMMIT_ID]);
         assert!(
             !switch_args(COMMIT_ID)

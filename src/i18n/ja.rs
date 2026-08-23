@@ -8,7 +8,7 @@ use super::messages::{
     CommitMessages, CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
     FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, LogMessages,
     MergeMessages, Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages,
-    RevertMessages, StashMessages, StatusMessages, SyncMessages, TagMessages, WorktreeMessages,
+    RevertMessages, StashMessages, StatusMessages, SyncMessages, WorktreeMessages,
 };
 use crate::error::{Error, stderr_suffix};
 use crate::git::read::{BRANCH_REF_PREFIX, MalformedOutput, ReadOperation, WORKTREE_LABEL};
@@ -61,10 +61,6 @@ impl Messages for JapaneseMessages {
 
     fn file_selection(&self) -> &dyn FileSelectionMessages {
         &JapaneseFileSelectionMessages
-    }
-
-    fn tag(&self) -> &dyn TagMessages {
-        &JapaneseTagMessages
     }
 
     fn reflog(&self) -> &dyn ReflogMessages {
@@ -542,6 +538,10 @@ impl BranchManageMessages for JapaneseBranchManageMessages {
         format!("追跡: {upstream}")
     }
 
+    fn protected(&self) -> &'static str {
+        "幹のため未選択"
+    }
+
     fn no_tracking(&self) -> &'static str {
         "追跡なし"
     }
@@ -631,44 +631,6 @@ pub struct JapaneseFileSelectionMessages;
 impl FileSelectionMessages for JapaneseFileSelectionMessages {
     fn selection_not_found(&self, paths: &str) -> String {
         format!("選択されたファイル {paths} が候補に見つかりません")
-    }
-}
-
-/// `gz tag`（[`crate::commands::tag`]）の日本語表示。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JapaneseTagMessages;
-
-impl TagMessages for JapaneseTagMessages {
-    fn header_subject(&self) -> &'static str {
-        "タグを選択"
-    }
-
-    fn header_outcome_print(&self) -> &'static str {
-        "タグ名を出力"
-    }
-
-    fn header_outcome_switch(&self) -> &'static str {
-        "detached HEAD で切り替え"
-    }
-
-    fn header_outcome_diff(&self) -> &'static str {
-        "HEAD との差分を表示"
-    }
-
-    fn conflicting_actions(&self) -> &'static str {
-        "`--switch` と `--diff` は同時に指定できません"
-    }
-
-    fn selection_not_found(&self, selected: &str) -> String {
-        format!("選択されたタグ `{selected}` が候補に見つかりません")
-    }
-
-    fn switch_failed(&self, name: &str) -> String {
-        format!("タグ `{name}` への切り替えに失敗しました")
-    }
-
-    fn diff_failed(&self, name: &str) -> String {
-        format!("タグ `{name}` との差分表示に失敗しました")
     }
 }
 
@@ -1672,19 +1634,7 @@ impl CliMessages for JapaneseCliMessages {
         "stash を選択して破棄する"
     }
 
-    // `gz tag` / `gz reflog`
-
-    fn tag_about(&self) -> &'static str {
-        "タグを選択する（既定はタグ名を標準出力へ出す）"
-    }
-
-    fn tag_switch_help(&self) -> &'static str {
-        "選択したタグへ detached HEAD で切り替える"
-    }
-
-    fn tag_diff_help(&self) -> &'static str {
-        "選択したタグと HEAD の差分を表示する"
-    }
+    // `gz reflog`
 
     fn reflog_about(&self) -> &'static str {
         "HEAD の reflog を辿り、選択したコミットのハッシュを標準出力へ出す"
