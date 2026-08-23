@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use skim::prelude::*;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::error::{Error, Result};
 use crate::git::exec::{capture_git_display, capture_git_display_in};
@@ -36,6 +37,46 @@ const SECTION_HEADING_SUFFIX: &str = " ──";
 
 /// [`PreviewSource::Composite`] のセクション同士の区切り（見出しの前に空行を 1 行入れる）。
 const SECTION_SEPARATOR: &str = "\n\n";
+
+/// 枠（[`PreviewPanel`]）を描くために最低限必要なプレビュー幅。
+///
+/// これを下回る幅では罫線も右寄せも意味を成さず、本文の表示領域を削るだけになるため
+/// **枠を出さない**。幅が取れない端末で枠を優先しないという明示の決めであり、
+/// 枠を半端に描くことも、幅を仮定することもしない。
+const PANEL_MIN_WIDTH: usize = 20;
+
+/// 主キー（候補の表示文字列）と右端の指標の間に最低限空ける桁数。
+const PANEL_METRIC_GAP: usize = 1;
+
+/// 指標を残すために主キーを削ってよい下限の表示幅。
+///
+/// これを下回るところまで主キーが削られる場合は、指標の方を落として主キーを残す。
+/// 「いま何を見ているのか」が読めないプレビューには、指標だけあっても意味が無いため。
+const PANEL_MIN_IDENT_WIDTH: usize = 8;
+
+/// 幅に収まらなかった行の末尾に置く省略記号。
+const PANEL_ELLIPSIS: &str = "…";
+
+/// 枠の罫線に用いる文字。
+const PANEL_RULE: char = '─';
+
+/// 枠の 2 行目で項目同士を区切る記号。
+///
+/// [`crate::commands::COLUMN_SEPARATOR`] と同じく**装飾であって文言ではない**ため、
+/// 言語ごとの文言（`crate::i18n`）ではなくここに持つ。
+const PANEL_CONTEXT_SEPARATOR: &str = " · ";
+
+/// ANSI: 装飾をすべて解除する。
+const ANSI_RESET: &str = "\u{1b}[0m";
+
+/// ANSI: 前景を暗くする（枠の 2 行目と罫線）。
+///
+/// 色番号ではなく装飾（faint）を用いるのは、端末テーマの前景色をそのまま弱めるため。
+/// 「暗い灰色」を色番号で指定すると、明るいテーマで読めなくなる組み合わせが生じる。
+const ANSI_DIM: &str = "\u{1b}[2m";
+
+/// ANSI: エスケープ文字そのものを表示するための代替文字（U+241B SYMBOL FOR ESCAPE）。
+const ESCAPE_SYMBOL: char = '␛';
 
 /// 候補ごとのプレビュー内容の生成方法。
 ///
@@ -208,6 +249,20 @@ impl HighlightColor {
             Self::Yellow => Color::Yellow,
         }
     }
+
+    /// プレビュー本文へ埋め込む ANSI の前景色指定へ変換する。
+    ///
+    /// 候補一覧は ratatui の `Style` で描かれるのに対し、プレビューは
+    /// [`ItemPreview::AnsiText`] として渡す文字列であり、色の伝え方が異なる。
+    /// **同じ [`HighlightColor`] から両方を導く**ことで、一覧の色と枠 1 行目の色が
+    /// 食い違わないようにする。
+    fn to_ansi(self) -> &'static str {
+        match self {
+            Self::Green => "\u{1b}[32m",
+            Self::Red => "\u{1b}[31m",
+            Self::Yellow => "\u{1b}[33m",
+        }
+    }
 }
 
 /// 表示文字列のうち一部分を色付けする指定。
@@ -318,6 +373,219 @@ fn highlighted_style(style: Style, color: Option<HighlightColor>) -> Style {
     }
 }
 
+/// プレビューの先頭へ固定表示する枠。
+///
+/// どのコマンドでも同じ位置に同じ意味の行が来るようにするための型。構成は
+///
+/// 1. **主キーと指標** — 候補の表示文字列（[`FinderItem::display`]）をそのまま再掲し、
+///    右端へ指標を右寄せする
+/// 2. **文脈** — [`PANEL_CONTEXT_SEPARATOR`] で連ねた補足（空なら行ごと省く）
+/// 3. **罫線** — ここまでが枠、ここからが git の出力という境目
+///
+/// 1 行目の主キーは**この型が持たない**。一覧の行をそのまま再掲するのが決めであり、
+/// 別に持たせると一覧と枠が食い違い得るため、描画時に [`FinderItem`] から受け取る。
+///
+/// 枠の下に続く本文（[`PreviewSource`]）には手を入れない。git の出力をそのまま見せる
+/// という既存の性質を保つための分担であり、枠は本文の**上に乗るだけ**である。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreviewPanel {
+    /// 1 行目の右端へ右寄せする指標。無い場合は右端を空ける。
+    metric: Option<String>,
+    /// `metric` のうち色を付ける範囲（バイト位置）。
+    metric_highlights: Vec<Highlight>,
+    /// 2 行目に並べる補足。空文字の項目は描画時に取り除く。
+    context: Vec<String>,
+}
+
+impl PreviewPanel {
+    /// 指標も文脈も持たない枠（1 行目と罫線だけ）を作る。
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 1 行目の右端へ右寄せする指標を設定する。
+    ///
+    /// `highlights` は `metric` に対するバイト位置であり、一覧の色付け
+    /// （[`FinderItem::with_highlights`]）と同じ仕組みで指定する。
+    #[must_use]
+    pub fn with_metric(mut self, metric: String, highlights: Vec<Highlight>) -> Self {
+        self.metric = Some(metric);
+        self.metric_highlights = highlights;
+        self
+    }
+
+    /// 2 行目に並べる補足を設定する。
+    ///
+    /// 取れなかった項目は**空文字ではなく要素ごと落として**渡してよい。空文字の項目は
+    /// 区切り記号だけが並ぶことになるため、描画時に取り除く。
+    #[must_use]
+    pub fn with_context(mut self, context: Vec<String>) -> Self {
+        self.context = context;
+        self
+    }
+}
+
+/// 枠を組み立てる。返る文字列は末尾に改行を含まない。
+///
+/// `width` は skim が渡すプレビュー領域の幅（[`PreviewContext::width`]）。
+/// [`PANEL_MIN_WIDTH`] を下回る場合は枠を出さず `None` を返す。
+fn render_panel(
+    display: &str,
+    highlights: &[Highlight],
+    panel: &PreviewPanel,
+    width: usize,
+) -> Option<String> {
+    if width < PANEL_MIN_WIDTH {
+        return None;
+    }
+
+    let mut lines = vec![render_ident(display, highlights, panel, width)];
+    if let Some(context) = render_context(&panel.context, width) {
+        lines.push(context);
+    }
+    lines.push(render_rule(width));
+
+    Some(lines.join("\n"))
+}
+
+/// 枠の 1 行目（主キーと右寄せの指標）を組み立てる。
+///
+/// 幅に収まらない場合は**主キーの末尾**を省略して指標を残す。ただし主キーが
+/// [`PANEL_MIN_IDENT_WIDTH`] を下回るところまで削られる場合は、指標の方を落とす。
+fn render_ident(
+    display: &str,
+    highlights: &[Highlight],
+    panel: &PreviewPanel,
+    width: usize,
+) -> String {
+    let metric = panel.metric.as_deref().filter(|metric| !metric.is_empty());
+    let reserved = metric.map_or(0, |metric| metric.width() + PANEL_METRIC_GAP);
+
+    // 指標を置く余地があるかを先に決める。`width` は PANEL_MIN_WIDTH 以上であるため、
+    // 指標を落とした場合の主キーの幅は必ず PANEL_MIN_IDENT_WIDTH を上回る
+    let (limit, metric) = match width.checked_sub(reserved) {
+        Some(limit) if limit >= PANEL_MIN_IDENT_WIDTH => (limit, metric),
+        _ => (width, None),
+    };
+
+    let (kept, truncated) = fit(display, limit);
+    let mut line = colorize(&kept, highlights);
+    let mut used = kept.width();
+    if truncated {
+        // 省略記号は候補の文字ではないため、一覧の色は乗せない
+        line.push_str(PANEL_ELLIPSIS);
+        used += PANEL_ELLIPSIS.width();
+    }
+
+    let Some(metric) = metric else {
+        return line;
+    };
+
+    line.push_str(&" ".repeat(width.saturating_sub(used + metric.width())));
+    line.push_str(&colorize(metric, &panel.metric_highlights));
+
+    line
+}
+
+/// 枠の 2 行目（文脈）を組み立てる。項目が 1 つも無い場合は行ごと省く。
+fn render_context(context: &[String], width: usize) -> Option<String> {
+    let items: Vec<&str> = context
+        .iter()
+        .map(String::as_str)
+        .filter(|item| !item.trim().is_empty())
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+
+    let (kept, truncated) = fit(&items.join(PANEL_CONTEXT_SEPARATOR), width);
+    let ellipsis = if truncated { PANEL_ELLIPSIS } else { "" };
+
+    Some(format!("{ANSI_DIM}{kept}{ellipsis}{ANSI_RESET}"))
+}
+
+/// 枠の罫線を組み立てる。
+fn render_rule(width: usize) -> String {
+    let rule: String = std::iter::repeat_n(PANEL_RULE, width).collect();
+
+    format!("{ANSI_DIM}{rule}{ANSI_RESET}")
+}
+
+/// 表示幅が `limit` に収まる先頭部分と、切り詰めが起きたかどうかを返す。
+///
+/// 幅は文字数ではなく端末上の表示幅で測る（[`crate::commands`] の列揃えと同じ理由で、
+/// 全角文字を 1 桁と数えると桁が合わない）。切り詰めが起きる場合は
+/// [`PANEL_ELLIPSIS`] の分だけ手前で止めるため、呼び出し側が省略記号を足すと
+/// ちょうど `limit` に収まる。
+fn fit(text: &str, limit: usize) -> (String, bool) {
+    if text.width() <= limit {
+        return (text.to_owned(), false);
+    }
+
+    let budget = limit.saturating_sub(PANEL_ELLIPSIS.width());
+    let mut kept = String::new();
+    let mut used = 0;
+    for character in text.chars() {
+        // 幅を持たない文字（結合文字等）はそのまま残す。落とすと表示が壊れるため
+        let width = character.width().unwrap_or(0);
+        if used + width > budget {
+            break;
+        }
+        kept.push(character);
+        used += width;
+    }
+
+    (kept, true)
+}
+
+/// `highlights` で指定された範囲へ ANSI の前景色を乗せた文字列を返す。
+///
+/// 範囲は `text` に対するバイト位置であり、[`apply_highlights`]（候補一覧側）と同じ値を
+/// そのまま使える。`text` が切り詰められている場合でも、切り詰めるのは末尾だけであるため
+/// 先頭からのバイト位置はずれない。
+fn colorize(text: &str, highlights: &[Highlight]) -> String {
+    if highlights.is_empty() {
+        return text.to_owned();
+    }
+
+    let mut painted = String::with_capacity(text.len());
+    let mut current: Option<HighlightColor> = None;
+    for (index, character) in text.char_indices() {
+        let color = highlights
+            .iter()
+            .find(|highlight| highlight.contains(index))
+            .map(|highlight| highlight.color);
+        if color != current {
+            // 色が乗っていない範囲の前に解除を挟むと、無意味なエスケープ列が並ぶ
+            if current.is_some() {
+                painted.push_str(ANSI_RESET);
+            }
+            if let Some(color) = color {
+                painted.push_str(color.to_ansi());
+            }
+            current = color;
+        }
+        painted.push(character);
+    }
+    if current.is_some() {
+        painted.push_str(ANSI_RESET);
+    }
+
+    painted
+}
+
+/// 本文に含まれるエスケープ文字を表示用の記号へ置き換える。
+///
+/// 枠は ANSI として渡すため、本文も同じ扱いになる。git の出力は fuzgit 自身が
+/// `--color=always` を付けて色付けさせたものだが、**ローカルファイルの内容は
+/// fuzgit の管理外**であり、たまたま含まれたエスケープ列が装飾として解釈されると
+/// 表示が壊れる。読み取り上限での打ち切りと同じく「表示のためだけの加工」であり、
+/// git へ渡す値には一切影響しない。
+fn escape_ansi(text: &str) -> String {
+    text.replace('\u{1b}', &ESCAPE_SYMBOL.to_string())
+}
+
 /// fuzzy finder に渡す汎用の候補アイテム。
 #[derive(Debug, Clone)]
 pub struct FinderItem {
@@ -342,6 +610,12 @@ pub struct FinderItem {
     /// 色は描画時（[`SkimItem::display`]）にだけ乗せ、絞り込み対象の文字列は
     /// [`FinderItem::display`] のままにしておく。
     highlights: Vec<Highlight>,
+    /// プレビュー本文の先頭へ乗せる枠。`None` の場合は本文だけを出す。
+    ///
+    /// **既定は枠あり**（指標も文脈も無い、1 行目と罫線だけの枠）。1 行目は表示文字列を
+    /// 再掲するだけで追加の読み取りを要さないため、どのコマンドでも同じ枠が出ることを
+    /// 既定に置ける。指標・文脈を足す場合は [`FinderItem::with_panel`] を使う。
+    panel: Option<PreviewPanel>,
 }
 
 impl FinderItem {
@@ -362,6 +636,7 @@ impl FinderItem {
             preview,
             messages,
             highlights: Vec::new(),
+            panel: Some(PreviewPanel::new()),
         }
     }
 
@@ -372,10 +647,44 @@ impl FinderItem {
         self
     }
 
+    /// プレビューの先頭へ乗せる枠を設定する。
+    ///
+    /// 既定でも枠は出る（[`FinderItem::new`]）。指標や文脈を足す場合にだけ呼べばよい。
+    #[must_use]
+    pub fn with_panel(mut self, panel: PreviewPanel) -> Self {
+        self.panel = Some(panel);
+        self
+    }
+
+    /// プレビューの先頭へ枠を乗せない。
+    ///
+    /// 本文そのものが枠と同じ情報を先頭に持つ場合など、再掲が重複にしかならない候補で用いる。
+    #[must_use]
+    pub fn without_panel(mut self) -> Self {
+        self.panel = None;
+        self
+    }
+
     /// 決定時に返される値を取得する。
     #[must_use]
     pub fn key(&self) -> &str {
         &self.key
+    }
+
+    /// プレビュー本文を組み立てる。返る文字列は ANSI として解釈される前提。
+    ///
+    /// 失敗しても選択操作を止めず、表示用のメッセージを本文として返す
+    /// （[`render`] と同じ扱い）。
+    fn preview_body(&self) -> String {
+        match &self.preview {
+            PreviewSource::None => String::new(),
+            // ローカルファイルの内容は fuzgit の管理外であり、たまたま含まれた
+            // エスケープ列を装飾として解釈させない（[`escape_ansi`] を参照）
+            PreviewSource::File(path) => {
+                escape_ansi(&render_file(self.messages, path).unwrap_or_else(|message| message))
+            }
+            source => render(self.messages, source),
+        }
     }
 }
 
@@ -395,29 +704,22 @@ impl SkimItem for FinderItem {
         Cow::Borrowed(&self.key)
     }
 
-    fn preview(&self, _context: PreviewContext) -> ItemPreview {
-        match &self.preview {
-            PreviewSource::None => ItemPreview::Text(String::new()),
-            PreviewSource::Git(args) => match render_git(self.messages, args) {
-                Ok(text) => ItemPreview::AnsiText(text),
-                // プレビュー失敗で選択操作全体を中断させたくないため、
-                // エラー内容をプレビュー領域に表示するに留める
-                Err(message) => ItemPreview::Text(message),
-            },
-            PreviewSource::GitIn { directory, args } => {
-                match render_git_in(self.messages, directory, args) {
-                    Ok(text) => ItemPreview::AnsiText(text),
-                    Err(message) => ItemPreview::Text(message),
-                }
-            }
-            // ファイル内容は git の出力と違い色付けされていないため、そのまま表示する
-            PreviewSource::File(path) => ItemPreview::Text(
-                render_file(self.messages, path).unwrap_or_else(|message| message),
-            ),
-            // 連結結果には git の出力（色付き）が混ざり得るため ANSI として扱う
-            PreviewSource::Composite(sections) => {
-                ItemPreview::AnsiText(render_composite(self.messages, sections))
-            }
+    fn preview(&self, context: PreviewContext) -> ItemPreview {
+        // 本文を持たない候補には枠も出さない。プレビューを出さないという意思表示であり、
+        // 見出しだけの枠を出しても示せることが無いため
+        if self.preview == PreviewSource::None {
+            return ItemPreview::Text(String::new());
+        }
+
+        let body = self.preview_body();
+        let Some(panel) = &self.panel else {
+            return ItemPreview::AnsiText(body);
+        };
+
+        // 枠を描く幅が無い端末では本文を優先する（[`render_panel`] を参照）
+        match render_panel(&self.display, &self.highlights, panel, context.width) {
+            Some(header) => ItemPreview::AnsiText(format!("{header}\n{body}")),
+            None => ItemPreview::AnsiText(body),
         }
     }
 }
@@ -877,6 +1179,198 @@ mod tests {
         }
     }
 
+    /// 幅を指定してプレビュー生成のコンテキストを作る。
+    fn preview_context_of_width(width: usize) -> PreviewContext<'static> {
+        PreviewContext {
+            width,
+            ..preview_context()
+        }
+    }
+
+    /// 枠だけを取り出す（本文は罫線の次の行から始まる）。
+    fn panel_lines(text: &str) -> Vec<String> {
+        text.lines()
+            .take_while(|line| !line.contains(PANEL_RULE))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// 枠付きのプレビューを組み立てて本文を返す。
+    fn preview_text(item: &FinderItem, width: usize) -> String {
+        match item.preview(preview_context_of_width(width)) {
+            ItemPreview::AnsiText(text) => text,
+            _ => panic!("a framed preview must be ANSI text"),
+        }
+    }
+
+    /// 本文が固定のファイルを持つ候補を作る。
+    fn framed_item(dir: &crate::test_support::TempDir, display: &str) -> FinderItem {
+        FinderItem::new(
+            display.to_string(),
+            "key".to_string(),
+            text_section(dir, "body.txt", "body line\n"),
+            Language::Japanese.messages(),
+        )
+    }
+
+    #[test]
+    fn the_panel_repeats_the_candidate_line_and_rules_it_off_from_the_body() {
+        let dir = crate::test_support::TempDir::new("panel-ident");
+        let text = preview_text(&framed_item(&dir, "  feature/login"), 40);
+
+        let mut lines = text.lines();
+        assert_eq!(
+            lines.next(),
+            Some("  feature/login"),
+            "1 行目は候補の表示文字列をそのまま再掲する"
+        );
+        let rule = lines.next().expect("罫線が続く");
+        assert!(rule.contains(PANEL_RULE), "本文との境目は罫線: {rule:?}");
+        assert_eq!(lines.next(), Some("body line"), "罫線の次から本文");
+    }
+
+    #[test]
+    fn the_metric_is_flushed_to_the_right_edge_of_the_preview() {
+        let dir = crate::test_support::TempDir::new("panel-metric");
+        let item = framed_item(&dir, "main")
+            .with_panel(PreviewPanel::new().with_metric("↑3 ↓0".to_string(), Vec::new()));
+
+        let ident = preview_text(&item, 20)
+            .lines()
+            .next()
+            .expect("枠の 1 行目")
+            .to_owned();
+
+        assert_eq!(ident.width(), 20, "1 行目は幅いっぱいに広がる: {ident:?}");
+        assert!(ident.starts_with("main"), "主キーは左端: {ident:?}");
+        assert!(ident.ends_with("↑3 ↓0"), "指標は右端: {ident:?}");
+    }
+
+    #[test]
+    fn a_candidate_line_too_wide_for_the_preview_is_truncated_so_the_metric_survives() {
+        let dir = crate::test_support::TempDir::new("panel-truncate");
+        let item = framed_item(&dir, "feature/very-long-branch-name-that-will-not-fit")
+            .with_panel(PreviewPanel::new().with_metric("+48".to_string(), Vec::new()));
+
+        let ident = preview_text(&item, 24)
+            .lines()
+            .next()
+            .expect("枠の 1 行目")
+            .to_owned();
+
+        assert_eq!(ident.width(), 24, "幅を超えない: {ident:?}");
+        assert!(
+            ident.starts_with("feature/"),
+            "主キーの先頭は残る: {ident:?}"
+        );
+        assert!(
+            ident.contains(PANEL_ELLIPSIS),
+            "削った位置を省略記号で示す: {ident:?}"
+        );
+        assert!(ident.ends_with("+48"), "指標は残る: {ident:?}");
+    }
+
+    #[test]
+    fn a_metric_that_would_crowd_out_the_candidate_line_is_dropped_instead() {
+        let dir = crate::test_support::TempDir::new("panel-metric-dropped");
+        let item = framed_item(&dir, "src/session.rs").with_panel(
+            PreviewPanel::new().with_metric("staged +18 −2 / unstaged +6".to_string(), Vec::new()),
+        );
+
+        let ident = preview_text(&item, 20)
+            .lines()
+            .next()
+            .expect("枠の 1 行目")
+            .to_owned();
+
+        assert_eq!(
+            ident, "src/session.rs",
+            "主キーを削るより指標を落とす: {ident:?}"
+        );
+    }
+
+    #[test]
+    fn empty_context_items_are_dropped_and_an_empty_context_takes_no_line() {
+        let dir = crate::test_support::TempDir::new("panel-context");
+
+        let filled = framed_item(&dir, "main").with_panel(PreviewPanel::new().with_context(vec![
+            "origin/main".to_string(),
+            String::new(),
+            "2 時間前".to_string(),
+        ]));
+        let context = panel_lines(&preview_text(&filled, 40))
+            .get(1)
+            .expect("枠の 2 行目")
+            .to_owned();
+        assert!(
+            context.contains(&format!("origin/main{PANEL_CONTEXT_SEPARATOR}2 時間前")),
+            "空の項目は区切りごと落ちる: {context:?}"
+        );
+
+        let empty = framed_item(&dir, "main")
+            .with_panel(PreviewPanel::new().with_context(vec![String::new(), "  ".to_string()]));
+        assert_eq!(
+            panel_lines(&preview_text(&empty, 40)).len(),
+            1,
+            "項目が 1 つも無ければ 2 行目そのものを出さない"
+        );
+    }
+
+    #[test]
+    fn no_panel_is_drawn_when_the_preview_is_too_narrow_for_one() {
+        let dir = crate::test_support::TempDir::new("panel-narrow");
+        let item = framed_item(&dir, "main")
+            .with_panel(PreviewPanel::new().with_metric("↑3".to_string(), Vec::new()));
+
+        assert_eq!(
+            preview_text(&item, PANEL_MIN_WIDTH - 1),
+            "body line\n",
+            "枠を描く幅が無い端末では本文を優先する"
+        );
+    }
+
+    #[test]
+    fn the_candidate_colours_are_carried_into_the_first_line_of_the_panel() {
+        let dir = crate::test_support::TempDir::new("panel-colour");
+        let item = framed_item(&dir, "7c1e9a4 fix").with_highlights(vec![Highlight::new(
+            0,
+            7,
+            HighlightColor::Yellow,
+        )]);
+
+        let ident = preview_text(&item, 40)
+            .lines()
+            .next()
+            .expect("枠の 1 行目")
+            .to_owned();
+
+        assert!(
+            ident.starts_with(&format!(
+                "{yellow}7c1e9a4{ANSI_RESET}",
+                yellow = HighlightColor::Yellow.to_ansi()
+            )),
+            "一覧と同じ色が乗る: {ident:?}"
+        );
+    }
+
+    #[test]
+    fn escape_characters_in_a_previewed_file_are_shown_as_a_symbol() {
+        let dir = crate::test_support::TempDir::new("panel-escape");
+        let item = FinderItem::new(
+            "captured.log".to_string(),
+            "captured.log".to_string(),
+            text_section(&dir, "body.txt", "\u{1b}[31mred\u{1b}[0m\n"),
+            Language::Japanese.messages(),
+        )
+        .without_panel();
+
+        assert_eq!(
+            preview_text(&item, 40),
+            format!("{ESCAPE_SYMBOL}[31mred{ESCAPE_SYMBOL}[0m\n"),
+            "本文のエスケープ列は装飾として解釈させない"
+        );
+    }
+
     #[test]
     fn preview_of_a_non_previewable_item_is_empty_text() {
         let item = FinderItem::new(
@@ -982,14 +1476,15 @@ mod tests {
             "missing.txt".to_string(),
             PreviewSource::File(missing.clone()),
             Language::Japanese.messages(),
-        );
+        )
+        .without_panel();
 
         match item.preview(preview_context()) {
-            ItemPreview::Text(text) => assert!(
+            ItemPreview::AnsiText(text) => assert!(
                 text.contains(&missing.display().to_string()),
                 "the path should be named: {text}"
             ),
-            _ => panic!("a file preview must produce plain text"),
+            _ => panic!("a file preview must produce ANSI text"),
         }
     }
 
@@ -1008,7 +1503,8 @@ mod tests {
                 args: vec!["rev-parse".to_string(), "HEAD".to_string()],
             },
             Language::Japanese.messages(),
-        );
+        )
+        .without_panel();
 
         match item.preview(preview_context()) {
             ItemPreview::AnsiText(text) => assert_eq!(text.trim(), head),
@@ -1029,14 +1525,15 @@ mod tests {
                 args: vec!["fuzgit-no-such-subcommand".to_string()],
             },
             Language::Japanese.messages(),
-        );
+        )
+        .without_panel();
 
         match item.preview(preview_context()) {
-            ItemPreview::Text(message) => assert!(
+            ItemPreview::AnsiText(message) => assert!(
                 message.contains("fuzgit-no-such-subcommand"),
                 "the failing command should be named: {message}"
             ),
-            _ => panic!("a failing preview must produce plain text"),
+            _ => panic!("a failing preview must produce ANSI text"),
         }
     }
 
@@ -1174,7 +1671,8 @@ mod tests {
                 text_section(&dir, "staged.txt", "+staged line\n"),
             )]),
             Language::Japanese.messages(),
-        );
+        )
+        .without_panel();
 
         match item.preview(preview_context()) {
             ItemPreview::AnsiText(text) => {

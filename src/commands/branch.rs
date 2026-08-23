@@ -3,9 +3,12 @@
 use anyhow::{Context as _, Result, anyhow};
 
 use crate::commands::selection_header;
-use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one_with};
+use crate::finder::{
+    FinderItem, FinderOptions, Highlight, HighlightColor, PreviewPanel, PreviewSource,
+    SelectionMode, select_one_with,
+};
 use crate::git::exec::run_git;
-use crate::git::read::{BranchInfo, BranchScope, branches};
+use crate::git::read::{BranchDetail, BranchInfo, BranchScope, branch_details, branches};
 use crate::i18n::{Language, Messages};
 
 /// 現在のブランチを示すマーク（`git branch` と同じ `*`）。
@@ -16,6 +19,14 @@ const OTHER_MARK: &str = "  ";
 
 /// プレビューに表示する直近コミット数。
 const PREVIEW_COMMIT_COUNT: &str = "50";
+
+/// 枠の指標で「切り替えると増えるコミット数」を示す記号。
+///
+/// 記号は文言ではないため翻訳しない（`crate::commands::COLUMN_SEPARATOR` と同じ扱い）。
+const AHEAD_MARK: &str = "↑";
+
+/// 枠の指標で「切り替えると見えなくなるコミット数」を示す記号。
+const BEHIND_MARK: &str = "↓";
 
 /// ブランチ一覧から 1 件選び、そのブランチへ切り替える。
 ///
@@ -31,9 +42,12 @@ pub fn run(
     let candidates =
         branches(repository, scope).context(messages.common().branch_list_read_failed())?;
 
+    // 補足情報は 1 回の git 呼び出しで全ブランチ分をまとめて取る。プレビューは
+    // カーソル移動のたびに作り直されるため、候補ごとに git を起動しない
+    let details = branch_details(repository, language);
     let items = candidates
         .iter()
-        .map(|branch| to_item(language, branch))
+        .map(|branch| to_item(language, branch, details.get(&branch.name)))
         .collect();
     let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
         messages.branch().header_subject(),
@@ -82,13 +96,64 @@ fn preview_args(branch: &BranchInfo) -> Vec<String> {
 }
 
 /// ブランチを finder の候補へ変換する。
-fn to_item(language: Language, branch: &BranchInfo) -> FinderItem {
-    FinderItem::new(
+fn to_item(language: Language, branch: &BranchInfo, detail: Option<&BranchDetail>) -> FinderItem {
+    let item = FinderItem::new(
         display_line(branch),
         branch.name.clone(),
         PreviewSource::Git(preview_args(branch)),
         language.messages(),
-    )
+    );
+
+    match detail {
+        // 補足情報が取れなかったブランチは枠の 1 行目と罫線だけになる。
+        // 取れなかった項目を空欄で埋めるより、行ごと省くほうが読み取りを誤らせない
+        None => item,
+        Some(detail) => item.with_panel(panel(detail)),
+    }
+}
+
+/// ブランチの補足情報からプレビューの枠を組み立てる。
+fn panel(detail: &BranchDetail) -> PreviewPanel {
+    let (metric, highlights) = metric(detail);
+
+    PreviewPanel::new()
+        .with_metric(metric, highlights)
+        .with_context(
+            [
+                detail.upstream.clone(),
+                (!detail.committed.is_empty()).then(|| detail.committed.clone()),
+                (!detail.author.is_empty()).then(|| detail.author.clone()),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        )
+}
+
+/// 枠の右端へ出す指標（`↑3 ↓0`）と、その色付けを組み立てる。
+///
+/// **0 件の側には色を付けない**。増減が無いことは目印にする値ではなく、色を付けると
+/// 実際に増減があるブランチとの区別が付かなくなるため。
+fn metric(detail: &BranchDetail) -> (String, Vec<Highlight>) {
+    let ahead = format!("{AHEAD_MARK}{count}", count = detail.ahead);
+    let behind = format!("{BEHIND_MARK}{count}", count = detail.behind);
+    let metric = format!("{ahead} {behind}");
+
+    let mut highlights = Vec::new();
+    if detail.ahead > 0 {
+        highlights.push(Highlight::new(0, ahead.len(), HighlightColor::Green));
+    }
+    if detail.behind > 0 {
+        // 区切りの空白 1 文字を挟んで behind が始まる
+        let start = ahead.len() + 1;
+        highlights.push(Highlight::new(
+            start,
+            start + behind.len(),
+            HighlightColor::Red,
+        ));
+    }
+
+    (metric, highlights)
 }
 
 /// `git switch` へ渡すブランチ名を決める。
@@ -220,7 +285,50 @@ mod tests {
 
     #[test]
     fn an_item_keeps_the_branch_name_as_its_key() {
-        let item = to_item(Language::Japanese, &remote("origin/main"));
+        let item = to_item(Language::Japanese, &remote("origin/main"), None);
+
+        assert_eq!(item.key(), "origin/main");
+    }
+
+    /// 補足情報 1 件分（値は各テストで上書きする）。
+    fn detail(ahead: usize, behind: usize) -> BranchDetail {
+        BranchDetail {
+            upstream: Some("origin/feature".to_owned()),
+            ahead,
+            behind,
+            committed: "2 hours ago".to_owned(),
+            author: "Mika Tanaka".to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_metric_counts_what_switching_would_gain_and_lose() {
+        let (text, _) = metric(&detail(3, 0));
+
+        assert_eq!(text, "↑3 ↓0");
+    }
+
+    #[test]
+    fn only_a_non_zero_side_of_the_metric_is_coloured() {
+        let (text, highlights) = metric(&detail(3, 0));
+
+        assert_eq!(
+            highlights,
+            vec![Highlight::new(0, "↑3".len(), HighlightColor::Green)],
+            "増減の無い側に色を付けると、実際に増減がある候補と見分けが付かなくなる: {text}"
+        );
+
+        let (_, both) = metric(&detail(3, 2));
+        assert_eq!(both.len(), 2, "両側に増減があれば両方に色が付く");
+
+        let (_, neither) = metric(&detail(0, 0));
+        assert!(neither.is_empty(), "増減が無ければ色は付かない");
+    }
+
+    #[test]
+    fn a_branch_without_details_still_gets_the_plain_frame() {
+        // 補足が取れないことを理由に選択そのものを止めない（枠は 1 行目と罫線だけになる）
+        let item = to_item(Language::Japanese, &remote("origin/main"), None);
 
         assert_eq!(item.key(), "origin/main");
     }

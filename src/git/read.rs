@@ -14,7 +14,7 @@ use std::path::Path;
 use gix::bstr::{BStr, ByteSlice as _};
 
 use crate::error::{Error, Result};
-use crate::git::exec::{capture_git_in, capture_git_with_status_in};
+use crate::git::exec::{capture_git_display_in, capture_git_in, capture_git_with_status_in};
 use crate::git::repo::workdir;
 
 /// 候補に含めるブランチの範囲。
@@ -406,6 +406,104 @@ pub fn branches(repository: &gix::Repository, scope: BranchScope) -> Result<Vec<
         reject_unborn_head(repository)?;
     }
     Ok(locals)
+}
+
+/// ブランチ 1 件分の補足情報（プレビューの枠に出す値）。
+///
+/// [`BranchInfo`] と分けているのは取得経路が違うため。一覧そのものは `gix` で読むが、
+/// ここは `git for-each-ref` 1 回で全ブランチ分をまとめて取る。プレビューは
+/// カーソル移動のたびに作り直されるため、**候補 1 件ごとに git を起動しない**ことが要件になる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchDetail {
+    /// 追跡先の短縮名（`origin/main` 等）。追跡先が無い場合は `None`。
+    pub upstream: Option<String>,
+    /// HEAD に無くこのブランチにあるコミット数（＝切り替えると増える数）。
+    pub ahead: usize,
+    /// このブランチに無く HEAD にあるコミット数（＝切り替えると見えなくなる数）。
+    pub behind: usize,
+    /// 最終コミットの相対日時（`2 hours ago` 等）。**表示専用**であり git が翻訳する。
+    pub committed: String,
+    /// 最終コミットの作者名。
+    pub author: String,
+}
+
+/// `for-each-ref` の書式でフィールドを区切る文字。
+///
+/// 作者名・相対日時のいずれにも現れ得ない値として NUL を用いる。
+const DETAIL_FIELD_SEPARATOR: char = '\0';
+
+/// 全ブランチの補足情報を `git for-each-ref` 1 回で取得する。
+///
+/// 返る [`HashMap`] のキーは [`BranchInfo::name`] と同じ短縮名。
+///
+/// **取得できなかった場合は空の [`HashMap`] を返す**（`Err` にしない）。この情報は
+/// プレビューの補足であり、得られないことを理由にブランチの選択そのものを止めるべきでは
+/// ないため。`gz merge` のコンフリクト予測（`commands::merge::predict_conflicts`）と
+/// 同じ扱いであり、`git --version` の解釈で分岐しないのも同じ理由による
+/// （`%(ahead-behind:…)` は Git 2.41 以降でのみ使えるが、得られない理由はそれだけではない）。
+///
+/// 相対日時は git が表示言語に応じて訳すため、実行は **(B) 系**
+/// （[`capture_git_display_in`]）で行い、解決された表示言語を子プロセスへ伝える。
+#[must_use]
+pub fn branch_details(
+    repository: &gix::Repository,
+    language: crate::i18n::Language,
+) -> HashMap<String, BranchDetail> {
+    let Ok(workdir) = workdir(repository) else {
+        return HashMap::new();
+    };
+
+    let format = format!(
+        "--format=%(refname:short){separator}%(upstream:short){separator}\
+%(ahead-behind:HEAD){separator}%(committerdate:relative){separator}%(authorname)",
+        separator = "%00",
+    );
+    let Ok(output) = capture_git_display_in(
+        language,
+        workdir,
+        &["for-each-ref", &format, "refs/heads", "refs/remotes"],
+    ) else {
+        return HashMap::new();
+    };
+
+    String::from_utf8_lossy(&output)
+        .lines()
+        .filter_map(parse_branch_detail)
+        .collect()
+}
+
+/// `for-each-ref` の 1 行を短縮名と補足情報の対へ解釈する。
+///
+/// 想定した数のフィールドが並んでいない行は読み飛ばす。補足情報であり、
+/// 1 行の解釈に失敗したことでブランチ一覧全体を落とさないため。
+fn parse_branch_detail(line: &str) -> Option<(String, BranchDetail)> {
+    let mut fields = line.split(DETAIL_FIELD_SEPARATOR);
+    let name = fields.next()?;
+    let upstream = fields.next()?;
+    let ahead_behind = fields.next()?;
+    let committed = fields.next()?;
+    let author = fields.next()?;
+
+    if name.is_empty() {
+        return None;
+    }
+
+    // `%(ahead-behind:HEAD)` は「<ahead> <behind>」の 2 整数。比較できない参照では空になる
+    let (ahead, behind) = match ahead_behind.split_once(' ') {
+        Some((ahead, behind)) => (ahead.parse().ok()?, behind.parse().ok()?),
+        None => (0, 0),
+    };
+
+    Some((
+        name.to_owned(),
+        BranchDetail {
+            upstream: (!upstream.is_empty()).then(|| upstream.to_owned()),
+            ahead,
+            behind,
+            committed: committed.to_owned(),
+            author: author.to_owned(),
+        },
+    ))
 }
 
 /// 現在のブランチを除いたブランチ一覧（ローカル・リモート追跡）を取得する。
@@ -2019,6 +2117,79 @@ mod tests {
         let all = branches(&repository, BranchScope::All).expect("branches should be read");
 
         assert_eq!(names(&all), ["main", "origin/main"]);
+    }
+
+    #[test]
+    fn a_detail_line_without_every_field_is_skipped() {
+        // 補足情報の 1 行を読み損ねても、ブランチ一覧そのものは落とさない
+        assert!(parse_branch_detail(&detail_line(&["main", "origin/main"])).is_none());
+        assert!(
+            parse_branch_detail(&detail_line(&["", "", "", "", ""])).is_none(),
+            "名前の無い行は捨てる"
+        );
+    }
+
+    /// `for-each-ref` の 1 行を組み立てる（区切りは実装と同じ定数から作る）。
+    fn detail_line(fields: &[&str]) -> String {
+        fields.join(&DETAIL_FIELD_SEPARATOR.to_string())
+    }
+
+    #[test]
+    fn a_detail_line_keeps_an_absent_upstream_absent() {
+        let (name, detail) = parse_branch_detail(&detail_line(&[
+            "feature",
+            "",
+            "0 0",
+            "2 hours ago",
+            "Mika Tanaka",
+        ]))
+        .expect("読み取れる");
+
+        assert_eq!(name, "feature");
+        assert_eq!(detail.upstream, None, "追跡先が無い場合は空文字にしない");
+        assert_eq!(detail.committed, "2 hours ago");
+        assert_eq!(detail.author, "Mika Tanaka");
+    }
+
+    #[test]
+    fn ahead_and_behind_are_read_as_the_two_counts_git_prints() {
+        let (_, detail) = parse_branch_detail(&detail_line(&[
+            "feature",
+            "origin/feature",
+            "3 2",
+            "now",
+            "t",
+        ]))
+        .expect("読み取れる");
+
+        assert_eq!((detail.ahead, detail.behind), (3, 2));
+    }
+
+    #[test]
+    fn a_reference_git_cannot_compare_counts_as_no_difference() {
+        // `%(ahead-behind:HEAD)` は比較できない参照では空になる
+        let (_, detail) =
+            parse_branch_detail(&detail_line(&["feature", "origin/feature", "", "now", "t"]))
+                .expect("読み取れる");
+
+        assert_eq!((detail.ahead, detail.behind), (0, 0));
+    }
+
+    #[test]
+    fn branch_details_are_read_for_every_branch_in_one_call() {
+        let dir = TempDir::new("read-branch-details");
+        init_repository(dir.path());
+        commit(dir.path(), "first");
+        let repository = discover(dir.path()).expect("test repository should be discoverable");
+
+        let details = branch_details(&repository, crate::i18n::Language::English);
+
+        let main = details
+            .get("main")
+            .expect("the current branch should have details");
+        assert_eq!((main.ahead, main.behind), (0, 0), "HEAD 自身に増減は無い");
+        assert!(!main.author.is_empty(), "作者名が読めている");
+        assert!(!main.committed.is_empty(), "相対日時が読めている");
     }
 
     #[test]
