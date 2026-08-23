@@ -22,7 +22,7 @@ use fuzgit::i18n::messages::CliMessages;
 const BIN_NAME: &str = "gz";
 
 /// `gz` のすべてのサブコマンド名。ヘルプ出力の検証に用いる。
-const SUBCOMMANDS: [&str; 18] = [
+const SUBCOMMANDS: [&str; 17] = [
     "branch",
     "log",
     "cherry-pick",
@@ -39,7 +39,6 @@ const SUBCOMMANDS: [&str; 18] = [
     "diff",
     "fetch",
     "pull",
-    "sync",
     "worktree",
 ];
 
@@ -407,7 +406,6 @@ fn help_targets(cli: &dyn CliMessages) -> Vec<(&'static [&'static str], &'static
         (&["diff"], cli.diff_about()),
         (&["fetch"], cli.fetch_about()),
         (&["pull"], cli.pull_about()),
-        (&["sync"], cli.sync_about()),
         (&["worktree"], cli.worktree_about()),
         (&["worktree", "add"], cli.worktree_add_about()),
         (&["worktree", "remove"], cli.worktree_remove_about()),
@@ -1002,7 +1000,7 @@ fn the_new_comparison_and_integration_options_are_mutually_exclusive() {
         vec!["diff", "--staged", "--head"],
         vec!["diff", "--branch", "--commit"],
         vec!["diff", "--upstream", "--staged"],
-        vec!["sync", "--rebase", "--merge"],
+        vec!["pull", "--rebase", "--merge"],
     ];
 
     for arguments in combinations {
@@ -2003,15 +2001,11 @@ fn pull_documents_the_fast_forward_only_integration_and_takes_no_arguments() {
 /// （ローカルの bare リポジトリを remote に設定した使い捨てリポジトリ）で確認する。
 /// ここで検証するのは、対象を推測して別のリモート・ブランチへ倒さないこと。
 #[test]
-fn sync_requires_an_upstream_before_reaching_the_network() {
-    let dir = empty_repository("sync-upstream-missing");
+fn pull_with_a_mode_requires_an_upstream_before_reaching_the_network() {
+    let dir = empty_repository("pull-upstream-missing");
     commit_in(dir.path(), "a.txt", "first\n", "first commit");
 
-    for arguments in [
-        vec!["sync"],
-        vec!["sync", "--rebase"],
-        vec!["sync", "--merge"],
-    ] {
+    for arguments in [vec!["pull", "--rebase"], vec!["pull", "--merge"]] {
         let output = gz()
             .args(&arguments)
             .current_dir(dir.path())
@@ -2043,15 +2037,15 @@ fn sync_requires_an_upstream_before_reaching_the_network() {
     // detached HEAD にはそもそも upstream の設定が無く、原因が異なるため別のメッセージにする
     git_in(dir.path(), &["switch", "--quiet", "--detach", "HEAD"]);
     let output = gz()
-        .arg("sync")
+        .args(["pull", "--rebase"])
         .current_dir(dir.path())
         .timeout(FINDER_GUARD_TIMEOUT)
         .output()
-        .expect("failed to run gz sync on a detached HEAD");
+        .expect("failed to run gz pull --rebase on a detached HEAD");
 
     assert!(
         !output.status.success(),
-        "gz sync should exit non-zero on a detached HEAD"
+        "gz pull --rebase should exit non-zero on a detached HEAD"
     );
 
     let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
@@ -2061,17 +2055,18 @@ fn sync_requires_an_upstream_before_reaching_the_network() {
     );
 }
 
-/// `gz sync` の取り込み方式がフラグで、取得先を引数で指定できないことを確認する。
+/// `gz pull` の取り込み方式がフラグで、取得先を引数で指定できないことを確認する。
 ///
-/// 対象は現在ブランチの upstream に固定する設計であり、コマンドラインから選ばせない。
+/// `--rebase` / `--merge` の対象は現在ブランチの upstream に固定する設計であり、
+/// コマンドラインから選ばせない。
 #[test]
-fn sync_documents_its_integration_modes_and_takes_no_target_argument() {
+fn pull_documents_its_integration_modes_and_takes_no_target_argument() {
     let output = gz()
-        .args(["sync", "--help"])
+        .args(["pull", "--help"])
         .output()
-        .expect("failed to run gz sync --help");
+        .expect("failed to run gz pull --help");
 
-    assert!(output.status.success(), "gz sync --help should succeed");
+    assert!(output.status.success(), "gz pull --help should succeed");
 
     let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
     for option in ["--rebase", "--merge"] {
@@ -2081,12 +2076,12 @@ fn sync_documents_its_integration_modes_and_takes_no_target_argument() {
         );
     }
 
-    let dir = empty_repository("sync-positional");
+    let dir = empty_repository("pull-positional");
     let output = gz()
-        .args(["sync", "origin"])
+        .args(["pull", "origin"])
         .current_dir(dir.path())
         .output()
-        .expect("failed to run gz sync origin");
+        .expect("failed to run gz pull origin");
     assert!(
         !output.status.success(),
         "the target is the upstream, not a command line argument"

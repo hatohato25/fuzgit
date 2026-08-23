@@ -11,10 +11,10 @@ use crate::commands::diff::DiffMode;
 use crate::commands::fetch::{FetchScope, PruneMode};
 use crate::commands::fixup::FixupKind;
 use crate::commands::merge::MergeMode;
+use crate::commands::pull::PullMode;
 use crate::commands::restore::RestoreTarget;
 use crate::commands::revert::MessageEditing;
 use crate::commands::stash::{StashAction, UntrackedFiles};
-use crate::commands::sync::SyncMode;
 use crate::error;
 use crate::finder::{Highlight, HighlightColor};
 use crate::git::read::{BranchScope, CommitInfo, CommitScope};
@@ -41,7 +41,6 @@ pub mod restore;
 pub mod revert;
 pub mod stash;
 pub mod status;
-pub mod sync;
 pub mod worktree;
 pub mod worktree_claude;
 pub mod worktree_install;
@@ -373,12 +372,11 @@ pub fn dispatch(
             };
             fetch::run(language, messages, &repository, scope, prune)
         }
-        Command::Pull => pull::run(language, messages, &repository),
-        Command::Sync { rebase, merge } => sync::run(
+        Command::Pull { rebase, merge } => pull::run(
             language,
             messages,
             &repository,
-            SyncMode::from_flags(messages, *rebase, *merge)?,
+            PullMode::from_flags(messages, *rebase, *merge)?,
         ),
         Command::Worktree { command } => {
             worktree::run(language, messages, &repository, command.as_ref())

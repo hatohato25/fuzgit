@@ -78,7 +78,6 @@
           <li><a href="#diff">gz diff</a></li>
           <li><a href="#fetch">gz fetch</a></li>
           <li><a href="#pull">gz pull</a></li>
-          <li><a href="#sync">gz sync</a></li>
           <li><a href="#worktree">gz worktree</a></li>
         </ul>
 
@@ -346,7 +345,7 @@ cargo install --path .</code></pre>
               <strong>An option gets a short form only when git itself spells it
               the same way</strong> &mdash; <code>gz restore -S</code>
               (<code>git restore -S</code>), <code>gz fetch -p</code>
-              (<code>git fetch -p</code>), <code>gz sync -r</code>
+              (<code>git fetch -p</code>), <code>gz pull -r</code>
               (<code>git pull -r</code>), <code>gz branch delete -f</code>
               (<code>git branch -f</code>) and so on. fuzgit-specific options are
               long-only, and a letter git already uses for something else is
@@ -359,7 +358,7 @@ cargo install --path .</code></pre>
               <strong>オプションの短縮形は、git 本体に同じ意味の綴りがあるものだけに
               付けています</strong>（<code>gz restore -S</code> =
               <code>git restore -S</code>、<code>gz fetch -p</code> =
-              <code>git fetch -p</code>、<code>gz sync -r</code> =
+              <code>git fetch -p</code>、<code>gz pull -r</code> =
               <code>git pull -r</code>、<code>gz branch delete -f</code> =
               <code>git branch -f</code> など）。fuzgit 固有のオプションは長い綴りだけとし、
               git が別の意味で使っている文字は流用しません。<code>gz worktree add</code> に
@@ -516,14 +515,6 @@ cargo install --path .</code></pre>
                     <span lang="ja">ブランチを選んで upstream へまとめて追随させる（fast-forward のみ。<strong>ネットワークを使う</strong>）</span>
                   </td>
                   <td><span lang="en">multiple</span><span lang="ja">複数</span></td>
-                </tr>
-                <tr>
-                  <td><a href="#sync"><code>gz sync</code></a></td>
-                  <td>
-                    <span lang="en">Sync the current branch with its upstream (<strong>uses the network</strong>)</span>
-                    <span lang="ja">現在ブランチを upstream と同期する（<strong>ネットワークを使う</strong>）</span>
-                  </td>
-                  <td><span lang="en">none</span><span lang="ja">選択なし</span></td>
                 </tr>
                 <tr>
                   <td><a href="#worktree"><code>gz worktree</code></a></td>
@@ -1767,14 +1758,14 @@ gz merge --ff-only   # fast-forward できる場合のみ merge する</code></p
 
         <section id="recovery">
           <h2>
-            <span lang="en">The recovery menu for conflicts (<code>gz merge</code> / <code>gz rebase</code> / <code>gz sync</code> / <code>gz pull</code>)</span>
-            <span lang="ja">コンフリクト時の復帰メニュー（<code>gz merge</code> / <code>gz rebase</code> / <code>gz sync</code> / <code>gz pull</code>）</span>
+            <span lang="en">The recovery menu for conflicts (<code>gz merge</code> / <code>gz rebase</code> / <code>gz pull</code>)</span>
+            <span lang="ja">コンフリクト時の復帰メニュー（<code>gz merge</code> / <code>gz rebase</code> / <code>gz pull</code>）</span>
             <a class="anchor" href="#recovery" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
             <p>
               Running <code>gz merge</code> / <code>gz rebase</code> /
-              <code>gz sync</code> / <code>gz pull</code> while a merge or rebase
+              <code>gz pull</code> while a merge or rebase
               is in progress shows a <strong>recovery menu</strong> instead of the
               usual flow. <strong>Its contents are decided by the operation that
               is in progress</strong> (running <code>gz merge</code> during a
@@ -1820,7 +1811,7 @@ gz merge --ff-only   # fast-forward できる場合のみ merge する</code></p
           <div lang="ja">
             <p>
               merge / rebase が進行中の状態で <code>gz merge</code> / <code>gz rebase</code> /
-              <code>gz sync</code> / <code>gz pull</code> を実行すると、通常のフローではなく
+              <code>gz pull</code> を実行すると、通常のフローではなく
               <strong>復帰メニュー</strong>が表示されます。メニューの内容は
               <strong>進行中の操作の種類で決まります</strong>（rebase 進行中に
               <code>gz merge</code> を実行しても rebase のメニューが出ます）。
@@ -2619,7 +2610,7 @@ fatal: Could not read from remote repository.
                 <code>*&nbsp;</code> (as in <code>gz branch</code>), and starts
                 selected</strong> (<kbd>Tab</kbd> deselects it). On a detached
                 HEAD there is simply no current branch, and the other branches are
-                offered as usual (unlike <a href="#sync"><code>gz sync</code></a>,
+                offered as usual (unlike <code>gz pull --rebase</code> / <code>--merge</code>,
                 this is not an error).
                 <pre><code>$ gz pull
 The current branch is preselected. Tab: toggle the selection / Enter: integrate with a fast-forward only  |  2 excluded (no upstream / remote not registered / in use by another worktree)
@@ -2700,10 +2691,10 @@ Integrating `main` (there is only one candidate, so the selection was skipped)
 [3/4] diverged
 [4/4] zeta
 3 succeeded / 1 failed (failed: diverged)
-A branch that could not fast-forward can be integrated with `gz sync --rebase` or `gz sync --merge` after switching to it
+A branch that could not fast-forward can be integrated with `gz pull --rebase` or `gz pull --merge` after switching to it
 error: Integrating failed for some branches</code></pre>
                 It only points at it &mdash;
-                <strong><code>gz sync</code> is never started
+                <strong>a rebase or merge is never started
                 automatically</strong>. How history is integrated (rebase or
                 merge) stays an explicit user choice.
               </li>
@@ -2715,28 +2706,42 @@ error: Integrating failed for some branches</code></pre>
                 commits nor working tree changes (the same judgement as
                 <code>gz fetch --siblings</code>).
               </li>
-              <li>Run while a merge or rebase is in progress, it shows the <a href="#recovery">recovery menu</a> instead of the branch selection (same as <code>gz sync</code>).</li>
+              <li>Run while a merge or rebase is in progress, it shows the <a href="#recovery">recovery menu</a> instead of the branch selection.</li>
             </ul>
 
-            <h3><code>gz pull</code> vs <code>gz sync</code></h3>
+            <h3>Two shapes: fast-forward in bulk, or one branch your way</h3>
             <div class="table-wrap">
               <table>
-                <thead><tr><th scope="col">Aspect</th><th scope="col"><code>gz pull</code></th><th scope="col"><code>gz sync</code></th></tr></thead>
+                <thead><tr><th scope="col">Aspect</th><th scope="col"><code>gz pull</code></th><th scope="col"><code>gz pull --rebase</code> / <code>--merge</code></th></tr></thead>
                 <tbody>
                   <tr><td>Target</td><td><strong>Several local branches</strong> that you pick</td><td><strong>The current branch only</strong> (fixed to its upstream)</td></tr>
-                  <tr><td>Integration</td><td>Fast-forward only (fixed)</td><td>Selectable with <code>--rebase</code> / <code>--merge</code> (default: fast-forward only)</td></tr>
-                  <tr><td>Selection UI</td><td>Multi-select of branches</td><td>None</td></tr>
+                  <tr><td>Integration</td><td>Fast-forward only</td><td>Rebase onto, or merge, the upstream</td></tr>
+                  <tr><td>Selection UI</td><td>Multi-select of branches</td><td>None &mdash; there is nothing to pick</td></tr>
                   <tr><td>Confirmation prompt</td><td>No</td><td>Yes</td></tr>
                 </tbody>
               </table>
             </div>
             <p>
-              <strong>Use <code>gz pull</code> to bring several branches along at
-              once, and <code>gz sync</code> to integrate a single branch with a
-              method of your choice.</strong> A branch that <code>gz pull</code>
-              could not fast-forward is integrated by switching to it and running
-              <code>gz sync --rebase</code> / <code>gz sync --merge</code>.
+              A branch that plain <code>gz pull</code> could not fast-forward is
+              integrated by switching to it and running
+              <code>gz pull --rebase</code> or <code>gz pull --merge</code>.
             </p>
+            <p>
+              The reason <code>--rebase</code> / <code>--merge</code> cover only
+              the current branch is mechanical: a branch that is not checked out
+              can be moved along by copying a ref
+              (<code>git fetch . &lt;tracking&gt;:refs/heads/&lt;branch&gt;</code>),
+              which is fast-forward by definition. Rebasing or merging it would
+              mean switching the working tree, or creating a temporary worktree
+              &mdash; both of which put work you have in progress at risk.
+            </p>
+            <blockquote>
+              <p>
+                These two flags used to be a separate command, <code>gz sync</code>,
+                removed in favour of folding them in here so that
+                &ldquo;bring changes in&rdquo; is one command rather than two.
+              </p>
+            </blockquote>
           </div>
 
           <div lang="ja">
@@ -2773,7 +2778,7 @@ error: Integrating failed for some branches</code></pre>
                 <strong>現在のブランチは一覧の先頭に置き、行頭を <code>*&nbsp;</code>
                 （<code>gz branch</code> と同じ）でマークして、起動時から選択済み</strong>にします
                 （<kbd>Tab</kbd> で外せます）。detached HEAD の場合は現在のブランチが無いだけで、
-                他のブランチは通常どおり候補になります（<a href="#sync"><code>gz sync</code></a> と
+                他のブランチは通常どおり候補になります（<code>gz pull --rebase</code> / <code>--merge</code> と
                 違いエラーにはしません）。
                 <pre><code>$ gz pull
 現在のブランチを選択済みにしています。Tab: 選択の切替 / Enter: fast-forward のみで取り込み  |  除外 2 件（upstream 未設定 / リモート未登録 / 他の worktree で使用中）
@@ -2841,9 +2846,9 @@ error: Integrating failed for some branches</code></pre>
 [3/4] diverged
 [4/4] zeta
 成功 3 件 / 失敗 1 件（失敗: diverged）
-fast-forward できなかったブランチは、そのブランチへ切り替えてから `gz sync --rebase` または `gz sync --merge` で取り込めます
+fast-forward できなかったブランチは、そのブランチへ切り替えてから `gz pull --rebase` または `gz pull --merge` で取り込めます
 エラー: 一部のブランチで取り込みに失敗しました</code></pre>
-                案内するだけで、<strong><code>gz sync</code> を自動起動することはありません</strong>。
+                案内するだけで、<strong>rebase や merge を自動で始めることはありません</strong>。
                 履歴の統合方法（rebase か merge か）はユーザーの明示指定に限ります。
               </li>
               <li>
@@ -2858,142 +2863,42 @@ fast-forward できなかったブランチは、そのブランチへ切り替�
               </li>
               <li>
                 merge / rebase が進行中の状態で実行した場合は、ブランチ選択ではなく
-                <a href="#recovery">復帰メニュー</a>が表示されます（<code>gz sync</code> と同じ）。
+                <a href="#recovery">復帰メニュー</a>が表示されます。
               </li>
             </ul>
 
-            <h3><code>gz sync</code> との使い分け</h3>
+            <h3>2 つの形 &mdash; まとめて fast-forward か、1 本を方式を選んで取り込むか</h3>
             <div class="table-wrap">
               <table>
-                <thead><tr><th scope="col">観点</th><th scope="col"><code>gz pull</code></th><th scope="col"><code>gz sync</code></th></tr></thead>
+                <thead><tr><th scope="col">観点</th><th scope="col"><code>gz pull</code></th><th scope="col"><code>gz pull --rebase</code> / <code>--merge</code></th></tr></thead>
                 <tbody>
-                  <tr><td>対象</td><td>選んだ<strong>複数のローカルブランチ</strong></td><td><strong>現在のブランチ 1 本</strong>（upstream 固定）</td></tr>
-                  <tr><td>取り込み方式</td><td>fast-forward のみ（固定）</td><td><code>--rebase</code> / <code>--merge</code> で選べる（既定は fast-forward のみ）</td></tr>
-                  <tr><td>選択 UI</td><td>ブランチの複数選択</td><td>なし</td></tr>
-                  <tr><td>確認プロンプト</td><td>なし</td><td>あり</td></tr>
+                  <tr><td>対象</td><td>選んだ<strong>複数のローカルブランチ</strong></td><td><strong>現在のブランチのみ</strong>（upstream に固定）</td></tr>
+                  <tr><td>取り込み方式</td><td>fast-forward のみ</td><td>upstream へ rebase、または merge</td></tr>
+                  <tr><td>選択 UI</td><td>ブランチの複数選択</td><td>無し &mdash; 選ぶものが無いため</td></tr>
+                  <tr><td>確認プロンプト</td><td>無し</td><td>あり</td></tr>
                 </tbody>
               </table>
             </div>
             <p>
-              <strong>まとめて追随させたいときは <code>gz pull</code>、方式を選んで 1 本だけ
-              取り込みたいときは <code>gz sync</code></strong> です。<code>gz pull</code> で
-              fast-forward できなかったブランチは、そのブランチへ切り替えてから
-              <code>gz sync --rebase</code> / <code>gz sync --merge</code> で取り込みます。
+              フラグ無しの <code>gz pull</code> で fast-forward できなかったブランチは、
+              そのブランチへ切り替えてから <code>gz pull --rebase</code> または
+              <code>gz pull --merge</code> で取り込みます。
             </p>
-          </div>
-        </section>
-
-        <section id="sync">
-          <h2>
-            <span lang="en"><code>gz sync</code> &mdash; syncing with the upstream</span>
-            <span lang="ja"><code>gz sync</code> &mdash; upstream との同期</span>
-            <a class="anchor" href="#sync" aria-label="Link to this section">#</a>
-          </h2>
-          <div lang="en">
-            <pre><code>gz sync            # fetch, then fast-forward (default)
-gz sync --rebase   # fetch, then rebase onto the upstream (rewrites history)
-gz sync --merge    # fetch, then merge the upstream</code></pre>
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th scope="col">Option</th><th scope="col">Description</th></tr></thead>
-                <tbody>
-                  <tr><td><code>-r</code>, <code>--rebase</code></td><td>Integrate by rebasing onto the upstream (rewrites history)</td></tr>
-                  <tr><td><code>--merge</code></td><td>Integrate by merging the upstream</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <ul>
-              <li>
-                The target is <strong>fixed to the upstream of the current
-                branch</strong>. The fuzzy finder never opens, because there is
-                nothing to pick. (To integrate from an arbitrary remote or branch,
-                use <a href="#fetch"><code>gz fetch</code></a> followed by
-                <a href="#merge"><code>gz merge</code></a> /
-                <a href="#rebase"><code>gz rebase</code></a>.)
-              </li>
-              <li>
-                With no upstream, or on a detached HEAD, it stops with a dedicated
-                error <strong>before running <code>git fetch</code></strong>. The
-                same happens &mdash; before any network access &mdash; when the
-                upstream&rsquo;s <code>branch.&lt;name&gt;.remote</code> is not a
-                registered remote name.
-              </li>
-              <li>The flow is <code>git fetch &lt;remote&gt;</code> &rarr; recompute ahead/behind (now that the tracking ref is updated) &rarr; confirmation prompt &rarr; integrate.</li>
-              <li>When behind is 0 it reports that you are up to date and exits with <strong>code 0</strong>.</li>
-              <li>
-                <strong>The default is fast-forward only
-                (<code>git merge --ff-only</code>).</strong> When it cannot
-                fast-forward (diverged), git&rsquo;s
-                <code>fatal: Not possible to fast-forward, aborting.</code> is
-                shown as-is and the command stops &mdash;
-                <strong>it never silently falls back to merge or rebase</strong>.
-                State the method explicitly with <code>--rebase</code> /
-                <code>--merge</code> (the two are mutually exclusive).
-              </li>
-              <li>
-                <strong>A confirmation prompt (<code>[y/N]</code>) is shown before
-                integrating</strong>, listing how many commits will come in and
-                the exact command; with <code>--rebase</code> it also states that
-                history will be rewritten.
-              </li>
-              <li>Run while a merge or rebase is in progress, it shows the <a href="#recovery">recovery menu</a>.</li>
-              <li>
-                There is no <code>--prune</code>. Deleting tracking refs is an
-                explicit operation, done with
-                <code>gz fetch --prune</code>, not a side effect of syncing.
-              </li>
-            </ul>
-          </div>
-          <div lang="ja">
-            <pre><code>gz sync            # fetch → fast-forward（既定）
-gz sync --rebase   # fetch → upstream の上へ rebase（履歴改変）
-gz sync --merge    # fetch → upstream を merge</code></pre>
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th scope="col">オプション</th><th scope="col">説明</th></tr></thead>
-                <tbody>
-                  <tr><td><code>-r</code>, <code>--rebase</code></td><td>upstream の上へ rebase して取り込む（履歴改変）</td></tr>
-                  <tr><td><code>--merge</code></td><td>upstream を merge して取り込む</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <ul>
-              <li>
-                対象は<strong>現在ブランチの upstream に固定</strong>です。fuzzy finder は
-                起動しません（選ぶ対象が無いため。任意のリモート・ブランチから取り込みたい場合は
-                <a href="#fetch"><code>gz fetch</code></a> のあとに
-                <a href="#merge"><code>gz merge</code></a> /
-                <a href="#rebase"><code>gz rebase</code></a> を使ってください）。
-              </li>
-              <li>
-                upstream が設定されていない場合・detached HEAD の場合は、
-                <strong><code>git fetch</code> を実行する前に</strong>専用エラーで停止します。
-                upstream の <code>branch.&lt;name&gt;.remote</code> が登録済みのリモート名でない場合も
-                同様に、ネットワークへ出る前に停止します。
-              </li>
-              <li>
-                処理の流れは <code>git fetch &lt;remote&gt;</code> →（追跡参照が更新された状態で）
-                ahead / behind の再計算 → 確認プロンプト → 取り込みの実行です。
-              </li>
-              <li>behind が 0 の場合は「最新です」と表示して<strong>終了コード 0</strong> で終わります。</li>
-              <li>
-                <strong>既定は fast-forward のみ（<code>git merge --ff-only</code>）です。</strong>
-                fast-forward できない（diverged）場合は git の
-                <code>fatal: Not possible to fast-forward, aborting.</code> をそのまま表示して停止し、
-                <strong>暗黙に merge / rebase へ倒すことはありません</strong>。取り込み方法は
-                <code>--rebase</code> / <code>--merge</code> で明示してください（2 つは相互排他）。
-              </li>
-              <li>
-                <strong>取り込みの実行前に確認プロンプト（<code>[y/N]</code>）を表示します。</strong>
-                取り込まれるコミット数と実際に実行するコマンドを提示し、<code>--rebase</code> の場合は
-                履歴改変になる旨も併記します。
-              </li>
-              <li>merge / rebase が進行中の状態で実行した場合は、<a href="#recovery">復帰メニュー</a>が表示されます。</li>
-              <li>
-                <code>--prune</code> はありません。追跡参照の削除は <code>gz fetch --prune</code> として
-                明示的に行う操作であり、同期のついでには行いません。
-              </li>
-            </ul>
+            <p>
+              <code>--rebase</code> / <code>--merge</code> が現在のブランチだけを対象に
+              するのは機構上の理由です。チェックアウトしていないブランチは参照のコピー
+              （<code>git fetch . &lt;tracking&gt;:refs/heads/&lt;branch&gt;</code>）でしか
+              追随させられず、これは定義上 fast-forward です。rebase や merge を行うには
+              作業ツリーを切り替えるか一時 worktree を作る必要があり、いずれも進行中の作業を
+              危険に晒します。
+            </p>
+            <blockquote>
+              <p>
+                この 2 つのフラグは、以前は <code>gz sync</code> という独立したコマンドでした。
+                「取り込む」操作が 2 つのコマンドに分かれていて使い分けが読み取れなかったため、
+                こちらへ畳んで 1 つにまとめています。
+              </p>
+            </blockquote>
           </div>
         </section>
 
@@ -3183,7 +3088,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 <strong>The only commands that use the network are
                 <a href="#fetch"><code>gz fetch</code></a>,
                 <a href="#pull"><code>gz pull</code></a> and
-                <a href="#sync"><code>gz sync</code></a></strong>. Every other
+                <a href="#pull"><code>gz pull</code></a></strong>. Every other
                 command works purely from local repository data (pushing is left
                 to plain <code>git push</code>).
               </li>
@@ -3257,7 +3162,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
             <ul>
               <li>
                 <strong>ネットワークを使うのは <a href="#fetch"><code>gz fetch</code></a> と
-                <a href="#pull"><code>gz pull</code></a> と <a href="#sync"><code>gz sync</code></a>
+                <a href="#pull"><code>gz pull</code></a>
                 だけです</strong>。ほかのコマンドはすべてローカルのリポジトリ情報だけで
                 動作します（push は素の <code>git push</code> に委ねます）。
               </li>
@@ -3503,7 +3408,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 <tbody>
                   <tr>
                     <td><code>0</code></td>
-                    <td>Success (including <code>gz status</code> with no changes, <code>gz diff</code> with no differences, <code>gz sync</code> with behind 0 and <code>gz worktree prune</code> with nothing to prune)</td>
+                    <td>Success (including <code>gz status</code> with no changes, <code>gz diff</code> with no differences, <code>gz pull --rebase</code> with behind 0 and <code>gz worktree prune</code> with nothing to prune)</td>
                   </tr>
                   <tr>
                     <td><code>1</code></td>
@@ -3537,7 +3442,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 <tbody>
                   <tr>
                     <td><code>0</code></td>
-                    <td>正常終了（<code>gz status</code> の変更ゼロ、<code>gz diff</code> の差分ゼロ、<code>gz sync</code> の behind ゼロ、<code>gz worktree prune</code> の対象ゼロを含む）</td>
+                    <td>正常終了（<code>gz status</code> の変更ゼロ、<code>gz diff</code> の差分ゼロ、<code>gz pull --rebase</code> の behind ゼロ、<code>gz worktree prune</code> の対象ゼロを含む）</td>
                   </tr>
                   <tr>
                     <td><code>1</code></td>
@@ -3578,13 +3483,13 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                   <tr>
                     <td><code>--rebase</code> / <code>--merge</code> for <code>gz pull</code> (integration other than fast-forward)</td>
                     <td>
-                      <code>gz pull</code> (fast-forwarding several branches at once) is implemented; what is not offered is the choice of method. Rebasing or merging a branch that is not checked out would require temporarily switching the working tree or creating a temporary worktree, both of which introduce risks that contradict the &ldquo;never lose the user&rsquo;s work&rdquo; policy. Also, if the k-th of N branches conflicts, truly returning to the pre-pull state would mean rolling back the k-1 that already succeeded, which cannot be done without something as dangerous as <code>git reset --hard</code>. Integrating a single branch with an arbitrary method is covered by <code>gz sync --rebase</code> / <code>--merge</code>
+                      <code>gz pull</code> (fast-forwarding several branches at once) is implemented; what is not offered is the choice of method. Rebasing or merging a branch that is not checked out would require temporarily switching the working tree or creating a temporary worktree, both of which introduce risks that contradict the &ldquo;never lose the user&rsquo;s work&rdquo; policy. Also, if the k-th of N branches conflicts, truly returning to the pre-pull state would mean rolling back the k-1 that already succeeded, which cannot be done without something as dangerous as <code>git reset --hard</code>. <strong>Revised on 2026-08-23:</strong> the escape hatch used to be a separate <code>gz sync</code> command; folding it in means <code>--rebase</code> / <code>--merge</code> now exist on <code>gz pull</code>, but <strong>only for the current branch</strong>, so none of the reasoning above is weakened &mdash; branches you did not check out are still fast-forward only
                     </td>
                   </tr>
                   <tr>
                     <td><code>--siblings</code> / <code>--prune</code> / a positional branch name for <code>gz pull</code></td>
                     <td>
-                      <code>--siblings</code> would explode the number of selection combinations, and the &ldquo;pick a branch per repository&rdquo; model does not hold (pull is a write operation that advances local refs in somebody else&rsquo;s repository, unlike <code>gz fetch --siblings</code>). <code>--prune</code> follows the policy that deleting tracking refs is stated explicitly via <code>gz fetch --prune</code> (same as <code>gz sync</code>). A positional argument is not provided because if you can type the name, plain git already suffices (the existing rule of skipping the finder when there is a single candidate already gives a near-non-interactive experience)
+                      <code>--siblings</code> would explode the number of selection combinations, and the &ldquo;pick a branch per repository&rdquo; model does not hold (pull is a write operation that advances local refs in somebody else&rsquo;s repository, unlike <code>gz fetch --siblings</code>). <code>--prune</code> follows the policy that deleting tracking refs is stated explicitly via <code>gz fetch --prune</code> . A positional argument is not provided because if you can type the name, plain git already suffices (the existing rule of skipping the finder when there is a single candidate already gives a near-non-interactive experience)
                     </td>
                   </tr>
                   <tr>
@@ -3687,7 +3592,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                       「ユーザーの作業を失わせない」方針に反するリスクを持ち込むため。また N 本中 k 本目で
                       コンフリクトした場合、真に「pull 前」へ戻すには成功済みの k-1 本も巻き戻す必要があり、
                       <code>git reset --hard</code> 相当の危険な操作なしには成立しない。単一ブランチを任意の
-                      方式で取り込む用途は <code>gz sync --rebase</code> / <code>--merge</code> が満たす
+                      <strong>2026-08-23 改訂:</strong> その逃げ道は独立した <code>gz sync</code> だったが、こちらへ畳んだため <code>gz pull --rebase</code> / <code>--merge</code> として存在する。ただし<strong>対象は現在のブランチのみ</strong>であり、上記の理由は変わらない（チェックアウトしていないブランチは引き続き fast-forward のみ）
                     </td>
                   </tr>
                   <tr>
@@ -3696,7 +3601,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                       <code>--siblings</code> は選択の組み合わせが爆発し、リポジトリごとにブランチを選ぶ
                       操作モデルが成立しない（pull は他人のリポジトリのローカル参照を進める書き込み操作であり、
                       <code>gz fetch --siblings</code> と性質が異なる）。<code>--prune</code> は追跡参照の削除を
-                      <code>gz fetch --prune</code> として明示指定する方針（<code>gz sync</code> と同じ）。
+                      <code>gz fetch --prune</code> として明示指定する方針。
                       位置引数は、名前を打てるなら素の git で足りるため設けない（候補が 1 件なら finder を
                       省略する既存原則で非対話に近い使い勝手は確保される）
                     </td>
@@ -3892,7 +3797,7 @@ cargo test</code></pre>
               </li>
               <li>
                 Paths involving the network (<code>gz fetch</code> /
-                <code>gz pull</code> / <code>gz sync</code>) are not automated;
+                <code>gz pull</code>) are not automated;
                 only their non-interactive paths (no remotes, no upstream, zero
                 candidates and similar errors) are verified. Real-world checks use
                 a local bare repository as the remote and never connect to an
@@ -3911,7 +3816,7 @@ cargo test</code></pre>
               </li>
               <li>
                 ネットワークを伴う経路（<code>gz fetch</code> / <code>gz pull</code> /
-                <code>gz sync</code>）は自動テスト化せず、非対話パス（リモートゼロ・upstream 未設定・
+                <code>gz pull</code>）は自動テスト化せず、非対話パス（リモートゼロ・upstream 未設定・
                 候補ゼロなどのエラー）のみを検証します。実機確認はローカルの bare リポジトリを
                 remote に設定して行い、外部ネットワークへは接続しません。
               </li>

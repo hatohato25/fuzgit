@@ -111,9 +111,6 @@ pub trait Messages: Sync + std::fmt::Debug {
     /// `gz worktree`（[`crate::commands::worktree`]）の文言。
     fn worktree(&self) -> &dyn WorktreeMessages;
 
-    /// `gz sync`（[`crate::commands::sync`]）の文言。
-    fn sync(&self) -> &dyn SyncMessages;
-
     /// `gz diff`（[`crate::commands::diff`]）の文言。
     fn diff(&self) -> &dyn DiffMessages;
 
@@ -1108,57 +1105,6 @@ pub trait WorktreeMessages: Sync + std::fmt::Debug {
     fn created_at(&self, path: &str) -> String;
 }
 
-/// `gz sync`（[`crate::commands::sync`]）の文言。
-///
-/// 取り込み方式そのもの（`merge` / `rebase` / `--ff-only`）は git のサブコマンド名・
-/// オプション名であるため翻訳せず、この trait にも含めない（design.md「翻訳しないもの」）。
-pub trait SyncMessages: Sync + std::fmt::Debug {
-    /// `--rebase` と `--merge` が同時に指定されたことを伝える。
-    ///
-    /// オプション名は翻訳しない（design.md「翻訳しないもの」）。
-    fn conflicting_modes(&self) -> &'static str;
-
-    /// upstream のリモートからの取得（`git fetch <remote>`）に失敗したことを伝える。
-    fn fetch_failed(&self, remote: &str) -> String;
-
-    /// upstream からリモート追跡参照を組み立てられない設定であることを伝える。
-    ///
-    /// `remote` / `merge_ref` には `branch.<name>.remote` / `branch.<name>.merge` の値が
-    /// そのまま入る。案内に含まれる `git branch --set-upstream-to` はユーザーがそのまま
-    /// 打ち込むコマンドであるため翻訳しない。
-    fn tracking_ref_unavailable(&self, branch: &str, remote: &str, merge_ref: &str) -> String;
-
-    /// upstream に設定されたリモートが登録済みでないことを伝える。
-    ///
-    /// `branch.<name>.remote` には URL を直接書けるため、登録済みのリモート名でない値は
-    /// fetch せずに拒否する（design.md セキュリティ設計）。案内に含まれるコマンド列は
-    /// 翻訳しないが、`<名前>` `<URL>` のようなプレースホルダは読み手のための語であり
-    /// 表示言語に合わせる（[`FetchMessages::no_remotes`] と同じ扱い）。
-    fn unknown_remote(&self, branch: &str, remote: &str) -> String;
-
-    /// fetch してもリモート追跡参照が現れなかったことを伝える。
-    fn missing_tracking_ref(&self, reference: &str, remote: &str, branch: &str) -> String;
-
-    /// 取り込むコミットが 1 件も無い（最新である）ことを伝える。
-    fn up_to_date(&self, branch: &str, reference: &str) -> String;
-
-    /// まだ push していないコミットが残っていることを伝える注記。
-    ///
-    /// 本文と注記を区切る改行は**装飾**であり呼び出し側が付ける
-    /// （[`FinderMessages::truncation_notice`] と同じ扱い）。
-    fn unpushed_commits(&self, count: usize) -> String;
-
-    /// 取り込み（`git merge` / `git rebase`）の実行に失敗したことを伝える。
-    fn integration_failed(&self, reference: &str) -> String;
-
-    /// 確認プロンプトの見出し（取り込み元の参照・コミット数・取り込み先のブランチ）。
-    ///
-    /// `--rebase` の場合に添える履歴改変の注記は
-    /// [`CommonMessages::history_rewrite_note`] が返し、区切りの改行は**装飾**として
-    /// 呼び出し側が付ける。
-    fn confirmation(&self, reference: &str, count: usize, branch: &str) -> String;
-}
-
 /// `gz diff`（[`crate::commands::diff`]）の文言。
 ///
 /// 比較範囲の呼称（`unstaged_range` 等）とヘッダーは**候補行ではなく fuzgit 自身の説明**で
@@ -1197,7 +1143,7 @@ pub trait DiffMessages: Sync + std::fmt::Debug {
     /// upstream からリモート追跡参照を組み立てられない設定であることを伝える。
     ///
     /// 次に取れる操作が `gz sync` とは異なる（比較なので別の対象を選べばよい）ため、
-    /// [`SyncMessages::tracking_ref_unavailable`] とは別の文言を持つ。
+    /// [`PullMessages::tracking_ref_unavailable`] とは別の文言を持つ。
     fn tracking_ref_unavailable(&self, branch: &str, remote: &str, merge_ref: &str) -> String;
 
     /// 比較範囲の変更ファイル一覧を読み取れなかったことを伝える。
@@ -1434,6 +1380,54 @@ pub trait PullMessages: Sync + std::fmt::Debug {
     /// `gz fetch --siblings` と `gz pull` のどちらが終わったのかをタイトルでしか
     /// 区別できないためである。
     fn notification_title(&self) -> &'static str;
+
+    // 以下は `gz pull --rebase` / `--merge`（現在のブランチ 1 本を方式を選んで取り込む）
+    // の文言。`gz sync` を畳んだ際に移設した（requirements.md「削除した機能の記録」）。
+
+    /// `--rebase` と `--merge` が同時に指定されたことを伝える。
+    ///
+    /// オプション名は翻訳しない（design.md「翻訳しないもの」）。
+    fn conflicting_modes(&self) -> &'static str;
+
+    /// upstream のリモートからの取得（`git fetch <remote>`）に失敗したことを伝える。
+    fn fetch_failed(&self, remote: &str) -> String;
+
+    /// upstream からリモート追跡参照を組み立てられない設定であることを伝える。
+    ///
+    /// `remote` / `merge_ref` には `branch.<name>.remote` / `branch.<name>.merge` の値が
+    /// そのまま入る。案内に含まれる `git branch --set-upstream-to` はユーザーがそのまま
+    /// 打ち込むコマンドであるため翻訳しない。
+    fn tracking_ref_unavailable(&self, branch: &str, remote: &str, merge_ref: &str) -> String;
+
+    /// upstream に設定されたリモートが登録済みでないことを伝える。
+    ///
+    /// `branch.<name>.remote` には URL を直接書けるため、登録済みのリモート名でない値は
+    /// fetch せずに拒否する（design.md セキュリティ設計）。案内に含まれるコマンド列は
+    /// 翻訳しないが、`<名前>` `<URL>` のようなプレースホルダは読み手のための語であり
+    /// 表示言語に合わせる（[`FetchMessages::no_remotes`] と同じ扱い）。
+    fn unknown_remote(&self, branch: &str, remote: &str) -> String;
+
+    /// fetch してもリモート追跡参照が現れなかったことを伝える。
+    fn missing_tracking_ref(&self, reference: &str, remote: &str, branch: &str) -> String;
+
+    /// 取り込むコミットが 1 件も無い（最新である）ことを伝える。
+    fn up_to_date(&self, branch: &str, reference: &str) -> String;
+
+    /// まだ push していないコミットが残っていることを伝える注記。
+    ///
+    /// 本文と注記を区切る改行は**装飾**であり呼び出し側が付ける
+    /// （[`FinderMessages::truncation_notice`] と同じ扱い）。
+    fn unpushed_commits(&self, count: usize) -> String;
+
+    /// 取り込み（`git merge` / `git rebase`）の実行に失敗したことを伝える。
+    fn integration_failed(&self, reference: &str) -> String;
+
+    /// 確認プロンプトの見出し（取り込み元の参照・コミット数・取り込み先のブランチ）。
+    ///
+    /// `--rebase` の場合に添える履歴改変の注記は
+    /// [`CommonMessages::history_rewrite_note`] が返し、区切りの改行は**装飾**として
+    /// 呼び出し側が付ける。
+    fn confirmation(&self, reference: &str, count: usize, branch: &str) -> String;
 }
 
 /// `gz log`（[`crate::commands::log`]）の文言。

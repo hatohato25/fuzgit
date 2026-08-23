@@ -6,7 +6,10 @@ use anyhow::{Context as _, Result, anyhow};
 
 use crate::commands::commit_menu::{MenuAction, Target};
 use crate::commands::{commit_menu, commit_preview_args, selection_header};
-use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one_with};
+use crate::finder::{
+    FinderItem, FinderOptions, Highlight, HighlightColor, PreviewSource, SelectionMode,
+    select_one_with,
+};
 use crate::git::exec::run_git;
 use crate::git::read::{ReflogEntry, head_reflog};
 use crate::i18n::{Language, Messages};
@@ -173,6 +176,29 @@ fn preview_args(entry: &ReflogEntry) -> Vec<String> {
     commit_preview_args(&entry.id)
 }
 
+/// [`display_line`] のうち色を付ける範囲。
+///
+/// ハッシュを黄にするのは `git reflog` 自身の配色に合わせたもの（実測: git は
+/// ハッシュだけを黄で出し、セレクタには色を付けない）。**セレクタを緑にするのは
+/// fuzgit の追加**であり、`gz log` の 2 列目（日付）が緑であることに揃えている。
+/// メッセージには色を付けない（一覧の大半を占めるため、色を付けると目印が埋もれる）。
+///
+/// セレクタの後ろの `:` は区切りであり、色を付ける範囲に含めない。
+///
+/// 範囲はバイト位置である。短縮ハッシュ（16 進数）もセレクタ（`HEAD@{n}`）も ASCII で
+/// あり、後続のメッセージに多バイト文字が含まれても前 2 列の位置には影響しない。
+fn reflog_highlights(entry: &ReflogEntry) -> Vec<Highlight> {
+    let hash_end = short_id(&entry.id).len();
+    // 区切りの空白 1 文字を挟んでセレクタが始まる
+    let selector_start = hash_end + 1;
+    let selector_end = selector_start + entry.selector().len();
+
+    vec![
+        Highlight::new(0, hash_end, HighlightColor::Yellow),
+        Highlight::new(selector_start, selector_end, HighlightColor::Green),
+    ]
+}
+
 /// `git branch -- <name> <hash>` の引数を組み立てる。
 ///
 /// ブランチ名はユーザー入力のため `--` の後ろへ置き、オプションとして解釈される余地を排除する。
@@ -191,6 +217,7 @@ fn to_item(language: Language, entry: &ReflogEntry) -> FinderItem {
         PreviewSource::Git(preview_args(entry)),
         language.messages(),
     )
+    .with_highlights(reflog_highlights(entry))
 }
 
 #[cfg(test)]
@@ -248,6 +275,76 @@ mod tests {
         assert_eq!(
             branch_args("recovered", COMMIT_ID),
             ["branch", "--", "recovered", COMMIT_ID]
+        );
+    }
+
+    /// 行を独立に走査して、ハッシュ列とセレクタ列のバイト位置を求める。
+    ///
+    /// `reflog_highlights` と同じ計算を書き写すと、両方が同じ間違いをしても気付けない
+    /// （`commit_highlights` のテストと同じ方針）。
+    fn ranges_of(line: &str) -> (usize, usize, usize) {
+        let hash_end = line.find(' ').expect("the hash is followed by a separator");
+        let selector_start = hash_end + 1;
+        let selector_end = selector_start
+            + line[selector_start..]
+                .find(':')
+                .expect("the selector is followed by a colon");
+
+        (hash_end, selector_start, selector_end)
+    }
+
+    #[test]
+    fn the_hash_is_yellow_and_the_selector_is_green() {
+        // ハッシュの黄は `git reflog` 自身の配色に合わせたもの（git はセレクタに色を付けない）。
+        // セレクタの緑は fuzgit の追加で、`gz log` の 2 列目が緑であることに揃えている
+        let entry = entry(3, "checkout: moving from main to feature");
+        let (hash_end, selector_start, selector_end) = ranges_of(&display_line(&entry));
+
+        assert_eq!(
+            reflog_highlights(&entry),
+            [
+                Highlight::new(0, hash_end, HighlightColor::Yellow),
+                Highlight::new(selector_start, selector_end, HighlightColor::Green),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_coloured_ranges_match_the_line_they_describe() {
+        // 範囲はバイト位置。メッセージの多バイト文字が前 2 列の位置へ影響しないことも同時に見る
+        let entry = entry(12, "commit: 日本語のコミットメッセージ");
+        let line = display_line(&entry);
+        let highlights = reflog_highlights(&entry);
+        let (hash_end, selector_start, selector_end) = ranges_of(&line);
+
+        assert_eq!(
+            highlights,
+            [
+                Highlight::new(0, hash_end, HighlightColor::Yellow),
+                Highlight::new(selector_start, selector_end, HighlightColor::Green),
+            ]
+        );
+        // セレクタの直後は区切りの `:` であり、色の範囲に含めない
+        assert_eq!(&line[selector_end..=selector_end], ":");
+    }
+
+    #[test]
+    fn a_shorter_hash_moves_the_selector_range_with_it() {
+        // gc で実体を失ったエントリなど、桁が足りない場合でも範囲がずれない
+        let short = ReflogEntry {
+            index: 0,
+            id: "1f0c9".to_owned(),
+            message: "commit: first".to_owned(),
+        };
+        let (hash_end, selector_start, selector_end) = ranges_of(&display_line(&short));
+
+        assert_eq!(hash_end, 5, "the hash column follows the short id");
+        assert_eq!(
+            reflog_highlights(&short),
+            [
+                Highlight::new(0, hash_end, HighlightColor::Yellow),
+                Highlight::new(selector_start, selector_end, HighlightColor::Green),
+            ]
         );
     }
 

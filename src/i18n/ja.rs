@@ -8,7 +8,7 @@ use super::messages::{
     CommitMessages, CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
     FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, LogMessages,
     MergeMessages, Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages,
-    RevertMessages, StashMessages, StatusMessages, SyncMessages, WorktreeMessages,
+    RevertMessages, StashMessages, StatusMessages, WorktreeMessages,
 };
 use crate::error::{Error, stderr_suffix};
 use crate::git::read::{BRANCH_REF_PREFIX, MalformedOutput, ReadOperation, WORKTREE_LABEL};
@@ -105,10 +105,6 @@ impl Messages for JapaneseMessages {
 
     fn worktree(&self) -> &dyn WorktreeMessages {
         &JapaneseWorktreeMessages
-    }
-
-    fn sync(&self) -> &dyn SyncMessages {
-        &JapaneseSyncMessages
     }
 
     fn diff(&self) -> &dyn DiffMessages {
@@ -1131,59 +1127,6 @@ impl WorktreeMessages for JapaneseWorktreeMessages {
     }
 }
 
-/// `gz sync`（[`crate::commands::sync`]）の日本語表示。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JapaneseSyncMessages;
-
-impl SyncMessages for JapaneseSyncMessages {
-    fn conflicting_modes(&self) -> &'static str {
-        "`--rebase` / `--merge` は同時に指定できません"
-    }
-
-    fn fetch_failed(&self, remote: &str) -> String {
-        format!("リモート `{remote}` からの取得に失敗しました")
-    }
-
-    fn tracking_ref_unavailable(&self, branch: &str, remote: &str, merge_ref: &str) -> String {
-        format!(
-            "`{branch}` の upstream（{remote} / {merge_ref}）からリモート追跡参照を組み立てられません。\
-`git branch --set-upstream-to=<remote>/<branch>` で設定し直してください"
-        )
-    }
-
-    fn unknown_remote(&self, branch: &str, remote: &str) -> String {
-        format!(
-            "`{branch}` の upstream に設定された `{remote}` は登録済みのリモートではありません。\
-`git remote add <名前> <URL>` で登録するか、\
-`git branch --set-upstream-to=<remote>/<branch>` で設定し直してください"
-        )
-    }
-
-    fn missing_tracking_ref(&self, reference: &str, remote: &str, branch: &str) -> String {
-        format!(
-            "リモート追跡参照 `{reference}` が見つかりません。\
-`{remote}` に `{branch}` の upstream が存在しない可能性があります\
-（`git push -u <remote> <branch>` で作成するか、`git branch --set-upstream-to=<remote>/<branch>` で設定し直してください）"
-        )
-    }
-
-    fn up_to_date(&self, branch: &str, reference: &str) -> String {
-        format!("`{branch}` は最新です（`{reference}` から取り込むコミットはありません）")
-    }
-
-    fn unpushed_commits(&self, count: usize) -> String {
-        format!("push していないコミットが {count} 件あります（`git push` で push できます）")
-    }
-
-    fn integration_failed(&self, reference: &str) -> String {
-        format!("`{reference}` の取り込みに失敗しました")
-    }
-
-    fn confirmation(&self, reference: &str, count: usize, branch: &str) -> String {
-        format!("`{reference}` から {count} 件のコミットを `{branch}` へ取り込みます")
-    }
-}
-
 /// `gz diff`（[`crate::commands::diff`]）の日本語表示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JapaneseDiffMessages;
@@ -1413,7 +1356,7 @@ impl PullMessages for JapanesePullMessages {
 
     fn fast_forward_guidance(&self) -> &'static str {
         "fast-forward できなかったブランチは、\
-そのブランチへ切り替えてから `gz sync --rebase` または `gz sync --merge` で取り込めます"
+そのブランチへ切り替えてから `gz pull --rebase` または `gz pull --merge` で取り込めます"
     }
 
     fn partial_failure(&self) -> &'static str {
@@ -1422,6 +1365,55 @@ impl PullMessages for JapanesePullMessages {
 
     fn notification_title(&self) -> &'static str {
         "gz pull が完了しました"
+    }
+
+    // `gz pull --rebase` / `--merge`（`gz sync` から移設）
+
+    fn conflicting_modes(&self) -> &'static str {
+        "`--rebase` / `--merge` は同時に指定できません"
+    }
+
+    fn fetch_failed(&self, remote: &str) -> String {
+        format!("リモート `{remote}` からの取得に失敗しました")
+    }
+
+    fn tracking_ref_unavailable(&self, branch: &str, remote: &str, merge_ref: &str) -> String {
+        format!(
+            "`{branch}` の upstream（{remote} / {merge_ref}）からリモート追跡参照を組み立てられません。\
+`git branch --set-upstream-to=<remote>/<branch>` で設定し直してください"
+        )
+    }
+
+    fn unknown_remote(&self, branch: &str, remote: &str) -> String {
+        format!(
+            "`{branch}` の upstream に設定された `{remote}` は登録済みのリモートではありません。\
+`git remote add <名前> <URL>` で登録するか、\
+`git branch --set-upstream-to=<remote>/<branch>` で設定し直してください"
+        )
+    }
+
+    fn missing_tracking_ref(&self, reference: &str, remote: &str, branch: &str) -> String {
+        format!(
+            "リモート追跡参照 `{reference}` が見つかりません。\
+`{remote}` に `{branch}` の upstream が存在しない可能性があります\
+（`git push -u <remote> <branch>` で作成するか、`git branch --set-upstream-to=<remote>/<branch>` で設定し直してください）"
+        )
+    }
+
+    fn up_to_date(&self, branch: &str, reference: &str) -> String {
+        format!("`{branch}` は最新です（`{reference}` から取り込むコミットはありません）")
+    }
+
+    fn unpushed_commits(&self, count: usize) -> String {
+        format!("push していないコミットが {count} 件あります（`git push` で push できます）")
+    }
+
+    fn integration_failed(&self, reference: &str) -> String {
+        format!("`{reference}` の取り込みに失敗しました")
+    }
+
+    fn confirmation(&self, reference: &str, count: usize, branch: &str) -> String {
+        format!("`{reference}` から {count} 件のコミットを `{branch}` へ取り込みます")
     }
 }
 

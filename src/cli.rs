@@ -221,24 +221,20 @@ pub enum Command {
 
     /// Pick branches and make them follow their upstream (fast-forward only)
     //
-    // 取り込み方式は fast-forward に固定し、`--rebase` / `--merge` は提供しない
-    // （方式を選んで 1 本だけ同期するのは `gz sync`）。対象は選択で決めるため
-    // 位置引数を取らず、`--siblings` / `--prune` も持たない。
-    Pull,
-
-    /// Synchronize the current branch with its upstream
-    //
-    // 既定は fast-forward のみ（`--ff-only` 相当）。fast-forward できない場合は
-    // git のエラーをそのまま表示して停止し、暗黙に merge / rebase へ倒さない。
-    Sync {
-        /// Integrate by rebasing onto the upstream (rewrites history)
+    // フラグ無しは fast-forward 固定で、対象は選択で決めるため位置引数を取らず
+    // `--siblings` / `--prune` も持たない。`--rebase` / `--merge` は**現在のブランチ 1 本**
+    // が対象であり、選択を伴わない（チェックアウトしていないブランチは参照のコピーでしか
+    // 追随させられず、rebase / merge には作業ツリーの切り替えが要るため。
+    // requirements.md「スコープ外」）。
+    Pull {
+        /// Integrate the current branch by rebasing onto the upstream (rewrites history)
         //
         // `-r` は `git pull -r` と同じ綴り。`--merge` に短縮形を付けないのは、
         // `git pull` に対応する綴りが無く、git 全体では `-m` が `--message` を指すため
         #[arg(short, long, conflicts_with_all = ["merge"])]
         rebase: bool,
 
-        /// Integrate by merging the upstream
+        /// Integrate the current branch by merging the upstream
         #[arg(long, conflicts_with_all = ["rebase"])]
         merge: bool,
     },
@@ -451,10 +447,9 @@ pub fn localized_command(messages: &dyn Messages) -> ClapCommand {
                     argument.help(cli.fetch_siblings_help())
                 })
         })
-        .mut_subcommand("pull", |command| command.about(cli.pull_about()))
-        .mut_subcommand("sync", |command| {
+        .mut_subcommand("pull", |command| {
             command
-                .about(cli.sync_about())
+                .about(cli.pull_about())
                 .mut_arg("rebase", |argument| argument.help(cli.sync_rebase_help()))
                 .mut_arg("merge", |argument| argument.help(cli.sync_merge_help()))
         })
@@ -1037,9 +1032,9 @@ mod tests {
         }
 
         // `git pull -r` と同じ綴り
-        let cli = Cli::try_parse_from(["gz", "sync", "-r"]).expect("`gz sync -r` should parse");
+        let cli = Cli::try_parse_from(["gz", "pull", "-r"]).expect("`gz pull -r` should parse");
         match cli.command {
-            Command::Sync { rebase, merge } => assert_eq!((rebase, merge), (true, false)),
+            Command::Pull { rebase, merge } => assert_eq!((rebase, merge), (true, false)),
             other => panic!("unexpected subcommand: {other:?}"),
         }
 
@@ -1059,7 +1054,7 @@ mod tests {
     fn the_options_without_a_git_counterpart_have_no_short_form() {
         // `git tag -d` はタグ削除、`git tag -s` は GPG 署名、`git commit -s` は signoff。
         // 同じ綴りに別の意味を与えると誤操作を招くため、これらには短縮形を付けない
-        for arguments in [["gz", "fixup", "-s"], ["gz", "sync", "-m"]] {
+        for arguments in [["gz", "fixup", "-s"], ["gz", "pull", "-m"]] {
             assert!(
                 Cli::try_parse_from(arguments).is_err(),
                 "{arguments:?} must not be accepted as a short form"
@@ -1124,15 +1119,17 @@ mod tests {
     }
 
     #[test]
-    fn pull_takes_no_options_and_no_target_argument() {
+    fn pull_defaults_to_fast_forward_only() {
         let cli = Cli::try_parse_from(["gz", "pull"]).expect("pull should parse bare");
-        assert!(matches!(cli.command, Command::Pull));
 
-        // 取り込み方式は fast-forward 固定（方式を選ぶのは `gz sync`）であり、
-        // 対象は選択で決めるため名前を打つ余地も設けない
+        match cli.command {
+            // どちらのフラグも立っていない状態が ff-only（既定・複数選択）
+            Command::Pull { rebase, merge } => assert_eq!((rebase, merge), (false, false)),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        // 対象は選択で決めるため名前を打つ余地は設けない。`--siblings` / `--prune` も持たない
         for arguments in [
-            ["gz", "pull", "--rebase"],
-            ["gz", "pull", "--merge"],
             ["gz", "pull", "--siblings"],
             ["gz", "pull", "--prune"],
             ["gz", "pull", "main"],
@@ -1143,31 +1140,20 @@ mod tests {
     }
 
     #[test]
-    fn sync_defaults_to_fast_forward_only() {
-        let cli = Cli::try_parse_from(["gz", "sync"]).expect("sync should parse bare");
-
+    fn pull_integration_modes_are_mutually_exclusive() {
+        let cli = Cli::try_parse_from(["gz", "pull", "--rebase"]).expect("pull --rebase parses");
         match cli.command {
-            // どちらのフラグも立っていない状態が ff-only（既定）
-            Command::Sync { rebase, merge } => assert_eq!((rebase, merge), (false, false)),
-            other => panic!("unexpected subcommand: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn sync_integration_modes_are_mutually_exclusive() {
-        let cli = Cli::try_parse_from(["gz", "sync", "--rebase"]).expect("sync --rebase parses");
-        match cli.command {
-            Command::Sync { rebase, merge } => assert_eq!((rebase, merge), (true, false)),
+            Command::Pull { rebase, merge } => assert_eq!((rebase, merge), (true, false)),
             other => panic!("unexpected subcommand: {other:?}"),
         }
 
-        let cli = Cli::try_parse_from(["gz", "sync", "--merge"]).expect("sync --merge parses");
+        let cli = Cli::try_parse_from(["gz", "pull", "--merge"]).expect("pull --merge parses");
         match cli.command {
-            Command::Sync { rebase, merge } => assert_eq!((rebase, merge), (false, true)),
+            Command::Pull { rebase, merge } => assert_eq!((rebase, merge), (false, true)),
             other => panic!("unexpected subcommand: {other:?}"),
         }
 
-        Cli::try_parse_from(["gz", "sync", "--rebase", "--merge"])
+        Cli::try_parse_from(["gz", "pull", "--rebase", "--merge"])
             .expect_err("--rebase and --merge must not be combined");
     }
 

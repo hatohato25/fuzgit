@@ -198,7 +198,7 @@ $ gz fetch --siblings
 選んだリポジトリは**並列に**取得します。待ちの実体がネットワークの往復であり、対象が互いに独立した
 別リポジトリだからです。同時実行数は既定 4 で、`git config fuzgit.fetchJobs <n>` で変更できます
 （`1` を指定すると従来どおりの直列実行に戻ります）。**この設定が効くのは `gz fetch --siblings` だけ**で、
-`gz fetch` 単体・`gz pull`・`gz sync` は fetch が 1 回だけなので並列化する対象がありません。
+`gz fetch` 単体と `gz pull` は fetch が 1 回だけなので並列化する対象がありません。
 
 各リポジトリの出力はキャプチャして、完了した順にひとまとまりで書き出すため、更新表が混ざることは
 ありません。並列フェーズは一切の対話ができないので、**パスワードや passphrase が必要なものは、
@@ -259,7 +259,6 @@ git config --global fuzgit.notify true
 | [`gz diff`](https://hatohato25.github.io/fuzgit/docs.html#diff) | 比較対象を選んで差分を表示する |
 | [`gz fetch`](https://hatohato25.github.io/fuzgit/docs.html#fetch) | fetch の対象を決めて取得する（`--siblings` で隣のリポジトリも一括取得。**ネットワークを使う**） |
 | [`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) | ブランチを選んで upstream へまとめて追随させる（fast-forward のみ。**ネットワークを使う**） |
-| [`gz sync`](https://hatohato25.github.io/fuzgit/docs.html#sync) | 現在ブランチを upstream と同期する（**ネットワークを使う**） |
 | [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | worktree を一覧・管理する（`add <名前>` はリポジトリの兄弟に作成し、`.claude/` を複写する） |
 
 オプション・候補の作り方・プレビューの内容・確認プロンプトの有無は

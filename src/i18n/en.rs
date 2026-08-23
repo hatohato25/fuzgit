@@ -11,7 +11,7 @@ use super::messages::{
     CommitMessages, CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
     FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, LogMessages,
     MergeMessages, Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages,
-    RevertMessages, StashMessages, StatusMessages, SyncMessages, WorktreeMessages,
+    RevertMessages, StashMessages, StatusMessages, WorktreeMessages,
 };
 use crate::error::{Error, stderr_suffix};
 use crate::git::read::{BRANCH_REF_PREFIX, MalformedOutput, ReadOperation, WORKTREE_LABEL};
@@ -108,10 +108,6 @@ impl Messages for EnglishMessages {
 
     fn worktree(&self) -> &dyn WorktreeMessages {
         &EnglishWorktreeMessages
-    }
-
-    fn sync(&self) -> &dyn SyncMessages {
-        &EnglishSyncMessages
     }
 
     fn diff(&self) -> &dyn DiffMessages {
@@ -1233,71 +1229,6 @@ impl WorktreeMessages for EnglishWorktreeMessages {
     }
 }
 
-/// `gz sync`（[`crate::commands::sync`]）の英語表示。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EnglishSyncMessages;
-
-impl SyncMessages for EnglishSyncMessages {
-    /// オプション名は訳さない（design.md「翻訳しないもの」）。
-    fn conflicting_modes(&self) -> &'static str {
-        "`--rebase` and `--merge` cannot be given at the same time"
-    }
-
-    fn fetch_failed(&self, remote: &str) -> String {
-        format!("Failed to fetch from the remote `{remote}`")
-    }
-
-    /// コマンド列は訳さない（design.md「翻訳しないもの」）。
-    fn tracking_ref_unavailable(&self, branch: &str, remote: &str, merge_ref: &str) -> String {
-        format!(
-            "The upstream of `{branch}` ({remote} / {merge_ref}) does not yield \
-a remote-tracking reference. \
-Set it again with `git branch --set-upstream-to=<remote>/<branch>`"
-        )
-    }
-
-    /// プレースホルダ（`<name>` / `<url>`）は読み手のための語であり表示言語に合わせる。
-    fn unknown_remote(&self, branch: &str, remote: &str) -> String {
-        format!(
-            "`{remote}`, the upstream remote of `{branch}`, is not a registered remote. \
-Register it with `git remote add <name> <url>`, \
-or set the upstream again with `git branch --set-upstream-to=<remote>/<branch>`"
-        )
-    }
-
-    fn missing_tracking_ref(&self, reference: &str, remote: &str, branch: &str) -> String {
-        format!(
-            "The remote-tracking reference `{reference}` does not exist. \
-`{remote}` may have no upstream for `{branch}` \
-(create it with `git push -u <remote> <branch>`, \
-or set the upstream again with `git branch --set-upstream-to=<remote>/<branch>`)"
-        )
-    }
-
-    fn up_to_date(&self, branch: &str, reference: &str) -> String {
-        format!("`{branch}` is up to date (there is nothing to bring in from `{reference}`)")
-    }
-
-    fn unpushed_commits(&self, count: usize) -> String {
-        format!(
-            "{count} {noun} {verb} not been pushed yet (`git push` pushes them)",
-            noun = commits(count),
-            verb = if count == 1 { "has" } else { "have" }
-        )
-    }
-
-    fn integration_failed(&self, reference: &str) -> String {
-        format!("Failed to bring in `{reference}`")
-    }
-
-    fn confirmation(&self, reference: &str, count: usize, branch: &str) -> String {
-        format!(
-            "{count} {noun} from `{reference}` will be brought into `{branch}`",
-            noun = commits(count)
-        )
-    }
-}
-
 /// `gz diff`（[`crate::commands::diff`]）の英語表示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnglishDiffMessages;
@@ -1543,7 +1474,7 @@ Push with `git push -u <remote> <branch>`, or set one with `git branch --set-ups
     /// コマンド列（`gz sync --rebase` / `gz sync --merge`）は訳さない。
     fn fast_forward_guidance(&self) -> &'static str {
         "A branch that could not fast-forward can be integrated with \
-`gz sync --rebase` or `gz sync --merge` after switching to it"
+`gz pull --rebase` or `gz pull --merge` after switching to it"
     }
 
     fn partial_failure(&self) -> &'static str {
@@ -1552,6 +1483,67 @@ Push with `git push -u <remote> <branch>`, or set one with `git branch --set-ups
 
     fn notification_title(&self) -> &'static str {
         "gz pull finished"
+    }
+
+    // `gz pull --rebase` / `--merge`（`gz sync` から移設）
+
+    /// オプション名は訳さない（design.md「翻訳しないもの」）。
+    fn conflicting_modes(&self) -> &'static str {
+        "`--rebase` and `--merge` cannot be given at the same time"
+    }
+
+    fn fetch_failed(&self, remote: &str) -> String {
+        format!("Failed to fetch from the remote `{remote}`")
+    }
+
+    /// コマンド列は訳さない（design.md「翻訳しないもの」）。
+    fn tracking_ref_unavailable(&self, branch: &str, remote: &str, merge_ref: &str) -> String {
+        format!(
+            "The upstream of `{branch}` ({remote} / {merge_ref}) does not yield \
+a remote-tracking reference. \
+Set it again with `git branch --set-upstream-to=<remote>/<branch>`"
+        )
+    }
+
+    /// プレースホルダ（`<name>` / `<url>`）は読み手のための語であり表示言語に合わせる。
+    fn unknown_remote(&self, branch: &str, remote: &str) -> String {
+        format!(
+            "`{remote}`, the upstream remote of `{branch}`, is not a registered remote. \
+Register it with `git remote add <name> <url>`, \
+or set the upstream again with `git branch --set-upstream-to=<remote>/<branch>`"
+        )
+    }
+
+    fn missing_tracking_ref(&self, reference: &str, remote: &str, branch: &str) -> String {
+        format!(
+            "The remote-tracking reference `{reference}` does not exist. \
+`{remote}` may have no upstream for `{branch}` \
+(create it with `git push -u <remote> <branch>`, \
+or set the upstream again with `git branch --set-upstream-to=<remote>/<branch>`)"
+        )
+    }
+
+    fn up_to_date(&self, branch: &str, reference: &str) -> String {
+        format!("`{branch}` is up to date (there is nothing to bring in from `{reference}`)")
+    }
+
+    fn unpushed_commits(&self, count: usize) -> String {
+        format!(
+            "{count} {noun} {verb} not been pushed yet (`git push` pushes them)",
+            noun = commits(count),
+            verb = if count == 1 { "has" } else { "have" }
+        )
+    }
+
+    fn integration_failed(&self, reference: &str) -> String {
+        format!("Failed to bring in `{reference}`")
+    }
+
+    fn confirmation(&self, reference: &str, count: usize, branch: &str) -> String {
+        format!(
+            "{count} {noun} from `{reference}` will be brought into `{branch}`",
+            noun = commits(count)
+        )
     }
 }
 

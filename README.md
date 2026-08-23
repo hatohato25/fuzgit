@@ -199,7 +199,7 @@ The current repository is preselected. Tab: toggle the selection / Enter: fetch 
 The selected repositories are fetched **in parallel** — the wait is network round trips, and the
 targets are separate repositories. Four run at a time by default; `git config fuzgit.fetchJobs <n>`
 changes that, and `1` restores the fully serial behaviour. **The setting applies to
-`gz fetch --siblings` only**; plain `gz fetch`, `gz pull` and `gz sync` fetch once and have nothing
+`gz fetch --siblings` only**; plain `gz fetch` and `gz pull` fetch once and have nothing
 to parallelise.
 
 Each repository's output is captured and printed as one block when it finishes, so the update tables
@@ -264,7 +264,6 @@ way you learn the result**.
 | [`gz diff`](https://hatohato25.github.io/fuzgit/docs.html#diff) | Pick what to compare and show the diff |
 | [`gz fetch`](https://hatohato25.github.io/fuzgit/docs.html#fetch) | Choose what to fetch (`--siblings` fetches neighboring repositories too. **uses the network**) |
 | [`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) | Pick branches and bring them up to their upstream at once (fast-forward only. **uses the network**) |
-| [`gz sync`](https://hatohato25.github.io/fuzgit/docs.html#sync) | Sync the current branch with its upstream (**uses the network**) |
 | [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | List and manage worktrees (`add <name>` creates it next to the repository and copies `.claude/` into it) |
 
 Options, how candidates are built, what the preview shows, and whether a confirmation prompt appears
