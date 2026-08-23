@@ -30,7 +30,8 @@ use gix::bstr::ByteSlice as _;
 use crate::commands::{HEADER_SEPARATOR, aligned_candidates, selection_header};
 use crate::error::Error;
 use crate::finder::{
-    FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with, select_one_with,
+    FinderItem, FinderOptions, Highlight, HighlightColor, PreviewSource, SelectionMode,
+    select_many_with, select_one_with,
 };
 use crate::git::exec::{CapturedRun, capture_git_noninteractive_in, run_git, run_git_in};
 use crate::git::read::{branch_tracking_args, remote_tracking_refs_args, remote_url_args, remotes};
@@ -394,6 +395,41 @@ fn sibling_cells(candidate: &SiblingRepository) -> Vec<String> {
     vec![candidate.name.clone(), branches]
 }
 
+/// 候補行のうち色を付ける範囲。
+///
+/// 色を付けるのは**右端の列**、すなわち fetch がどこから取り込むことになるのか
+/// （`<リモート>/<ブランチ>` の並び）を示す部分である。左端のディレクトリ名は絞り込みの
+/// 主対象であり、一覧の大半を占めるため色を付けない（`commit_highlights` と同じ判断）。
+///
+/// 配色は git に合わせる。upstream を示す青は `git branch -vv` が `[origin/main]` に
+/// 使う色（実測確認済み）であり、detached の黄は「対にするブランチが無く、取り込み先を
+/// 示せない」という注意喚起としての fuzgit の判断である。
+///
+/// 範囲は**整形後の行**に対するバイト位置で求める。ディレクトリ名には多バイト文字が
+/// 入り得るうえ、列の幅は候補一覧全体で決まる（[`aligned_candidates`]）ため、
+/// 列の内容から位置を計算せず、行の末尾側から探す。
+fn sibling_highlights(line: &str, candidate: &SiblingRepository) -> Vec<Highlight> {
+    let cells = sibling_cells(candidate);
+    let Some(last) = cells.last().filter(|cell| !cell.is_empty()) else {
+        return Vec::new();
+    };
+
+    // 右端の列は行の末尾側にある。左の列に同じ文字列が現れても取り違えないよう
+    // `rfind` で最後の出現を採る
+    let Some(start) = line.rfind(last.as_str()) else {
+        // 整形の過程で列の内容が変わった場合。色を付けないだけで一覧は成立する
+        return Vec::new();
+    };
+
+    let color = if candidate.current_branch.is_some() {
+        HighlightColor::Blue
+    } else {
+        HighlightColor::Yellow
+    };
+
+    vec![Highlight::new(start, start + last.len(), color)]
+}
+
 /// 起動時に選択済みにする候補の表示文字列を集める。
 ///
 /// 受け取るのは [`aligned_candidates`] が組み立てた候補と表示行の対であり、
@@ -425,7 +461,8 @@ fn sibling_items(
                 sibling_key(messages, candidate)?.to_owned(),
                 sibling_preview_source(messages, candidate),
                 language.messages(),
-            ))
+            )
+            .with_highlights(sibling_highlights(line, candidate)))
         })
         .collect()
 }
@@ -1534,6 +1571,67 @@ mod tests {
                 (label.clone(), directory.clone(), args.clone())
             })
             .collect()
+    }
+
+    /// 右端の列（取り込み先）の範囲を、行から独立に求める。
+    ///
+    /// `sibling_highlights` と同じ計算（末尾側からの探索）を書き写すと、両方が同じ間違いを
+    /// しても気付けない。ここでは「右端の列は行の最後の内容である」という別の性質から導く。
+    fn destination_range(line: &str, content: &str) -> (usize, usize) {
+        let trimmed = line.trim_end();
+        (trimmed.len() - content.len(), trimmed.len())
+    }
+
+    #[test]
+    fn the_stream_destination_column_is_coloured() {
+        // 色を付けるのは「どこから取り込むことになるのか」を示す右端の列だけ。
+        // 左のディレクトリ名は絞り込みの主対象であり、一覧の大半を占めるため付けない
+        let candidate = sibling("api", false);
+        let lines = aligned_candidates(std::slice::from_ref(&candidate), sibling_cells);
+        let (_, line) = &lines[0];
+        let (start, end) = destination_range(line, "origin/main");
+
+        assert_eq!(
+            sibling_highlights(line, &candidate),
+            [Highlight::new(start, end, HighlightColor::Blue)]
+        );
+    }
+
+    #[test]
+    fn a_detached_repository_marks_its_state_instead() {
+        // detached には対にするブランチが無く、取り込み先を示せない。青ではなく注意の黄にする
+        let mut candidate = sibling("api", false);
+        candidate.current_branch = None;
+        let lines = aligned_candidates(std::slice::from_ref(&candidate), sibling_cells);
+        let (_, line) = &lines[0];
+        let (start, end) = destination_range(line, DETACHED_LABEL);
+
+        assert_eq!(
+            sibling_highlights(line, &candidate),
+            [Highlight::new(start, end, HighlightColor::Yellow)]
+        );
+    }
+
+    #[test]
+    fn the_coloured_range_survives_a_multibyte_directory_name() {
+        // 範囲はバイト位置。列の幅は候補一覧全体で決まるため、整形後の行から求める
+        let mut wide = sibling("日本語のリポジトリ", false);
+        wide.remotes = vec!["origin".to_owned(), "upstream".to_owned()];
+        let candidates = vec![wide, sibling("api", false)];
+        let lines = aligned_candidates(&candidates, sibling_cells);
+
+        for (candidate, line) in &lines {
+            let content = sibling_cells(candidate)
+                .pop()
+                .expect("a candidate line has columns");
+            let (start, end) = destination_range(line, &content);
+
+            assert_eq!(
+                sibling_highlights(line, candidate),
+                [Highlight::new(start, end, HighlightColor::Blue)],
+                "the destination column should be selected in {line:?}"
+            );
+        }
     }
 
     #[test]

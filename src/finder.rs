@@ -238,6 +238,11 @@ pub enum HighlightColor {
     Red,
     /// 黄（ANSI 33）。
     Yellow,
+    /// 青（ANSI 34）。
+    ///
+    /// git が upstream（`git branch -vv` の `[origin/main]`）に使う色であり、
+    /// 「取り込み先・追跡先」を示す列に用いる。
+    Blue,
 }
 
 impl HighlightColor {
@@ -247,6 +252,7 @@ impl HighlightColor {
             Self::Green => Color::Green,
             Self::Red => Color::Red,
             Self::Yellow => Color::Yellow,
+            Self::Blue => Color::Blue,
         }
     }
 
@@ -261,6 +267,7 @@ impl HighlightColor {
             Self::Green => "\u{1b}[32m",
             Self::Red => "\u{1b}[31m",
             Self::Yellow => "\u{1b}[33m",
+            Self::Blue => "\u{1b}[34m",
         }
     }
 }

@@ -542,7 +542,14 @@ pub fn remotes(repository: &gix::Repository) -> Result<Vec<String>> {
 ///
 /// 既定の出力はオブジェクト ID と種別も並べるため、必要な参照名だけを出させる。
 /// 参照名は制御文字を含めない規則（`git check-ref-format`）であり、改行で区切っても曖昧にならない。
-const SHORT_REF_FORMAT: &str = "--format=%(refname:short)";
+const SHORT_REF_FORMAT: &str = "--format=%(color:red)%(refname:short)%(color:reset)";
+
+/// `for-each-ref` の出力へ確実に色を付けさせるオプション。
+///
+/// **`%(color:…)` だけでは足りない。**`for-each-ref` は出力が端末でない場合に色を落とすため、
+/// プレビュー（出力をキャプチャして描画する）では何も付かない（実測確認済み）。
+/// `-c color.ui=always` は `for-each-ref` には効かず、このオプションだけが効いた。
+const FORCE_COLOR_OPTION: &str = "--color=always";
 
 /// リモートの URL を表示する `git remote get-url <remote>` の実行引数を組み立てる。
 ///
@@ -570,6 +577,7 @@ pub fn remote_tracking_refs_args(remote: &str) -> Vec<String> {
     vec![
         "for-each-ref".to_owned(),
         format!("refs/remotes/{remote}"),
+        FORCE_COLOR_OPTION.to_owned(),
         SHORT_REF_FORMAT.to_owned(),
     ]
 }
@@ -580,9 +588,10 @@ pub fn remote_tracking_refs_args(remote: &str) -> Vec<String> {
 /// upstream が設定されていないブランチと、upstream に対して差が無いブランチでは
 /// `%(if)` で該当部分ごと省き、行末に空の欄が残らないようにする。
 /// ahead/behind の文言（`[ahead 2, behind 1]` / `[gone]`）は git の表記をそのまま用いる。
-const BRANCH_TRACKING_FORMAT: &str = "--format=%(HEAD) %(refname:short)\
-%(if)%(upstream)%(then) → %(upstream:short)%(end)\
-%(if)%(upstream:track)%(then) %(upstream:track)%(end)";
+const BRANCH_TRACKING_FORMAT: &str = "--format=%(HEAD) \
+%(if)%(HEAD)%(then)%(color:green)%(end)%(refname:short)%(color:reset)\
+%(if)%(upstream)%(then) → %(color:blue)%(upstream:short)%(color:reset)%(end)\
+%(if)%(upstream:track)%(then) %(color:yellow)%(upstream:track)%(color:reset)%(end)";
 
 /// ローカルブランチとその追跡状況を列挙する `git for-each-ref` の実行引数を組み立てる。
 ///
@@ -599,6 +608,7 @@ pub fn branch_tracking_args() -> Vec<String> {
     vec![
         "for-each-ref".to_owned(),
         "refs/heads".to_owned(),
+        FORCE_COLOR_OPTION.to_owned(),
         BRANCH_TRACKING_FORMAT.to_owned(),
     ]
 }
@@ -3415,7 +3425,7 @@ mod tests {
             .expect("the tracking refs should be readable");
 
         let text = String::from_utf8_lossy(&output).into_owned();
-        let refs: Vec<&str> = text.lines().collect();
+        let refs: Vec<String> = text.lines().map(strip_ansi).collect();
         assert_eq!(refs, ["origin/feature/login", "origin/main"]);
     }
 
@@ -3431,7 +3441,20 @@ mod tests {
     }
 
     /// 追跡状況の各行を取り出す。
+    /// 追跡状況の各行から**色を落として**返す。
+    ///
+    /// 書式には `%(color:…)` が入っており、`--color=always` で必ず ANSI が乗る
+    /// （[`FORCE_COLOR_OPTION`]）。ここで検証したいのは並びと内容であり、色そのものは
+    /// [`the_tracking_state_is_coloured_like_git_branch`] が別に固定する。
     fn tracking_lines(workdir: &Path) -> Vec<String> {
+        raw_tracking_lines(workdir)
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect()
+    }
+
+    /// 追跡状況の各行を、色を落とさずそのまま返す。
+    fn raw_tracking_lines(workdir: &Path) -> Vec<String> {
         let output = capture_git_in(workdir, &to_str(&branch_tracking_args()))
             .expect("the branch tracking state should be readable");
 
@@ -3439,6 +3462,27 @@ mod tests {
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    /// ANSI のエスケープシーケンス（`ESC [ … m`）を取り除く。
+    fn strip_ansi(line: &str) -> String {
+        let mut stripped = String::with_capacity(line.len());
+        let mut characters = line.chars();
+
+        while let Some(character) = characters.next() {
+            if character != '\u{1b}' {
+                stripped.push(character);
+                continue;
+            }
+            // `ESC [` に続く終端文字（`m`）までを読み飛ばす
+            for escaped in characters.by_ref() {
+                if escaped.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+
+        stripped
     }
 
     /// `origin` を登録済みの、1 コミットだけ持つテストリポジトリを用意する。
@@ -3574,10 +3618,65 @@ mod tests {
     }
 
     #[test]
+    fn the_tracking_state_is_coloured_like_git_branch() {
+        // 配色は git 自身に合わせる（実測: `git branch -vv` は current を緑・upstream を青、
+        // `git branch -r` はリモート追跡参照を赤で出す）。ahead/behind の黄は fuzgit の追加で、
+        // `gz fetch` のプレビューでは「どれだけずれているか」が読み手の目的そのものであるため
+        let (dir, head) = repository_with_origin("read-tracking-colour");
+        create_remote_branch(dir.path(), "origin/main", &head);
+        git_in(
+            dir.path(),
+            &["branch", "--set-upstream-to=origin/main", "main"],
+        );
+        commit(dir.path(), "second commit");
+
+        let line = raw_tracking_lines(dir.path())
+            .into_iter()
+            .next()
+            .expect("the current branch is listed");
+
+        assert!(
+            line.contains("\u{1b}[32mmain"),
+            "the current branch should be green like git: {line:?}"
+        );
+        assert!(
+            line.contains("\u{1b}[34morigin/main"),
+            "the upstream should be blue like git branch -vv: {line:?}"
+        );
+        assert!(
+            line.contains("\u{1b}[33m[ahead 1]"),
+            "the distance should stand out: {line:?}"
+        );
+    }
+
+    #[test]
+    fn the_colour_survives_being_captured() {
+        // `for-each-ref` は出力が端末でないと色を落とす。プレビューは出力をキャプチャして
+        // 描画するため、`--color=always` が無いと一切色が付かない（実測で確認した挙動）
+        let (dir, head) = repository_with_origin("read-tracking-colour-captured");
+        create_remote_branch(dir.path(), "origin/main", &head);
+
+        let output = capture_git_in(dir.path(), &to_str(&remote_tracking_refs_args("origin")))
+            .expect("the tracking refs should be readable");
+        let text = String::from_utf8_lossy(&output).into_owned();
+
+        assert!(
+            text.contains("\u{1b}[31m"),
+            "a captured preview must still carry colour: {text:?}"
+        );
+        assert_eq!(strip_ansi(text.trim_end()), "origin/main");
+    }
+
+    #[test]
     fn tracking_refs_are_addressed_by_the_full_reference_prefix() {
         assert_eq!(
             remote_tracking_refs_args("origin"),
-            ["for-each-ref", "refs/remotes/origin", SHORT_REF_FORMAT]
+            [
+                "for-each-ref",
+                "refs/remotes/origin",
+                FORCE_COLOR_OPTION,
+                SHORT_REF_FORMAT
+            ]
         );
     }
 
