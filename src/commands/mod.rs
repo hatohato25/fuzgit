@@ -206,6 +206,29 @@ pub(crate) fn command_display(args: &[&str]) -> String {
     format!("git {args}", args = args.join(" "))
 }
 
+/// [`aligned_candidates`] が整形した行のうち、**最終列が占めるバイト範囲**。
+///
+/// [`join_row`] は幅を揃えた前方の列を区切りでつないだあと、**最終列を埋めずにそのまま
+/// 連結する**（幅を測るのは「次の列の開始位置を揃える」ためだけであり、最終列には次が無い。
+/// [`column_widths`] を参照）。したがって整形後の行は必ず最終列で終わり、位置は
+/// 内容の長さから引き算で求まる——行を走査して探す必要は無い。
+///
+/// 列の位置を決めているのはこのモジュールの整形処理であるため、位置を求める術も
+/// ここに置く。呼び出し側が整形後の文字列を検索して復元すると、整形の仕様が変わったときに
+/// **コンパイルもテストも通ったまま範囲だけが静かにずれる**。
+///
+/// 最終列が空の候補では空の範囲（`start == end`）を返す。色を付ける対象が無い状態であり、
+/// 呼び出し側はハイライトを作らないこと。
+pub(crate) fn last_column_range(line: &str, last_cell: &str) -> std::ops::Range<usize> {
+    debug_assert!(
+        line.ends_with(last_cell),
+        "整形後の行は最終列で終わる: {line:?} / {last_cell:?}"
+    );
+
+    let start = line.len().saturating_sub(last_cell.len());
+    start..line.len()
+}
+
 /// 選択中のコミットを色付きで示す `git show` の引数を組み立てる（プレビュー用）。
 ///
 /// `gz log` / `gz reflog` の候補一覧と、コミット選択後のアクションメニュー（FR-32）が
@@ -526,6 +549,43 @@ mod tests {
             commit_line(&commit("1f0c9a4", "2026-08-20", "add the notify feature")),
             "1f0c9a4 2026-08-20 add the notify feature (hatohato25)"
         );
+    }
+
+    #[test]
+    fn the_last_column_is_the_suffix_of_the_formatted_line() {
+        // `last_column_range` はこの不変条件だけを根拠に引き算で位置を求める。
+        // 整形側が最終列も埋めるように変わったら、ここが最初に落ちる
+        let rows = vec![
+            vec!["short".to_owned(), "origin/main".to_owned()],
+            vec!["a-much-longer-name".to_owned(), "origin/feature".to_owned()],
+            vec!["日本語".to_owned(), "origin/main, upstream/main".to_owned()],
+        ];
+
+        for row in &rows {
+            let lines = align_columns(&rows);
+            let index = rows
+                .iter()
+                .position(|r| r == row)
+                .expect("the row is listed");
+            let line = &lines[index];
+            let last = row.last().expect("the row has columns");
+
+            assert!(
+                line.ends_with(last.as_str()),
+                "the last column must end the line: {line:?} / {last:?}"
+            );
+
+            let range = last_column_range(line, last);
+            assert_eq!(&line[range], last.as_str());
+        }
+    }
+
+    #[test]
+    fn an_empty_last_column_yields_an_empty_range() {
+        // 色を付ける対象が無い状態。呼び出し側はハイライトを作らない
+        let range = last_column_range("name  ", "");
+
+        assert!(range.is_empty());
     }
 
     #[test]

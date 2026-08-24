@@ -3440,7 +3440,6 @@ mod tests {
         assert!(output.is_empty(), "unexpected output: {output:?}");
     }
 
-    /// 追跡状況の各行を取り出す。
     /// 追跡状況の各行から**色を落として**返す。
     ///
     /// 書式には `%(color:…)` が入っており、`--color=always` で必ず ANSI が乗る
@@ -3448,8 +3447,8 @@ mod tests {
     /// [`the_tracking_state_is_coloured_like_git_branch`] が別に固定する。
     fn tracking_lines(workdir: &Path) -> Vec<String> {
         raw_tracking_lines(workdir)
-            .iter()
-            .map(|line| strip_ansi(line))
+            .into_iter()
+            .map(|line| strip_ansi(&line))
             .collect()
     }
 

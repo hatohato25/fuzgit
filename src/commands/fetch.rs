@@ -27,7 +27,7 @@ use std::time::Instant;
 use anyhow::{Context as _, Result, anyhow, bail};
 use gix::bstr::ByteSlice as _;
 
-use crate::commands::{HEADER_SEPARATOR, aligned_candidates, selection_header};
+use crate::commands::{HEADER_SEPARATOR, aligned_candidates, last_column_range, selection_header};
 use crate::error::Error;
 use crate::finder::{
     FinderItem, FinderOptions, Highlight, HighlightColor, PreviewSource, SelectionMode,
@@ -376,23 +376,34 @@ fn sibling_header(messages: &dyn Messages, scan: &SiblingScan, prune: PruneMode)
 /// 実際の追跡状況を示すのはプレビューの「ブランチの追跡状況」セクションであり、
 /// ここでの `/` は識別と絞り込みのための整形にすぎない。
 fn sibling_cells(candidate: &SiblingRepository) -> Vec<String> {
-    let Some(branch) = candidate.current_branch.as_deref() else {
+    let Some(_branch) = candidate.current_branch.as_deref() else {
         // detached HEAD には対にするブランチが無いため、リモート一覧と状態をそのまま並べる。
         return vec![
             candidate.name.clone(),
             candidate.remotes.join(", "),
-            DETACHED_LABEL.to_owned(),
+            sibling_destination(candidate),
         ];
     };
 
-    let branches = candidate
+    vec![candidate.name.clone(), sibling_destination(candidate)]
+}
+
+/// 候補行の**右端の列**、すなわち fetch がどこから取り込むことになるのかを示す部分。
+///
+/// [`sibling_cells`] から切り出してあるのは、色を付ける範囲を求める
+/// [`sibling_highlights`] がこの列だけを必要とするためである。行全体の列を組み直すと、
+/// 候補 1 件につきリモート数に比例した確保を捨てることになる。
+fn sibling_destination(candidate: &SiblingRepository) -> String {
+    let Some(branch) = candidate.current_branch.as_deref() else {
+        return DETACHED_LABEL.to_owned();
+    };
+
+    candidate
         .remotes
         .iter()
         .map(|remote| format!("{remote}/{branch}"))
         .collect::<Vec<_>>()
-        .join(", ");
-
-    vec![candidate.name.clone(), branches]
+        .join(", ")
 }
 
 /// 候補行のうち色を付ける範囲。
@@ -405,21 +416,16 @@ fn sibling_cells(candidate: &SiblingRepository) -> Vec<String> {
 /// 使う色（実測確認済み）であり、detached の黄は「対にするブランチが無く、取り込み先を
 /// 示せない」という注意喚起としての fuzgit の判断である。
 ///
-/// 範囲は**整形後の行**に対するバイト位置で求める。ディレクトリ名には多バイト文字が
-/// 入り得るうえ、列の幅は候補一覧全体で決まる（[`aligned_candidates`]）ため、
-/// 列の内容から位置を計算せず、行の末尾側から探す。
+/// 範囲は**整形後の行**に対するバイト位置である。ディレクトリ名には多バイト文字が入り得る
+/// うえ、列の幅は候補一覧全体で決まる（[`aligned_candidates`]）ため、位置は列の内容から
+/// 計算せず、整形側が保証する不変条件から [`last_column_range`] に求めさせる。
 fn sibling_highlights(line: &str, candidate: &SiblingRepository) -> Vec<Highlight> {
-    let cells = sibling_cells(candidate);
-    let Some(last) = cells.last().filter(|cell| !cell.is_empty()) else {
+    let destination = sibling_destination(candidate);
+    let range = last_column_range(line, &destination);
+    if range.is_empty() {
+        // リモートを 1 つも持たない候補。色を付ける対象が無い
         return Vec::new();
-    };
-
-    // 右端の列は行の末尾側にある。左の列に同じ文字列が現れても取り違えないよう
-    // `rfind` で最後の出現を採る
-    let Some(start) = line.rfind(last.as_str()) else {
-        // 整形の過程で列の内容が変わった場合。色を付けないだけで一覧は成立する
-        return Vec::new();
-    };
+    }
 
     let color = if candidate.current_branch.is_some() {
         HighlightColor::Blue
@@ -427,7 +433,7 @@ fn sibling_highlights(line: &str, candidate: &SiblingRepository) -> Vec<Highligh
         HighlightColor::Yellow
     };
 
-    vec![Highlight::new(start, start + last.len(), color)]
+    vec![Highlight::new(range.start, range.end, color)]
 }
 
 /// 起動時に選択済みにする候補の表示文字列を集める。
@@ -1573,10 +1579,13 @@ mod tests {
             .collect()
     }
 
-    /// 右端の列（取り込み先）の範囲を、行から独立に求める。
+    /// 右端の列（取り込み先）の範囲を、期待値として組み立てる。
     ///
-    /// `sibling_highlights` と同じ計算（末尾側からの探索）を書き写すと、両方が同じ間違いを
-    /// しても気付けない。ここでは「右端の列は行の最後の内容である」という別の性質から導く。
+    /// 実装（`last_column_range`）と同じ不変条件を使うため、**計算の独立性は無い**。
+    /// このヘルパが固定するのは「その範囲が意図した文字列を覆っていること」であり、
+    /// 不変条件そのものは `commands::mod` 側の
+    /// `the_last_column_is_the_suffix_of_the_formatted_line` が
+    /// `aligned_candidates` の実出力に対して固定する。
     fn destination_range(line: &str, content: &str) -> (usize, usize) {
         let trimmed = line.trim_end();
         (trimmed.len() - content.len(), trimmed.len())
