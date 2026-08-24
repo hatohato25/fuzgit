@@ -123,6 +123,9 @@ pub trait Messages: Sync + std::fmt::Debug {
     /// `gz log`（[`crate::commands::log`]）の文言。
     fn log(&self) -> &dyn LogMessages;
 
+    /// `gz pr`（[`crate::commands::pr`]）の文言。
+    fn pr(&self) -> &dyn PrMessages;
+
     /// コミット選択後のアクションメニュー（[`crate::commands::commit_menu`]）の文言。
     ///
     /// [`Messages::log`] / [`Messages::reflog`] の下へ入れず独立したアクセサにするのは、
@@ -424,6 +427,23 @@ pub trait CliMessages: Sync + std::fmt::Debug {
 
     /// `gz pull` の説明。
     fn pull_about(&self) -> &'static str;
+
+    // `gz pr`
+
+    /// `gz pr` の説明。
+    fn pr_about(&self) -> &'static str;
+
+    /// `gz pr --checks` の説明。
+    fn pr_checks_help(&self) -> &'static str;
+
+    /// `gz pr --action` の説明。
+    fn pr_action_help(&self) -> &'static str;
+
+    /// `gz pr --worktree <NAME>` の説明。
+    fn pr_worktree_help(&self) -> &'static str;
+
+    /// `gz pr --no-install` の説明。
+    fn pr_no_install_help(&self) -> &'static str;
 
     /// `gz sync` の説明。
     fn sync_about(&self) -> &'static str;
@@ -989,6 +1009,11 @@ pub trait WorktreeMessages: Sync + std::fmt::Debug {
     /// 選択されたブランチが候補一覧に見つからなかったことを伝える。
     fn branch_selection_not_found(&self, selected: &str) -> String;
 
+    /// 作成しようとした場所に worktree が既に登録されている場合のエラー。
+    ///
+    /// finder を開く前に停止するために使う（選ばせたあとに失敗させない）。
+    fn already_exists(&self, path: &str) -> String;
+
     /// worktree の作成に失敗したことを伝える。
     fn creation_failed(&self, path: &str) -> String;
 
@@ -1466,6 +1491,75 @@ pub trait LogMessages: Sync + std::fmt::Debug {
 ///
 /// 照合に使うキー（`show` / `switch` / `cherry-pick` 等）は表示と分離されており、
 /// ここでの翻訳の影響を受けない。
+/// `gz pr`（[`crate::commands::pr`]）の文言。
+///
+/// `gh` が出す文字列は英語のみであり fuzgit では翻訳できない。ここが担うのは
+/// **fuzgit 自身が出す文言だけ**であり、`gh` の標準エラーはそのまま素通しする
+/// （design.md「エラーと i18n」）。
+pub trait PrMessages: Sync + std::fmt::Debug {
+    /// 候補を取得している間に示す 1 行。
+    ///
+    /// 候補取得はネットワーク往復を伴い数百ミリ秒〜数秒掛かる。何も起きていないように
+    /// 見せないため、finder を開く前に標準エラーへ出す（`gz fetch` が対象を示すのと同じ形）。
+    fn fetching(&self) -> &'static str;
+
+    /// open な PR が 1 件も無い場合の説明。
+    fn no_candidates(&self) -> &'static str;
+
+    /// 候補選択の finder のヘッダー（何を選ぶか）。
+    fn header_subject(&self) -> &'static str;
+
+    /// 候補選択の finder のヘッダー（Enter で何が起きるか）。
+    fn header_outcome(&self) -> &'static str;
+
+    /// 選択結果が候補一覧に無い場合のエラー。
+    fn selection_not_found(&self, selected: &str) -> String;
+
+    /// プレビューの枠に出す「取り込み先 ← 取り込み元」の見出し。
+    fn branches_section(&self) -> &'static str;
+
+    /// draft の PR に付ける短いラベル。
+    ///
+    /// 候補行の桁を揃えるため、非 draft でも同じ幅を占める空白に置き換える
+    /// （[`PrMessages::draft_placeholder`]）。
+    fn draft_label(&self) -> &'static str;
+
+    /// 非 draft の PR で [`PrMessages::draft_label`] と同じ幅を占める空白。
+    fn draft_placeholder(&self) -> String {
+        " ".repeat(self.draft_label().chars().count())
+    }
+
+    /// `--checks` で取得したレビュー状況が空のときに出す記号。
+    fn no_review(&self) -> &'static str;
+
+    /// `--checks` で取得した CI 結果の要約（成功・失敗・保留の件数）。
+    fn checks_summary(&self, passed: usize, failed: usize, pending: usize) -> String;
+
+    /// worktree 名として受け取れない値（パス区切りを含む等）に対するエラー。
+    fn worktree_name_invalid(&self, name: &str) -> String;
+
+    /// `--action` メニュー: 選んだ PR を checkout する。
+    fn action_checkout(&self) -> &'static str;
+
+    /// `--action` メニュー: 選んだ PR の詳細を表示する。
+    fn action_view(&self) -> &'static str;
+
+    /// `--action` メニュー: 選んだ PR の差分を表示する。
+    fn action_diff(&self) -> &'static str;
+
+    /// `--action` メニュー: 番号を標準出力へ出す。
+    fn action_print_number(&self) -> &'static str;
+
+    /// `--action` メニュー: URL を標準出力へ出す。
+    fn action_print_url(&self) -> &'static str;
+
+    /// `--action` メニューのヘッダー（何を選ぶか）。
+    fn action_header_subject(&self, number: u64) -> String;
+
+    /// `--action` メニューのヘッダー（Enter で何が起きるか）。
+    fn action_header_outcome(&self) -> &'static str;
+}
+
 pub trait CommitMenuMessages: Sync + std::fmt::Debug {
     /// メニューのヘッダーのうち、何に対する操作を選ぶのかを示す節。
     ///

@@ -34,6 +34,7 @@ pub mod fixup;
 pub mod in_progress;
 pub mod log;
 pub mod merge;
+pub mod pr;
 pub mod pull;
 pub mod rebase;
 pub mod reflog;
@@ -400,6 +401,25 @@ pub fn dispatch(
             messages,
             &repository,
             PullMode::from_flags(messages, *rebase, *merge)?,
+        ),
+        Command::Pr {
+            checks,
+            action,
+            worktree: worktree_name,
+            no_install,
+        } => pr::run(
+            language,
+            messages,
+            &repository,
+            *checks,
+            *action,
+            match worktree_name {
+                None => pr::Destination::Worktree,
+                Some(name) => pr::Destination::NewWorktree {
+                    name: name.clone(),
+                    install: worktree_install::InstallMode::from_no_install(*no_install),
+                },
+            },
         ),
         Command::Worktree { command } => {
             worktree::run(language, messages, &repository, command.as_ref())

@@ -79,9 +79,11 @@
               <figcaption>
                 You never type a branch name: you filter the list until the one
                 you meant is in front of you. The current branch carries the
-                same leading <code>*</code> as <code>git branch</code>, and
-                <b>the preview shows the 50 most recent commits</b> of the
-                highlighted branch (<code>git log --oneline --decorate</code>).
+                same leading <code>*</code> as <code>git branch</code>. The
+                preview opens with a summary of the highlighted branch —
+                <b><code>↑</code> ahead / <code>↓</code> behind its upstream</b>,
+                the upstream itself, and the last commit — and the 50 most
+                recent commits follow (<code>git log --oneline --decorate</code>).
                 With <code>--all</code>, remote-tracking branches join the list
                 — picking <code>origin/feature/search</code> switches by the
                 short name, so git’s DWIM creates the tracking local branch.
@@ -148,7 +150,10 @@
                 contains a <code>.git</code>; a line reads
                 <code>&lt;directory&gt;  &lt;remote&gt;/&lt;current branch&gt;</code>.
                 Repositories that cannot be fetched are excluded, never silently
-                — the number skipped is in the header.
+                — the number skipped is in the header. The ones you pick are
+                fetched <b>in parallel</b>, four at a time
+                (<code>git config fuzgit.fetchJobs &lt;n&gt;</code> changes that,
+                and <code>1</code> makes it fully serial again).
               </figcaption>
             </figure>
 
@@ -174,17 +179,36 @@
 [3/4] diverged
 [4/4] zeta
 <span class="warn">3 succeeded / 1 failed (failed: diverged)</span>
-<span class="hint">A branch that could not fast-forward can be integrated with `gz sync --rebase` or `gz sync --merge` after switching to it</span></code></pre>
+<span class="hint">A branch that could not fast-forward can be integrated with `gz pull --rebase` or `gz pull --merge` after switching to it</span></code></pre>
             <figcaption>
-              Targets run <b>serially, in list
-              order</b>, each announced with
-              <code>[&lt;n&gt;/&lt;total&gt;]</code> so you can tell whose output
-              git is printing; <b>a failure never stops the run</b>, and the
-              tally comes at the end. <code>gz fetch --siblings</code> reports
-              the same way. fuzgit only points at the next step — it never
-              starts <code>gz sync</code> for you.
+              Branches run <b>one at a time, in list order</b> — they all write
+              to one repository, where the index and the ref locks would collide
+              — and each is announced with <code>[&lt;n&gt;/&lt;total&gt;]</code>
+              so you can tell whose output git is printing.
+              <b>A failure never stops the run</b>, and the tally comes at the
+              end; <code>gz fetch --siblings</code> reports the same way.
+              fuzgit only points at the next step — it never starts
+              <code>gz pull --rebase</code> for you.
             </figcaption>
           </figure>
+
+          <p>
+            Both of these runs can tell you when they are done, which helps when
+            you have stepped away from the terminal:
+          </p>
+
+          <pre><code>git config --global fuzgit.notify true</code></pre>
+
+          <p>
+            It is <b>off unless you turn it on</b>, and it stays quiet for runs
+            shorter than ten seconds. The body is the count only — no
+            repository, branch or path names. Whether a banner actually appears
+            depends on the machine (macOS uses <code>osascript</code>, Linux
+            uses <code>notify-send</code>), and fuzgit never treats a missing
+            notifier as a failure: the tally always goes to stderr, so the
+            notification is a convenience and never the only way you learn the
+            result.
+          </p>
 
           <div class="note">
             <p>
@@ -216,9 +240,10 @@
             <article class="feature">
               <h3>Previews never hit the network</h3>
               <p>
-                Candidate lists and previews are built from local repository
-                data only. A preview is regenerated on every cursor move, so a
-                network round trip there would block the whole display.
+                A preview is regenerated on every cursor move, so a network
+                round trip there would block the whole display. Even
+                <code>gz pr</code>, which lists GitHub pull requests, fetches
+                their bodies once up front so the preview stays a local draw.
               </p>
             </article>
 
@@ -226,8 +251,8 @@
               <h3>Only three commands go online</h3>
               <p>
                 <code>gz fetch</code>, <code>gz pull</code> and
-                <code>gz sync</code> use the network. Everything else is local
-                — pushing is left to plain <code>git push</code>.
+                <code>gz pr</code> use the network. Everything else is local —
+                pushing is left to plain <code>git push</code>.
               </p>
             </article>
 
@@ -235,8 +260,9 @@
               <h3>Built not to lose your work</h3>
               <p>
                 Destructive operations confirm first, <code>gz pull</code> is
-                fast-forward only, merge shows a conflict prediction, pushing is
-                left to git and history is never rewritten automatically.
+                fast-forward only, merge shows a conflict prediction, and
+                pushing is left to git. History is rewritten only when you spell
+                it out — <code>gz pull --rebase</code> and nothing else.
               </p>
             </article>
 
@@ -379,23 +405,16 @@ gz --lang ja branch                  # one-off, on any subcommand</code></pre>
               <tbody>
                 <tr>
                   <td><a href="docs.html#branch"><code>gz branch</code></a></td>
-                  <td>
-                    Pick a branch and switch to it (subcommands also create,
-                    delete and tidy up branches)
-                  </td>
+                  <td>Pick a branch and switch to it (subcommands also create, delete and tidy up branches)</td>
                   <td>single / depends on subcommand</td>
                 </tr>
                 <tr>
                   <td><a href="docs.html#log"><code>gz log</code></a></td>
-                  <td>
-                    Trace the commit history and print the full hash to stdout
-                  </td>
+                  <td>Trace the commit history and print the full hash to stdout (<code>--action</code> picks what to do next)</td>
                   <td>single</td>
                 </tr>
                 <tr>
-                  <td>
-                    <a href="docs.html#cherry-pick"><code>gz cherry-pick</code></a>
-                  </td>
+                  <td><a href="docs.html#cherry-pick"><code>gz cherry-pick</code></a></td>
                   <td>Pick commits and cherry-pick them</td>
                   <td>multiple</td>
                 </tr>
@@ -410,25 +429,13 @@ gz --lang ja branch                  # one-off, on any subcommand</code></pre>
                   <td>multiple</td>
                 </tr>
                 <tr>
-                  <td>
-                    <a href="docs.html#stash"><code>gz stash &lt;subcommand&gt;</code></a>
-                  </td>
-                  <td>
-                    Stash changes away, and search stashes to apply or drop them
-                  </td>
+                  <td><a href="docs.html#stash"><code>gz stash &lt;subcommand&gt;</code></a></td>
+                  <td>Stash changes away, and search stashes to apply or drop them</td>
                   <td>depends on subcommand</td>
                 </tr>
                 <tr>
-                  <td><a href="docs.html#tag"><code>gz tag</code></a></td>
-                  <td>Pick a tag to print, switch to, or diff</td>
-                  <td>single</td>
-                </tr>
-                <tr>
                   <td><a href="docs.html#reflog"><code>gz reflog</code></a></td>
-                  <td>
-                    Trace the HEAD reflog and recover commits you thought were
-                    lost
-                  </td>
+                  <td>Trace the HEAD reflog and recover commits you thought were lost (<code>--action</code> picks what to do next)</td>
                   <td>single</td>
                 </tr>
                 <tr>
@@ -443,18 +450,12 @@ gz --lang ja branch                  # one-off, on any subcommand</code></pre>
                 </tr>
                 <tr>
                   <td><a href="docs.html#merge"><code>gz merge</code></a></td>
-                  <td>
-                    Pick the branch to merge (recovery menu while one is in
-                    progress)
-                  </td>
+                  <td>Pick the branch to merge (recovery menu while one is in progress)</td>
                   <td>single</td>
                 </tr>
                 <tr>
                   <td><a href="docs.html#rebase"><code>gz rebase</code></a></td>
-                  <td>
-                    Pick the base to rebase onto (recovery menu while one is in
-                    progress)
-                  </td>
+                  <td>Pick the base to rebase onto (recovery menu while one is in progress)</td>
                   <td>single</td>
                 </tr>
                 <tr>
@@ -464,10 +465,7 @@ gz --lang ja branch                  # one-off, on any subcommand</code></pre>
                 </tr>
                 <tr>
                   <td><a href="docs.html#status"><code>gz status</code></a></td>
-                  <td>
-                    List changed files and act on the ones you pick (two-step
-                    selection)
-                  </td>
+                  <td>List changed files and act on the ones you pick (two-step selection)</td>
                   <td>multiple → single</td>
                 </tr>
                 <tr>
@@ -477,32 +475,22 @@ gz --lang ja branch                  # one-off, on any subcommand</code></pre>
                 </tr>
                 <tr>
                   <td><a href="docs.html#fetch"><code>gz fetch</code></a></td>
-                  <td>
-                    Decide what to fetch and fetch it (<code>--siblings</code>
-                    also fetches the repositories next door;
-                    <strong>uses the network</strong>)
-                  </td>
+                  <td>Decide what to fetch and fetch it (<code>--siblings</code> also fetches the repositories next door, in parallel; <strong>uses the network</strong>)</td>
                   <td>single / multiple with <code>--siblings</code></td>
                 </tr>
                 <tr>
                   <td><a href="docs.html#pull"><code>gz pull</code></a></td>
-                  <td>
-                    Pick branches and bring them up to their upstream in one go
-                    (fast-forward only; <strong>uses the network</strong>)
-                  </td>
-                  <td>multiple</td>
-                </tr>
-                <tr>
-                  <td><a href="docs.html#sync"><code>gz sync</code></a></td>
-                  <td>
-                    Sync the current branch with its upstream
-                    (<strong>uses the network</strong>)
-                  </td>
-                  <td>none</td>
+                  <td>Pick branches and bring them up to their upstream in one go (fast-forward only; <code>--rebase</code> / <code>--merge</code> integrate the current branch instead; <strong>uses the network</strong>)</td>
+                  <td>multiple / none with <code>--rebase</code></td>
                 </tr>
                 <tr>
                   <td><a href="docs.html#worktree"><code>gz worktree</code></a></td>
-                  <td>List and manage worktrees</td>
+                  <td>List and manage worktrees (<code>add &lt;name&gt;</code> creates one next to the repository)</td>
+                  <td>single</td>
+                </tr>
+                <tr>
+                  <td><a href="docs.html#pr"><code>gz pr</code></a></td>
+                  <td>Pick a GitHub pull request and check it out (<code>--worktree &lt;name&gt;</code> opens it in a review worktree; <strong>needs the <code>gh</code> CLI, uses the network</strong>)</td>
                   <td>single</td>
                 </tr>
               </tbody>
@@ -514,10 +502,39 @@ gz --lang ja branch                  # one-off, on any subcommand</code></pre>
       <section class="band" id="install">
         <div class="wrap">
           <p class="section-label">Install</p>
-          <h2>Build it from source</h2>
+          <h2>Three ways in</h2>
           <p class="lede">
-            fuzgit is not published to crates.io yet, so install it from a local
-            clone.
+            The formula and the package are called <b>fuzgit</b>; whichever
+            route you take, <b>the installed command is <code>gz</code></b>.
+          </p>
+
+          <h3>macOS — Homebrew</h3>
+          <pre><code>brew install hatohato25/fuzgit/fuzgit
+gz --version</code></pre>
+          <p>
+            Prebuilt binaries are published for macOS (Apple Silicon and Intel)
+            and Linux (x86_64).
+          </p>
+
+          <h3>Linux / WSL — install script</h3>
+          <pre><code>curl -fsSL https://raw.githubusercontent.com/hatohato25/fuzgit/main/install.sh | sh</code></pre>
+          <p>
+            It downloads the release tarball for your machine,
+            <b>verifies its SHA-256 checksum</b>, and puts <code>gz</code> in
+            <code>~/.local/bin</code> — no <code>sudo</code>, and nothing
+            written outside that directory. If that directory is not on your
+            <code>PATH</code> the script prints the line to add;
+            <b>it does not edit your shell profile for you</b>.
+            <code>--version &lt;TAG&gt;</code> and
+            <code>--bin-dir &lt;DIR&gt;</code> (or <code>FUZGIT_VERSION</code> /
+            <code>FUZGIT_BIN_DIR</code>) change what and where. Only x86_64 is
+            published for Linux today; on <code>aarch64</code> the script stops
+            and points at the source build.
+          </p>
+
+          <h3>From source</h3>
+          <p>
+            fuzgit is not on crates.io yet, so install it from a local clone.
           </p>
 
           <pre><code>git clone https://github.com/hatohato25/fuzgit.git
@@ -525,9 +542,8 @@ cd fuzgit
 cargo install --path .</code></pre>
 
           <p>
-            This installs <code>~/.cargo/bin/gz</code> (the package is
-            <code>fuzgit</code>, the command is <code>gz</code>). To try it
-            without installing:
+            This installs <code>~/.cargo/bin/gz</code>. To try it without
+            installing:
           </p>
 
           <pre><code>cargo build --release
@@ -546,8 +562,8 @@ cargo install --path .</code></pre>
               merge itself still runs.
             </li>
             <li>
-              A stable Rust toolchain to build it (Rust 1.85 or newer, because
-              the crate uses edition 2024).
+              A stable Rust toolchain <em>only if you build from source</em>
+              (Rust 1.85 or newer, because the crate uses edition 2024).
             </li>
           </ul>
 

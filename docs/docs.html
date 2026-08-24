@@ -56,7 +56,9 @@
           <li><a href="#requirements"><span lang="en">Requirements</span><span lang="ja">前提条件</span></a></li>
           <li><a href="#install"><span lang="en">Installation</span><span lang="ja">インストール</span></a></li>
           <li><a href="#usage"><span lang="en">Usage</span><span lang="ja">使い方</span></a></li>
+          <li><a href="#status-codes"><span lang="en">Status codes</span><span lang="ja">状態コード</span></a></li>
           <li><a href="#language"><span lang="en">Language</span><span lang="ja">表示言語</span></a></li>
+          <li><a href="#configuration"><span lang="en">Configuration</span><span lang="ja">設定</span></a></li>
         </ul>
 
         <h2><span lang="en">Commands</span><span lang="ja">コマンド</span></h2>
@@ -79,6 +81,7 @@
           <li><a href="#fetch">gz fetch</a></li>
           <li><a href="#pull">gz pull</a></li>
           <li><a href="#worktree">gz worktree</a></li>
+          <li><a href="#pr">gz pr</a></li>
         </ul>
 
         <h2><span lang="en">Reference</span><span lang="ja">リファレンス</span></h2>
@@ -151,59 +154,51 @@
           <div lang="en">
             <ul>
               <li>
-                <strong>git must be installed on the system (required).</strong>
-                Write operations (<code>switch</code> / <code>cherry-pick</code>
-                / <code>restore</code> / <code>add</code> / <code>stash</code>
-                and so on) and the coloured diffs used for previews are executed
-                by shelling out to the system <code>git</code> command.
-                Repository data is read with
-                <a href="https://crates.io/crates/gix">gix</a>, but gix does not
-                provide those write operations. If <code>git</code> is not on
-                <code>PATH</code>, fuzgit reports
-                <span class="muted">&ldquo;git was not found. Install git and
-                make sure it is on your PATH&rdquo;</span> and exits.
+                <strong>git on the system (required).</strong> fuzgit reads the
+                repository with <a href="https://crates.io/crates/gix">gix</a>,
+                but every write (<code>switch</code>, <code>cherry-pick</code>,
+                <code>restore</code>, <code>add</code>, <code>stash</code>&hellip;)
+                and every coloured diff preview runs the system
+                <code>git</code>. Without it on <code>PATH</code>, fuzgit stops
+                with <span class="muted">&ldquo;git was not found. Install git
+                and make sure it is on your PATH&rdquo;</span>.
               </li>
               <li>
-                <strong>Git 2.38 or newer is needed for the conflict prediction
-                of <code>gz merge</code> (optional).</strong> The prediction uses
-                <code>git merge-tree --write-tree</code>. Older git rejects that
-                option, so <strong>only the prediction is skipped and the merge
-                still runs</strong> (the confirmation prompt says
-                <span class="muted">&ldquo;Conflict prediction: skipped
-                (`git merge-tree --write-tree` could not be run; the prediction
-                needs Git 2.38 or later)&rdquo;</span>). It never stops with an
-                error. No other feature has a minimum git version.
+                <strong>Git 2.38 or newer &mdash; only for the conflict
+                prediction of <code>gz merge</code>.</strong> The prediction
+                needs <code>git merge-tree --write-tree</code>. On older git
+                <strong>the prediction is skipped and the merge still
+                runs</strong>; the confirmation prompt says so. Nothing else has
+                a minimum git version.
               </li>
               <li>
-                A stable Rust toolchain to build from source (Rust 1.85 or newer
-                because the crate uses edition 2024; development is verified
-                with 1.95.0).
+                <strong>A stable Rust toolchain &mdash; only to build from
+                source.</strong> Rust 1.85 or newer (the crate uses edition
+                2024); development is verified with 1.95.0.
               </li>
             </ul>
           </div>
           <div lang="ja">
             <ul>
               <li>
-                <strong>システムに <code>git</code> がインストールされていること（必須）</strong><br />
-                書き込み系の操作（<code>switch</code> / <code>cherry-pick</code> /
-                <code>restore</code> / <code>add</code> / <code>stash</code> など）と
-                プレビュー用の色付き差分生成は、システムの <code>git</code> コマンドへ
-                シェルアウトして実行します。リポジトリ情報の読み取りには
-                <a href="https://crates.io/crates/gix">gix</a> を使いますが、gix は
-                上記の書き込み操作を提供していないためです。<code>git</code> が PATH 上に
-                無い場合は「git コマンドが見つかりません」と表示して終了します。
+                <strong>システムの <code>git</code>（必須）</strong><br />
+                リポジトリの読み取りには <a href="https://crates.io/crates/gix">gix</a>
+                を使いますが、書き込み（<code>switch</code>・<code>cherry-pick</code>・
+                <code>restore</code>・<code>add</code>・<code>stash</code> など）と
+                プレビュー用の色付き差分は、いずれもシステムの <code>git</code> を
+                実行します。PATH 上に無い場合は「git コマンドが見つかりません」と
+                表示して停止します。
               </li>
               <li>
-                <strong><code>gz merge</code> のコンフリクト予測には Git 2.38 以降が必要です（任意）</strong><br />
-                予測には <code>git merge-tree --write-tree</code> を使います。2.38 未満の git では
-                このオプションが拒否されるため、<strong>予測の表示だけを省略して merge の実行は
-                そのまま続けます</strong>（確認プロンプトに「コンフリクト予測: 省略しました」と
-                表示されます）。エラーで停止することはありません。これ以外の機能に git の
-                最低バージョン要件はありません。
+                <strong>Git 2.38 以降 &mdash; <code>gz merge</code> のコンフリクト予測にのみ必要</strong><br />
+                予測には <code>git merge-tree --write-tree</code> を使います。それより古い git
+                では<strong>予測だけを省略し、merge はそのまま実行します</strong>
+                （省略した旨は確認プロンプトに表示されます）。これ以外に git の最低バージョン
+                要件はありません。
               </li>
               <li>
-                ビルドする場合は stable の Rust ツールチェイン（edition 2024 を使うため
-                Rust 1.85 以降。開発時の確認は 1.95.0）
+                <strong>stable の Rust ツールチェイン &mdash; ソースからビルドする場合のみ</strong><br />
+                Rust 1.85 以降（edition 2024 のため）。開発時の確認は 1.95.0 です。
               </li>
             </ul>
           </div>
@@ -222,12 +217,12 @@
             <pre><code>curl -fsSL https://raw.githubusercontent.com/hatohato25/fuzgit/main/install.sh | sh</code></pre>
             <p>
               It downloads the release tarball for your machine,
-              <strong>verifies its SHA-256 checksum</strong>, and installs
-              <code>gz</code> into <code>~/.local/bin</code> &mdash; no
-              <code>sudo</code>, and nothing is written outside that directory.
-              When <code>~/.local/bin</code> is not on <code>PATH</code> the
-              script says so and prints the line to add;
-              <strong>it does not edit your shell profile for you</strong>.
+              <strong>verifies its SHA-256 checksum</strong>, and puts
+              <code>gz</code> in <code>~/.local/bin</code>. No
+              <code>sudo</code>, and nothing outside that directory. If that
+              directory is not on <code>PATH</code>, the script prints the line
+              to add &mdash; <strong>it does not edit your shell profile for
+              you</strong>.
             </p>
             <div class="table-wrap">
               <table>
@@ -242,15 +237,16 @@
             <p>
               Only <strong>x86_64</strong> is published for Linux today. On
               <code>aarch64</code> the script stops and points at the source
-              build, rather than installing a binary that cannot run.
+              build rather than installing a binary that cannot run.
             </p>
-            <blockquote>
+            <div class="note">
+              <span class="note-label">Heads up</span>
               <p>
                 Piping a script into a shell runs code you have not read. The
                 script is <code>install.sh</code> at the root of the repository
                 &mdash; read it first if you would rather, then run it locally.
               </p>
-            </blockquote>
+            </div>
 
             <h3>From source</h3>
             <p>
@@ -278,8 +274,8 @@ cargo install --path .</code></pre>
               実行環境に合うリリース資産を取得し、<strong>SHA-256 チェックサムを検証</strong>した
               うえで <code>gz</code> を <code>~/.local/bin</code> へ配置します。
               <code>sudo</code> は不要で、そのディレクトリの外には何も書きません。
-              <code>~/.local/bin</code> が <code>PATH</code> に無い場合は追加すべき行を
-              表示します（<strong>シェルの設定ファイルを勝手に書き換えることはしません</strong>）。
+              <code>PATH</code> に無い場合は追加すべき行を表示するだけで、
+              <strong>シェルの設定ファイルは書き換えません</strong>。
             </p>
             <div class="table-wrap">
               <table>
@@ -296,13 +292,14 @@ cargo install --path .</code></pre>
               <code>aarch64</code> では動かないバイナリを入れずに停止し、ソースからの
               ビルドを案内します。
             </p>
-            <blockquote>
+            <div class="note">
+              <span class="note-label">注意</span>
               <p>
                 スクリプトをシェルへパイプするのは、読んでいないコードを実行することでも
                 あります。中身はリポジトリ直下の <code>install.sh</code> です。先に読んでから
                 手元で実行しても構いません。
               </p>
-            </blockquote>
+            </div>
 
             <h3>ソースからインストール</h3>
             <p>
@@ -390,8 +387,8 @@ cargo install --path .</code></pre>
                 <tr>
                   <td><a href="#log"><code>gz log</code></a></td>
                   <td>
-                    <span lang="en">Trace the commit history and print the full hash to stdout</span>
-                    <span lang="ja">コミット履歴を辿り、フルハッシュを標準出力へ出す</span>
+                    <span lang="en">Trace the commit history and print the full hash to stdout (<code>--action</code> picks what to do next)</span>
+                    <span lang="ja">コミット履歴を辿り、フルハッシュを標準出力へ出す（<code>--action</code> で次の操作を選ぶ）</span>
                   </td>
                   <td><span lang="en">single</span><span lang="ja">単一</span></td>
                 </tr>
@@ -433,8 +430,8 @@ cargo install --path .</code></pre>
                 <tr>
                   <td><a href="#reflog"><code>gz reflog</code></a></td>
                   <td>
-                    <span lang="en">Trace the HEAD reflog and recover lost commits</span>
-                    <span lang="ja">HEAD の reflog を辿り、失われたコミットを取り出す</span>
+                    <span lang="en">Trace the HEAD reflog and recover lost commits (<code>--action</code> picks what to do next)</span>
+                    <span lang="ja">HEAD の reflog を辿り、失われたコミットを取り出す（<code>--action</code> で次の操作を選ぶ）</span>
                   </td>
                   <td><span lang="en">single</span><span lang="ja">単一</span></td>
                 </tr>
@@ -500,8 +497,8 @@ cargo install --path .</code></pre>
                 <tr>
                   <td><a href="#fetch"><code>gz fetch</code></a></td>
                   <td>
-                    <span lang="en">Decide what to fetch and fetch it (<code>--siblings</code> also fetches the repositories next door; <strong>uses the network</strong>)</span>
-                    <span lang="ja">fetch の対象を決めて取得する（<code>--siblings</code> で隣のリポジトリも一括取得。<strong>ネットワークを使う</strong>）</span>
+                    <span lang="en">Decide what to fetch and fetch it (<code>--siblings</code> also fetches the repositories next door, in parallel; <strong>uses the network</strong>)</span>
+                    <span lang="ja">fetch の対象を決めて取得する（<code>--siblings</code> で隣のリポジトリも並列に一括取得。<strong>ネットワークを使う</strong>）</span>
                   </td>
                   <td>
                     <span lang="en">single / multiple with <code>--siblings</code></span>
@@ -511,21 +508,133 @@ cargo install --path .</code></pre>
                 <tr>
                   <td><a href="#pull"><code>gz pull</code></a></td>
                   <td>
-                    <span lang="en">Pick branches and bring them up to their upstream in one go (fast-forward only; <strong>uses the network</strong>)</span>
-                    <span lang="ja">ブランチを選んで upstream へまとめて追随させる（fast-forward のみ。<strong>ネットワークを使う</strong>）</span>
+                    <span lang="en">Pick branches and bring them up to their upstream in one go (fast-forward only; <code>--rebase</code> / <code>--merge</code> integrate the current branch instead; <strong>uses the network</strong>)</span>
+                    <span lang="ja">ブランチを選んで upstream へまとめて追随させる（fast-forward のみ。<code>--rebase</code> / <code>--merge</code> は現在のブランチが対象。<strong>ネットワークを使う</strong>）</span>
                   </td>
-                  <td><span lang="en">multiple</span><span lang="ja">複数</span></td>
+                  <td><span lang="en">multiple / none with <code>--rebase</code></span><span lang="ja">複数／<code>--rebase</code> は選択なし</span></td>
                 </tr>
                 <tr>
                   <td><a href="#worktree"><code>gz worktree</code></a></td>
                   <td>
-                    <span lang="en">List and manage worktrees</span>
-                    <span lang="ja">worktree を一覧・管理する</span>
+                    <span lang="en">List and manage worktrees (<code>add &lt;name&gt;</code> creates one next to the repository)</span>
+                    <span lang="ja">worktree を一覧・管理する（<code>add &lt;name&gt;</code> はリポジトリの隣に作る）</span>
+                  </td>
+                  <td><span lang="en">single</span><span lang="ja">単一</span></td>
+                </tr>
+                <tr>
+                  <td><a href="#pr"><code>gz pr</code></a></td>
+                  <td>
+                    <span lang="en">Pick a GitHub pull request and check it out (<code>--worktree &lt;name&gt;</code> opens it in a review worktree; <strong>needs the gh CLI, uses the network</strong>)</span>
+                    <span lang="ja">GitHub の PR を選んで checkout する（<code>--worktree &lt;name&gt;</code> でレビュー用 worktree に開く。<strong>gh CLI が必要・ネットワークを使う</strong>）</span>
                   </td>
                   <td><span lang="en">single</span><span lang="ja">単一</span></td>
                 </tr>
               </tbody>
             </table>
+          </div>
+
+          <div lang="en">
+            <p>
+              Each command heading below carries chips for what the section
+              contains. They describe the section as a whole — an option or a
+              subcommand inside it, not necessarily the bare command.
+            </p>
+            <ul>
+              <li>
+                <span class="badge net">network</span>
+                talks to a remote.
+              </li>
+              <li>
+                <span class="badge confirm">y/N</span>
+                asks before something you cannot take back.
+              </li>
+              <li>
+                <span class="badge multi">multi-select</span>
+                <kbd>Tab</kbd> picks more than one candidate.
+              </li>
+            </ul>
+          </div>
+          <div lang="ja">
+            <p>
+              以下の各コマンド見出しには、その節に何が含まれるかを示すチップを付けています。
+              対象は節全体であり、素のコマンドではなく中のオプション・サブコマンドを
+              指している場合もあります。
+            </p>
+            <ul>
+              <li>
+                <span class="badge net">通信</span>
+                リモートと通信します。
+              </li>
+              <li>
+                <span class="badge confirm">y/N</span>
+                取り消せない操作の前に確認します。
+              </li>
+              <li>
+                <span class="badge multi">複数選択</span>
+                <kbd>Tab</kbd> で複数の候補を選べます。
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <section id="status-codes">
+          <h2>
+            <span lang="en">Status codes in file lists</span>
+            <span lang="ja">ファイル一覧の状態コード</span>
+            <a class="anchor" href="#status-codes" aria-label="Link to this section">#</a>
+          </h2>
+          <div lang="en">
+            <p>
+              Every command that lists files &mdash;
+              <a href="#restore"><code>gz restore</code></a>,
+              <a href="#add"><code>gz add</code></a>,
+              <a href="#commit"><code>gz commit</code></a>,
+              <a href="#status"><code>gz status</code></a> &mdash; prefixes each
+              line with the same two status characters as
+              <code>git status --short</code>, in the same colours: green for
+              the index (staged) column, red for the working-tree column, and
+              red for both characters of an untracked file (<code>??</code>).
+            </p>
+            <p>
+              One thing differs: <strong>the two characters are
+              left-aligned</strong>. A change that exists only in the working
+              tree reads <code>M&nbsp;</code> where git writes
+              <code>&nbsp;M</code>. The column stays two characters wide, so the
+              paths still line up.
+            </p>
+            <div class="note">
+              <span class="note-label">Where colour is the only signal</span>
+              <p>
+                Because of that alignment, <code>M&nbsp;</code> means either a
+                staged change or an unstaged one, and <strong>only the colour
+                tells them apart</strong>. Without colour (<code>NO_COLOR</code>,
+                or output through a pipe) the two look identical.
+              </p>
+            </div>
+          </div>
+          <div lang="ja">
+            <p>
+              ファイルを一覧するコマンド（<a href="#restore"><code>gz restore</code></a>・
+              <a href="#add"><code>gz add</code></a>・<a href="#commit"><code>gz commit</code></a>・
+              <a href="#status"><code>gz status</code></a>）は、行頭に
+              <code>git status --short</code> と同じ 2 文字の状態コードを、同じ配色で表示します
+              &mdash; index（staged）列は緑、作業ツリー列は赤、未追跡（<code>??</code>）は
+              2 文字とも赤です。
+            </p>
+            <p>
+              1 点だけ git と異なり、<strong>2 文字を左詰めで表示します</strong>。
+              作業ツリーだけの変更は、git の <code>&nbsp;M</code> ではなく
+              <code>M&nbsp;</code> になります。列幅は 2 文字のままなので、パスの開始位置は
+              揃います。
+            </p>
+            <div class="note">
+              <span class="note-label">色だけが頼りになる場面</span>
+              <p>
+                左詰めにしたため <code>M&nbsp;</code> は staged と unstaged のどちらでもあり得ます。
+                <strong>両者を区別するのは色だけ</strong>です。<code>NO_COLOR</code> や
+                パイプ経由など色の付かない環境では、同じ見た目になります。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -651,36 +760,31 @@ gz --lang ja branch                  # 単発の上書き。全サブコマン�
                 read when resolving outside a repository.
               </li>
             </ul>
-            <p>
-              Two limits are worth knowing about.
-            </p>
-            <ul>
-              <li>
-                <strong>Messages from git itself are not guaranteed to be
-                translated.</strong> fuzgit tells every git command it runs
-                which language to speak, but whether a catalog exists depends on
-                how git was built (NLS) and on the installed locale data. In
-                particular <strong>git upstream ships no Japanese
-                catalog</strong>, so git&rsquo;s own output stays English even
-                when you pick <code>ja</code>. Forcing <code>en</code> is the
-                safe direction, because it only asks git for its original text.
-              </li>
-              <li>
-                <strong>Text that clap prints on its own stays
-                English</strong> &mdash; <code>Usage:</code>,
-                <code>Options:</code>, <code>Commands:</code> and parser errors
-                such as <code>error: unexpected argument</code>. clap 4 has no
-                localization hook. fuzgit&rsquo;s own descriptions in
-                <code>--help</code>, including the one for <code>--lang</code>,
-                do switch.
-              </li>
-            </ul>
+            <div class="note">
+              <span class="note-label">Two limits</span>
+              <p>
+                <strong>git&rsquo;s own messages may stay English.</strong>
+                fuzgit tells every git command which language to speak, but
+                whether a catalog exists depends on how git was built (NLS) and
+                on the installed locale data &mdash; and
+                <strong>git upstream ships no Japanese catalog</strong>. Forcing
+                <code>en</code> is always safe: it just asks git for its
+                original text.
+              </p>
+              <p>
+                <strong>Text clap prints on its own stays English</strong>
+                &mdash; <code>Usage:</code>, <code>Options:</code>,
+                <code>Commands:</code> and parser errors, because clap 4 has no
+                localization hook. fuzgit&rsquo;s own <code>--help</code>
+                descriptions do switch.
+              </p>
+            </div>
             <p class="muted">
-              Output that fuzgit parses is a separate matter: those git
-              invocations always run with <code>LC_MESSAGES=C</code>, whatever
-              display language was resolved, so parsing never depends on the
-              environment. See <a href="#debug">Debugging</a> for how the two
-              kinds are told apart in the log.
+              Output that fuzgit <em>parses</em> is a separate matter: those git
+              calls always run with <code>LC_MESSAGES=C</code>, whatever the
+              display language, so parsing never depends on the environment.
+              <a href="#debug">Debugging</a> shows how the two are told apart in
+              the log.
             </p>
           </div>
           <div lang="ja">
@@ -714,30 +818,140 @@ gz --lang ja branch                  # 単発の上書き。全サブコマン�
                 書いた <code>fuzgit.lang</code> は、リポジトリ外での解決では読まれません。
               </li>
             </ul>
-            <p>以下の 2 点は制約として把握しておいてください。</p>
-            <ul>
-              <li>
-                <strong>git 本体のメッセージが翻訳されることは保証しません。</strong>
-                fuzgit は起動するすべての git へ言語を伝えますが、翻訳が存在するかは
-                git のビルド（NLS の有無）とロケールデータに依存します。とくに
-                <strong>git 本体には日本語カタログがありません</strong>。<code>ja</code> を
-                選んでも git 自身の出力は英語のままです。<code>en</code> への統一は
-                git に原文を出させるだけなので、環境に依存せず成立します。
-              </li>
-              <li>
+            <div class="note">
+              <span class="note-label">2 つの制約</span>
+              <p>
+                <strong>git 本体のメッセージは英語のままになることがあります。</strong>
+                fuzgit は起動するすべての git へ言語を伝えますが、翻訳の有無は git の
+                ビルド（NLS）とロケールデータ次第です。とくに
+                <strong>git 本体には日本語カタログがありません</strong>。
+                <code>en</code> への統一は git に原文を出させるだけなので、環境に
+                依存せず成立します。
+              </p>
+              <p>
                 <strong>clap が自前で出す固定文言は英語のままです。</strong>
                 <code>Usage:</code> / <code>Options:</code> / <code>Commands:</code> と
-                <code>error: unexpected argument</code> のようなパーサエラーが該当します
-                （clap 4 に多言語化の機構がないため）。<code>--lang</code> の説明を含め、
+                パーサエラーが該当します（clap 4 に多言語化の機構がないため）。
                 <code>--help</code> のうち fuzgit 自身の文言は切り替わります。
-              </li>
-            </ul>
+              </p>
+            </div>
             <p class="muted">
-              fuzgit が<strong>パースする</strong> git の出力は別扱いで、解決された表示言語に
-              関わらず常に <code>LC_MESSAGES=C</code> で実行します（実行環境によって
-              パースが壊れないようにするため）。ログ上での見分け方は
+              fuzgit が<strong>パースする</strong> git の出力は別扱いで、表示言語に関わらず
+              常に <code>LC_MESSAGES=C</code> で実行します（環境によってパースが壊れない
+              ようにするため）。ログ上での見分け方は
               <a href="#debug">デバッグ</a>を参照してください。
             </p>
+          </div>
+        </section>
+
+        <section id="configuration">
+          <h2>
+            <span lang="en">Configuration</span><span lang="ja">設定</span>
+            <a class="anchor" href="#configuration" aria-label="Link to this section">#</a>
+          </h2>
+          <div lang="en">
+            <p>
+              <strong>fuzgit has no configuration file of its own.</strong> It
+              borrows git&rsquo;s config, so the usual system / global / local /
+              worktree layers apply, and every key is optional.
+            </p>
+          </div>
+          <div lang="ja">
+            <p>
+              <strong>fuzgit 独自の設定ファイルはありません。</strong>git config を
+              間借りするため、system / global / local / worktree の階層がそのまま効きます。
+              いずれのキーも任意です。
+            </p>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col"><span lang="en">git config key</span><span lang="ja">git config キー</span></th>
+                  <th scope="col"><span lang="en">Value</span><span lang="ja">値</span></th>
+                  <th scope="col"><span lang="en">Default</span><span lang="ja">既定</span></th>
+                  <th scope="col"><span lang="en">What it does</span><span lang="ja">効果</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>fuzgit.lang</code></td>
+                  <td><code>ja</code> / <code>en</code> / <code>auto</code></td>
+                  <td><code>en</code></td>
+                  <td>
+                    <span lang="en">Display language &mdash; see <a href="#language">Language</a></span>
+                    <span lang="ja">表示言語 &mdash; <a href="#language">表示言語</a>参照</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>fuzgit.notify</code></td>
+                  <td><span lang="en">boolean</span><span lang="ja">真偽値</span></td>
+                  <td><code>false</code></td>
+                  <td>
+                    <span lang="en">Desktop notification when a long run finishes &mdash; see <a href="#notify">Completion notifications</a></span>
+                    <span lang="ja">長い実行の完了通知 &mdash; <a href="#notify">完了通知</a>参照</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>fuzgit.fetchJobs</code></td>
+                  <td><span lang="en">integer &ge; 1</span><span lang="ja">1 以上の整数</span></td>
+                  <td><code>4</code></td>
+                  <td>
+                    <span lang="en">How many repositories <code>gz fetch --siblings</code> fetches at once (<code>1</code> is fully serial) &mdash; see <a href="#fetch"><code>gz fetch</code></a></span>
+                    <span lang="ja"><code>gz fetch --siblings</code> の同時実行数（<code>1</code> で完全な直列）&mdash; <a href="#fetch"><code>gz fetch</code></a>参照</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col"><span lang="en">Environment variable</span><span lang="ja">環境変数</span></th>
+                  <th scope="col"><span lang="en">What it does</span><span lang="ja">効果</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>FUZGIT_LANG</code></td>
+                  <td>
+                    <span lang="en">Display language for one shell or session; beats <code>fuzgit.lang</code>, loses to <code>--lang</code></span>
+                    <span lang="ja">シェル・セッション単位の表示言語。<code>fuzgit.lang</code> より優先し、<code>--lang</code> に劣後する</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>FUZGIT_DEBUG=1</code></td>
+                  <td>
+                    <span lang="en">Log every git command fuzgit runs &mdash; see <a href="#debug">Debugging</a></span>
+                    <span lang="ja">fuzgit が実行した git コマンドをログへ出す &mdash; <a href="#debug">デバッグ</a>参照</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="note info">
+            <div lang="en">
+              <span class="note-label">Invalid values stop the run</span>
+              <p>
+                A value fuzgit cannot interpret is an error, not a silent
+                fallback to the default &mdash; a misspelled
+                <code>fuzgit.fetchJobs</code> stops before a single repository is
+                fetched. An <strong>empty</strong> value is the one exception: it
+                counts as &ldquo;not set&rdquo;.
+              </p>
+            </div>
+            <div lang="ja">
+              <span class="note-label">不正な値は実行を止めます</span>
+              <p>
+                解釈できない値は既定へ暗黙に倒さずエラーにします &mdash; 綴りを誤った
+                <code>fuzgit.fetchJobs</code> は 1 件も fetch しないまま停止します。
+                例外は<strong>空文字</strong>で、これは「未設定」として扱います。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -745,6 +959,7 @@ gz --lang ja branch                  # 単発の上書き。全サブコマン�
           <h2>
             <span lang="en"><code>gz branch</code> &mdash; switch, create, delete and tidy up branches</span>
             <span lang="ja"><code>gz branch</code> &mdash; ブランチの切替・作成・削除・整理</span>
+            <span class="badges"><span class="badge confirm">y/N</span><span class="badge multi"><span lang="en">multi-select</span><span lang="ja">複数選択</span></span></span>
             <a class="anchor" href="#branch" aria-label="Link to this section">#</a>
           </h2>
 
@@ -755,14 +970,13 @@ gz branch create &lt;name&gt;    # pick the starting point and create a new bran
 gz branch delete           # pick branches and delete them
 gz branch cleanup          # delete every merged branch in one go</code></pre>
             <p>
-              <strong><code>gz branch</code> with no arguments and
-              <code>gz branch --all</code> are the branch switch, exactly as
-              before.</strong> <code>create</code> / <code>delete</code> /
-              <code>cleanup</code> are management operations added later, and
-              combining the switch flag (<code>-a</code> / <code>--all</code>)
-              with a management subcommand is rejected by clap, because it would
-              be ambiguous which operation was intended
-              (<code>gz branch --all create x</code> is an error).
+              <strong>With no subcommand, <code>gz branch</code> switches
+              branches</strong> &mdash; that is the classic behaviour, and
+              <code>--all</code> only widens the candidate list.
+              <code>create</code> / <code>delete</code> / <code>cleanup</code>
+              are separate management operations. Mixing the two is ambiguous,
+              so clap rejects it: <code>gz branch --all create x</code> is an
+              error.
             </p>
 
             <h3>Switching (no subcommand)</h3>
@@ -776,7 +990,16 @@ gz branch cleanup          # delete every merged branch in one go</code></pre>
             </div>
             <ul>
               <li>The current branch is marked with a leading <code>*</code>, just like <code>git branch</code>.</li>
-              <li>The preview shows the 50 most recent commits of the highlighted branch (<code>git log --oneline --decorate</code>).</li>
+              <li>
+                The preview opens with a summary of the highlighted branch
+                &mdash; <code>&uarr;</code> commits ahead of its upstream in
+                green, <code>&darr;</code> commits behind in red, then the
+                upstream, the last commit date and its author. A count of zero
+                is left uncoloured, so only real drift catches the eye.
+                Underneath are the 50 most recent commits
+                (<code>git log --oneline --decorate</code>). A branch whose
+                details cannot be read keeps the log and drops the summary.
+              </li>
               <li>
                 Picking a remote-tracking branch (<code>origin/feature</code>)
                 runs <code>git switch</code> with the short name
@@ -797,30 +1020,23 @@ gz branch cleanup          # delete every merged branch in one go</code></pre>
             </div>
             <ul>
               <li>
-                What you pick in the fuzzy finder is the
-                <strong>starting point</strong>. Candidates are local branches,
-                remote-tracking branches and tags, each line prefixed with its
-                kind (<code>[branch]</code> in green, <code>[tag]</code> in
-                yellow), because a branch and a tag can share a name.
+                What you pick is the <strong>starting point</strong>: local
+                branches, remote-tracking branches and tags. Each line is
+                prefixed with its kind (<code>[branch]</code> in green,
+                <code>[tag]</code> in yellow) because the two can share a name.
               </li>
               <li>
-                It runs <code>git branch -- &lt;name&gt; &lt;start point&gt;</code>. For an
-                annotated tag the resolved ID is passed and git peels it to the
-                commit.
+                It runs <code>git branch -- &lt;name&gt; &lt;start point&gt;</code>,
+                then switches to the new branch &mdash; the same as
+                <code>git switch -c</code>. <code>--no-switch</code> creates it
+                only, and prints the command to switch.
               </li>
               <li>
-                <strong>The branch name is a positional argument</strong> (skim
-                has no text input UI &mdash; see
-                <a href="#out-of-scope">Out of scope</a>). Name validation is
-                left to git&rsquo;s <code>check-ref-format</code>; names starting
-                with <code>-</code> are protected with <code>--</code> and then
-                rejected by git.
-              </li>
-              <li>
-                It switches to the new branch after creating it, the same as
-                <code>git switch -c</code> / <code>git checkout -b</code>. With
-                <code>--no-switch</code> the branch is only created, and the
-                command to switch to it is printed to stderr.
+                <strong>The name is a positional argument</strong>, because skim
+                has no text input (see <a href="#out-of-scope">Out of scope</a>).
+                Validation is git&rsquo;s <code>check-ref-format</code>; a name
+                starting with <code>-</code> is protected with <code>--</code>
+                and then rejected by git.
               </li>
             </ul>
 
@@ -849,22 +1065,22 @@ gz branch cleanup          # delete every merged branch in one go</code></pre>
               </li>
               <li>
                 <kbd>Tab</kbd> selects several branches.
-                <strong>A confirmation prompt (<code>[y/N]</code>) lists every
-                target before anything runs.</strong>
-              </li>
-              <li>
-                The default is <code>git branch -d</code> (merged branches
-                only). <strong>If even one unmerged branch is in the selection,
-                fuzgit stops with a dedicated error before running
-                <code>git branch</code></strong>, so it never deletes part of the
-                selection and then stops.
-              </li>
-              <li>
-                Only <code>--force</code> switches to <code>git branch -D</code>,
-                and the confirmation prompt then warns about the unmerged
-                branches.
               </li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">Cannot be undone</span>
+              <p>
+                A confirmation prompt (<code>[y/N]</code>) lists every target
+                before anything runs. The default is
+                <code>git branch -d</code>, merged branches only:
+                <strong>one unmerged branch in the selection stops the whole
+                thing before <code>git branch</code> runs</strong>, so it never
+                deletes half the selection and then gives up. Only
+                <code>--force</code> switches to <code>git branch -D</code>, and
+                the prompt then names the unmerged branches you are about to
+                lose.
+              </p>
+            </div>
 
             <h3><code>gz branch cleanup</code> &mdash; deleting merged branches in one go</h3>
             <div class="table-wrap">
@@ -882,24 +1098,26 @@ gz branch cleanup          # delete every merged branch in one go</code></pre>
                 <kbd>Tab</kbd> to select or deselect).
               </li>
               <li>
-                <strong>The trunk is never preselected.</strong> That means the
-                repository&rsquo;s default branch (whatever
-                <code>refs/remotes/&lt;remote&gt;/HEAD</code> points at) plus the
-                conventional names <code>main</code> and <code>master</code>.
-                Since <code>--into</code> defaults to <code>HEAD</code>, running
-                this from a feature branch makes its ancestor <code>main</code>
-                count as merged &mdash; with everything preselected, two
-                keystrokes would delete your trunk. It still appears in the list,
-                labelled so you can see why it is unselected, and you can select
-                it deliberately if you really mean to delete it.
-              </li>
-              <li>
                 After the confirmation prompt they are deleted with
                 <code>git branch -d</code>. There is no <code>--force</code>
-                &mdash; handling unmerged branches is the job of
-                <code>gz branch delete --force</code>.
+                &mdash; unmerged branches are
+                <code>gz branch delete --force</code>&rsquo;s job.
               </li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">The trunk is never preselected</span>
+              <p>
+                &ldquo;Trunk&rdquo; means the repository&rsquo;s default branch
+                (whatever <code>refs/remotes/&lt;remote&gt;/HEAD</code> points
+                at) plus the conventional <code>main</code> and
+                <code>master</code>. <code>--into</code> defaults to
+                <code>HEAD</code>, so running this from a feature branch counts
+                its ancestor <code>main</code> as merged &mdash; preselected,
+                that would be two keystrokes from deleting your trunk. It stays
+                in the list with a label explaining why it is unselected, and
+                you can still select it deliberately.
+              </p>
+            </div>
           </div>
 
           <div lang="ja">
@@ -909,12 +1127,11 @@ gz branch create &lt;name&gt;    # 作成元を選んで新しいブランチを
 gz branch delete           # ブランチを選んで削除する
 gz branch cleanup          # merged なブランチを一括で削除する</code></pre>
             <p>
-              <strong>引数なしの <code>gz branch</code> と <code>gz branch --all</code> は
-              従来どおりのブランチ切替です。</strong>
-              <code>create</code> / <code>delete</code> / <code>cleanup</code> は
-              後から追加した管理操作で、切替用のフラグ（<code>-a</code> / <code>--all</code>）と
-              管理サブコマンドの併用は、どちらの操作を意図したのかが曖昧になるため clap の段階で
-              拒否されます（<code>gz branch --all create x</code> はエラー）。
+              <strong>サブコマンドなしの <code>gz branch</code> はブランチ切替です</strong>
+              （<code>--all</code> は候補の範囲を広げるだけ）。
+              <code>create</code> / <code>delete</code> / <code>cleanup</code> は別系統の
+              管理操作で、両者の併用は意図が曖昧になるため clap が拒否します
+              （<code>gz branch --all create x</code> はエラー）。
             </p>
 
             <h3>切替（サブコマンドなし）</h3>
@@ -928,7 +1145,14 @@ gz branch cleanup          # merged なブランチを一括で削除する</cod
             </div>
             <ul>
               <li>現在のブランチは <code>git branch</code> と同じく行頭の <code>*</code> で識別できます。</li>
-              <li>プレビューには選択中ブランチの直近 50 件のコミットログ（<code>git log --oneline --decorate</code>）を表示します。</li>
+              <li>
+                プレビューの冒頭には選択中ブランチの要約を表示します。upstream より進んでいる
+                コミット数を <code>&uarr;</code>（緑）、遅れている数を <code>&darr;</code>（赤）で示し、
+                続けて upstream・最終コミット日時・作者が並びます。0 件の側には色を付けないため、
+                実際に差があるブランチだけが目に留まります。その下が直近 50 件のコミットログ
+                （<code>git log --oneline --decorate</code>）です。要約を取得できなかった
+                ブランチはログだけを表示します。
+              </li>
               <li>
                 リモート追跡ブランチ（<code>origin/feature</code>）を選ぶと短縮名（<code>feature</code>）で
                 <code>git switch</code> するため、git の DWIM により追跡ローカルブランチが作成されます。
@@ -947,25 +1171,21 @@ gz branch cleanup          # merged なブランチを一括で削除する</cod
             </div>
             <ul>
               <li>
-                fuzzy finder で選ぶのは<strong>作成元</strong>です。候補はローカルブランチ・
-                リモート追跡ブランチ・タグで、行頭に種別が付きます
-                （ブランチは緑の <code>[branch]</code>、タグは黄の <code>[tag]</code>。
-                同名のブランチとタグが共存できるため）。
+                選ぶのは<strong>作成元</strong>です。候補はローカルブランチ・リモート追跡
+                ブランチ・タグで、同名が共存しうるため行頭に種別が付きます
+                （ブランチは緑の <code>[branch]</code>、タグは黄の <code>[tag]</code>）。
               </li>
               <li>
-                実行するのは <code>git branch -- &lt;name&gt; &lt;作成元&gt;</code> です。
-                annotated tag を選んだ場合は解決済みの ID を渡し、git が対象コミットまで peel します。
+                実行するのは <code>git branch -- &lt;name&gt; &lt;作成元&gt;</code> で、続けて
+                作成したブランチへ切り替えます（<code>git switch -c</code> と同じ）。
+                <code>--no-switch</code> なら作成のみを行い、切り替えるコマンドを案内します。
+                annotated tag は解決済みの ID を渡し、git が対象コミットまで peel します。
               </li>
               <li>
-                <strong>ブランチ名は位置引数です</strong>（skim にテキスト入力 UI が無いため。
-                <a href="#out-of-scope">スコープ外・非対応</a>参照）。名前の妥当性検証は git の
-                <code>check-ref-format</code> に委ねており、<code>-</code> 始まりの名前は
+                <strong>名前は位置引数です</strong>（skim にテキスト入力 UI が無いため。
+                <a href="#out-of-scope">スコープ外・非対応</a>参照）。妥当性検証は git の
+                <code>check-ref-format</code> に委ね、<code>-</code> 始まりの名前は
                 <code>--</code> で保護したうえで git が拒否します。
-              </li>
-              <li>
-                作成に続けてそのブランチへ切り替えます（<code>git switch -c</code> /
-                <code>git checkout -b</code> と同じ挙動）。<code>--no-switch</code> を付けた場合は
-                作成のみを行い、切り替えるためのコマンドを標準エラーへ案内します。
               </li>
             </ul>
 
@@ -989,20 +1209,19 @@ gz branch cleanup          # merged なブランチを一括で削除する</cod
                 いずれも全件を一括取得できる情報に限っており、最終コミットの詳細はプレビュー
                 （<code>git log --oneline</code>）で確認します。
               </li>
-              <li>
-                <kbd>Tab</kbd> で複数選択できます。
-                <strong>実行前に確認プロンプト（<code>[y/N]</code>）で対象を全件列挙します。</strong>
-              </li>
-              <li>
-                既定は <code>git branch -d</code>（merged のみ削除可）です。
-                <strong>unmerged が選択に 1 件でも含まれると、<code>git branch</code> を実行する前に
-                専用エラーで停止します</strong>（一部だけ削除して止まることはありません）。
-              </li>
-              <li>
-                <code>--force</code> を指定したときだけ <code>git branch -D</code> を使い、
-                確認プロンプトに unmerged である旨の警告を含めます。
-              </li>
+              <li><kbd>Tab</kbd> で複数選択できます。</li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">取り消せません</span>
+              <p>
+                実行前に確認プロンプト（<code>[y/N]</code>）で対象を全件列挙します。既定は
+                <code>git branch -d</code>（merged のみ）で、<strong>unmerged が 1 件でも
+                含まれると <code>git branch</code> の実行前に停止します</strong>
+                （一部だけ削除して止まることはありません）。<code>--force</code> を
+                指定したときだけ <code>git branch -D</code> を使い、確認プロンプトが
+                失われる unmerged ブランチを名指しします。
+              </p>
+            </div>
 
             <h3><code>gz branch cleanup</code> &mdash; merged なブランチの一括削除</h3>
             <div class="table-wrap">
@@ -1019,20 +1238,23 @@ gz branch cleanup          # merged なブランチを一括で削除する</cod
                 表示します（<kbd>Tab</kbd> で選択・解除できます）。
               </li>
               <li>
-                <strong>幹は事前選択しません。</strong>対象はリポジトリの既定ブランチ
-                （<code>refs/remotes/&lt;remote&gt;/HEAD</code> が指す先）と、慣習的な名前である
-                <code>main</code> / <code>master</code> です。<code>--into</code> の既定が
-                <code>HEAD</code> であるため、feature ブランチから実行するとその祖先である
-                <code>main</code> も merged に該当します。全件選択済みのままだと 2 打鍵で幹が
-                消えてしまうため、この扱いにしています。候補一覧には理由のラベル付きで残るので、
-                本当に消したい場合は選択できます。
-              </li>
-              <li>
                 確認プロンプトを経て <code>git branch -d</code> で一括削除します。
                 <code>--force</code> はありません（unmerged を扱うのは
                 <code>gz branch delete --force</code> の役目です）。
               </li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">幹は事前選択しません</span>
+              <p>
+                「幹」とはリポジトリの既定ブランチ
+                （<code>refs/remotes/&lt;remote&gt;/HEAD</code> が指す先）と、慣習的な
+                <code>main</code> / <code>master</code> です。<code>--into</code> の既定が
+                <code>HEAD</code> であるため、feature ブランチから実行すると祖先の
+                <code>main</code> も merged に該当します。選択済みのままでは 2 打鍵で幹が
+                消えてしまうため、事前選択から外しています。候補一覧には理由のラベル付きで
+                残るので、本当に消したい場合は自分で選択できます。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -1073,15 +1295,17 @@ gz log --action        # pick a commit, then pick what to do with it</code></pre
                 <code>gz cherry-pick</code> / <code>gz revert</code> /
                 <code>gz fixup</code>, so their safeguards still apply.
               </li>
-              <li>
-                <strong>Without <code>--action</code> nothing changes.</strong>
+            </ul>
+            <div class="note info">
+              <span class="note-label">Nothing changes without --action</span>
+              <p>
                 The default output is byte for byte what it has always been, so
                 <code>git show "$(gz log)"</code> keeps working. There is no
-                <code>reset --hard</code> entry here &mdash; these commits are
-                ancestors of <code>HEAD</code>, and <em>revert</em> already
-                covers the same need without discarding anything.
-              </li>
-            </ul>
+                <code>reset --hard</code> entry in the menu: these commits are
+                ancestors of <code>HEAD</code>, and <em>revert</em> covers the
+                same need without discarding anything.
+              </p>
+            </div>
           </div>
           <div lang="ja">
             <pre><code>gz log                 # 既定 1000 件を候補にする
@@ -1113,14 +1337,17 @@ gz log --action        # コミットを選んで、続けて行う操作も選�
                 <code>gz cherry-pick</code> / <code>gz revert</code> / <code>gz fixup</code> と
                 同じ実装を呼ぶため、各コマンドの安全策がそのまま働きます。
               </li>
-              <li>
-                <strong><code>--action</code> を付けなければ挙動は一切変わりません。</strong>
-                既定の標準出力は従来と 1 バイトも変わらないため、
-                <code>git show "$(gz log)"</code> はそのまま動きます。ここに
-                <code>reset --hard</code> の項目はありません &mdash; <code>gz log</code> の候補は
-                <code>HEAD</code> の祖先であり、同じ用途は破棄を伴わない <em>revert</em> が満たすためです。
-              </li>
             </ul>
+            <div class="note info">
+              <span class="note-label">--action を付けなければ挙動は変わりません</span>
+              <p>
+                既定の標準出力は従来と 1 バイトも変わらないため、
+                <code>git show "$(gz log)"</code> はそのまま動きます。メニューに
+                <code>reset --hard</code> はありません &mdash; <code>gz log</code> の候補は
+                <code>HEAD</code> の祖先であり、同じ用途は破棄を伴わない <em>revert</em> が
+                満たすためです。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -1128,6 +1355,7 @@ gz log --action        # コミットを選んで、続けて行う操作も選�
           <h2>
             <span lang="en"><code>gz cherry-pick</code> &mdash; picking commits to cherry-pick</span>
             <span lang="ja"><code>gz cherry-pick</code> &mdash; cherry-pick するコミットの選択</span>
+            <span class="badges"><span class="badge multi"><span lang="en">multi-select</span><span lang="ja">複数選択</span></span></span>
             <a class="anchor" href="#cherry-pick" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
@@ -1183,6 +1411,7 @@ gz cherry-pick --branch feature    # 対象ブランチを指定する</code></p
           <h2>
             <span lang="en"><code>gz restore</code> &mdash; picking files to restore or unstage</span>
             <span lang="ja"><code>gz restore</code> &mdash; 復元・アンステージするファイルの選択</span>
+            <span class="badges"><span class="badge confirm">y/N</span><span class="badge multi"><span lang="en">multi-select</span><span lang="ja">複数選択</span></span></span>
             <a class="anchor" href="#restore" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
@@ -1201,16 +1430,19 @@ gz restore --source HEAD~1       # overwrite with the content of a revision (wit
             <ul>
               <li>
                 <kbd>Tab</kbd> selects several files. Candidates carry the same
-                status codes as <code>git status</code>. The two status characters are <strong>left-aligned</strong>: a change that only exists in the working tree reads <code>M&nbsp;</code> where git writes <code>&nbsp;M</code>, and the column stays two characters wide so the paths still line up. They are coloured the way git colours them: green for the index (staged) column, red for the working-tree column, and red for both characters of an untracked file (<code>??</code>). Because of the left alignment, <strong>the colour is the only thing that tells a staged change from an unstaged one</strong> &mdash; where colour is unavailable (<code>NO_COLOR</code>, a pipe) the two look alike.
+                status codes as <code>git status</code>. They are <a href="#status-codes">left-aligned and coloured</a> like git&rsquo;s.
               </li>
               <li>The preview is the diff of the file (with <code>--staged</code>, the diff between HEAD and the index).</li>
-              <li>
-                <strong>Anything that rewrites the working tree shows a
-                confirmation prompt (<code>[y/N]</code>) first.</strong>
-                Unstaging with <code>--staged</code> does not damage the working
-                tree, so it is not confirmed.
-              </li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">Overwrites your edits</span>
+              <p>
+                Anything that rewrites the working tree asks
+                <code>[y/N]</code> first, listing the files it is about to
+                overwrite. Unstaging with <code>--staged</code> touches only the
+                index, so it runs without a prompt.
+              </p>
+            </div>
           </div>
           <div lang="ja">
             <pre><code>gz restore                       # 作業ツリーの変更を破棄する（確認あり）
@@ -1228,15 +1460,18 @@ gz restore --source HEAD~1       # 指定リビジョンの内容で上書きす
             <ul>
               <li>
                 <kbd>Tab</kbd> で複数選択できます。候補には <code>git status</code> と
-                同じ状態コードが付きます。状態コードの 2 文字は<strong>左詰め</strong>で表示します（作業ツリーだけの変更は git の <code>&nbsp;M</code> ではなく <code>M&nbsp;</code>。列幅は 2 文字のままなのでパスの開始位置は揃います）。配色は git と同じで、index（staged）列は緑、作業ツリー列は赤、未追跡（<code>??</code>）は 2 文字とも赤です。左詰めにしたため、<strong>staged と unstaged の区別は色だけが担います</strong>（<code>NO_COLOR</code> やパイプ経由など色の付かない環境では両者が同じ見た目になります）。
+                同じ状態コードが付きます。表示は git と同じ配色で<a href="#status-codes">左詰め</a>です。
               </li>
               <li>プレビューは対象ファイルの差分（<code>--staged</code> 指定時は HEAD とインデックスの差分）。</li>
-              <li>
-                <strong>作業ツリーを書き換える操作は実行前に確認プロンプト（<code>[y/N]</code>）を
-                表示します。</strong><code>--staged</code> によるアンステージは作業ツリーを
-                壊さないため確認しません。
-              </li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">編集内容を上書きします</span>
+              <p>
+                作業ツリーを書き換える操作は、上書き対象を列挙したうえで
+                <code>[y/N]</code> を確認します。<code>--staged</code> による
+                アンステージはインデックスしか触らないため、確認せずに実行します。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -1244,6 +1479,7 @@ gz restore --source HEAD~1       # 指定リビジョンの内容で上書きす
           <h2>
             <span lang="en"><code>gz add</code> &mdash; picking files to stage</span>
             <span lang="ja"><code>gz add</code> &mdash; ステージするファイルの選択</span>
+            <span class="badges"><span class="badge multi"><span lang="en">multi-select</span><span lang="ja">複数選択</span></span></span>
             <a class="anchor" href="#add" aria-label="Link to this section">#</a>
           </h2>
           <pre><code>gz add</code></pre>
@@ -1253,7 +1489,7 @@ gz restore --source HEAD~1       # 指定リビジョンの内容で上書きす
                 Candidates are unstaged changes and untracked files (files that
                 are already staged with no remaining difference do not appear),
                 each line prefixed with the same status code as
-                <code>git status</code>. The two status characters are <strong>left-aligned</strong>: a change that only exists in the working tree reads <code>M&nbsp;</code> where git writes <code>&nbsp;M</code>, and the column stays two characters wide so the paths still line up. They are coloured the way git colours them: green for the index (staged) column, red for the working-tree column, and red for both characters of an untracked file (<code>??</code>). Because of the left alignment, <strong>the colour is the only thing that tells a staged change from an unstaged one</strong> &mdash; where colour is unavailable (<code>NO_COLOR</code>, a pipe) the two look alike.
+                <code>git status</code>. They are <a href="#status-codes">left-aligned and coloured</a> like git&rsquo;s.
               </li>
               <li><kbd>Tab</kbd> selects several files.</li>
               <li>The preview is the diff for tracked files, and the file content (up to the first 64&nbsp;KiB) for untracked files.</li>
@@ -1263,7 +1499,7 @@ gz restore --source HEAD~1       # 指定リビジョンの内容で上書きす
             <ul>
               <li>
                 候補は未ステージの変更と未追跡ファイル（既にステージ済みで差分の無いファイルは
-                出ません）で、行頭には <code>git status</code> と同じ状態コードが付きます。状態コードの 2 文字は<strong>左詰め</strong>で表示します（作業ツリーだけの変更は git の <code>&nbsp;M</code> ではなく <code>M&nbsp;</code>。列幅は 2 文字のままなのでパスの開始位置は揃います）。配色は git と同じで、index（staged）列は緑、作業ツリー列は赤、未追跡（<code>??</code>）は 2 文字とも赤です。左詰めにしたため、<strong>staged と unstaged の区別は色だけが担います</strong>（<code>NO_COLOR</code> やパイプ経由など色の付かない環境では両者が同じ見た目になります）。
+                出ません）で、行頭には <code>git status</code> と同じ状態コードが付きます。表示は git と同じ配色で<a href="#status-codes">左詰め</a>です。
               </li>
               <li><kbd>Tab</kbd> で複数選択できます。</li>
               <li>プレビューは追跡ファイルは差分、未追跡ファイルはファイルの内容（先頭 64KiB まで）。</li>
@@ -1275,16 +1511,16 @@ gz restore --source HEAD~1       # 指定リビジョンの内容で上書きす
           <h2>
             <span lang="en"><code>gz stash</code> &mdash; creating, searching and restoring stashes</span>
             <span lang="ja"><code>gz stash</code> &mdash; stash の作成・検索・復元</span>
+            <span class="badges"><span class="badge confirm">y/N</span><span class="badge multi"><span lang="en">multi-select</span><span lang="ja">複数選択</span></span></span>
             <a class="anchor" href="#stash" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
             <p>
-              <code>push</code> picks <em>files</em> in the working tree, while
+              <code>push</code> picks <em>files</em>;
               <code>apply</code> / <code>pop</code> / <code>drop</code> pick an
-              existing <em>stash</em>. Because the thing being picked differs,
-              they are separate subcommands rather than flags. Bare
-              <code>gz stash</code> prints the subcommand help &mdash; it never
-              silently assumes one of them.
+              existing <em>stash</em>. They are separate subcommands because
+              what you pick differs. Bare <code>gz stash</code> prints the
+              subcommand help rather than assuming one of them.
             </p>
             <pre><code>gz stash push                      # pick from the tracked changes and stash them
 gz stash push -m "work in progress"  # add a message
@@ -1315,19 +1551,22 @@ gz stash drop                      # discard the picked stash (with confirmation
                 you can filter by message. The preview is
                 <code>git stash show -p --color=always</code>.
               </li>
-              <li>
-                <strong><code>drop</code> cannot be undone, so it shows a
-                confirmation prompt (<code>[y/N]</code>) first.</strong>
-              </li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">Cannot be undone</span>
+              <p>
+                <code>drop</code> discards a stash for good, so it asks
+                <code>[y/N]</code> first. <code>pop</code> drops the stash too,
+                but only after the apply succeeds.
+              </p>
+            </div>
           </div>
           <div lang="ja">
             <p>
-              <code>push</code> が選ぶのは作業ツリーの「ファイル」、<code>apply</code> /
+              <code>push</code> が選ぶのは「ファイル」、<code>apply</code> /
               <code>pop</code> / <code>drop</code> が選ぶのは既存の「stash」です。
               選択対象が異なるため、フラグではなくサブコマンドで分けています。
-              引数なしの <code>gz stash</code> はサブコマンド一覧のヘルプを表示します
-              （どちらかへ暗黙に倒しません）。
+              引数なしの <code>gz stash</code> は、どちらかへ暗黙に倒さずヘルプを表示します。
             </p>
             <pre><code>gz stash push                      # 追跡済みの変更から選んで退避する
 gz stash push -m "作業中"          # メッセージを付ける
@@ -1356,8 +1595,15 @@ gz stash drop                      # 選んだ stash を破棄する（確認あ
                 <code>stash@{n}: &lt;メッセージ&gt;</code> で、メッセージで絞り込めます。
                 プレビューは <code>git stash show -p --color=always</code>。
               </li>
-              <li><strong><code>drop</code> は元に戻せないため、実行前に確認プロンプト（<code>[y/N]</code>）を表示します。</strong></li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">取り消せません</span>
+              <p>
+                <code>drop</code> は stash を完全に破棄するため、実行前に
+                <code>[y/N]</code> を確認します。<code>pop</code> も stash を取り除きますが、
+                適用が成功したあとに限られます。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -1365,6 +1611,7 @@ gz stash drop                      # 選んだ stash を破棄する（確認あ
           <h2>
             <span lang="en"><code>gz reflog</code> &mdash; investigating deleted branches</span>
             <span lang="ja"><code>gz reflog</code> &mdash; 削除済みブランチの調査</span>
+            <span class="badges"><span class="badge confirm">y/N</span></span>
             <a class="anchor" href="#reflog" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
@@ -1391,22 +1638,30 @@ gz reflog --action                   # pick an entry, then pick what to do with 
                 <code>--action</code> opens a second menu: <em>show the
                 commit</em>, <em>switch to it as a detached HEAD</em>,
                 <em>cherry-pick</em>, <em>reset the current branch back to
-                it</em>, and <em>print the full hash</em>. The reset is
-                destructive, so it asks for an explicit <code>y/N</code>
-                confirmation first and runs nothing if you decline.
+                it</em>, and <em>print the full hash</em>.
               </li>
               <li>
-                <code>--restore</code> is <strong>not deprecated</strong> and the
-                two flags cannot be combined. Use <code>--restore</code> when the
-                operation needs a name you have to type &mdash; a finder has no
-                text input &mdash; and <code>--action</code> for everything else.
+                <code>--restore</code> is <strong>not deprecated</strong>, and
+                the two flags cannot be combined: use <code>--restore</code>
+                when the operation needs a name you have to type &mdash; a
+                finder has no text input &mdash; and <code>--action</code> for
+                everything else.
               </li>
               <li>
-                An entry can point at an object that <code>git gc</code> has
-                already removed; such entries are still listed on purpose. Running
-                an action on one fails with git's own message and a non-zero exit.
+                An entry can point at an object <code>git gc</code> has already
+                removed. Those are listed on purpose; acting on one fails with
+                git&rsquo;s own message and a non-zero exit.
               </li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">Reset discards commits</span>
+              <p>
+                <em>Reset the current branch back to it</em> is the one
+                destructive entry in the <code>--action</code> menu. It asks for
+                an explicit <code>y/N</code> and runs no git at all if you
+                decline.
+              </p>
+            </div>
           </div>
           <div lang="ja">
             <pre><code>gz reflog                            # 選んだエントリのコミットハッシュを標準出力へ出す
@@ -1431,21 +1686,27 @@ gz reflog --action                   # エントリを選んで、続けて行�
                 <code>--action</code> を付けると 2 つ目のメニューが出ます &mdash;
                 <em>詳細を表示する</em>・<em>detached HEAD で切り替える</em>・
                 <em>cherry-pick する</em>・<em>現在のブランチをこのコミットへ戻す</em>・
-                <em>フルハッシュを出力する</em>。戻す操作は破壊的なため、実行前に
-                <code>y/N</code> の明示同意を求め、同意が得られなければ git を一切実行しません。
+                <em>フルハッシュを出力する</em>。
               </li>
               <li>
-                <code>--restore</code> は<strong>非推奨ではありません</strong>。両者は同時に
-                指定できません。finder にテキスト入力が無いため、<strong>入力が必要な名前を渡すなら
-                <code>--restore</code>、名前を要さない操作なら <code>--action</code></strong> と
-                使い分けてください。
+                <code>--restore</code> は<strong>非推奨ではありません</strong>（両者は同時に
+                指定できません）。finder にテキスト入力が無いため、<strong>入力が必要な名前を
+                渡すなら <code>--restore</code>、名前を要さない操作なら
+                <code>--action</code></strong> と使い分けてください。
               </li>
               <li>
                 エントリは <code>git gc</code> で実体を失っている場合があります（意図的に候補へ
-                出しています）。その場合に操作を実行すると、git 自身のエラーがそのまま出て
-                非ゼロ終了します。
+                出しています）。操作を実行すると git 自身のエラーがそのまま出て非ゼロ終了します。
               </li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">reset はコミットを捨てます</span>
+              <p>
+                <code>--action</code> のメニューで破壊的なのは
+                <em>現在のブランチをこのコミットへ戻す</em>だけです。実行前に
+                <code>y/N</code> の明示同意を求め、同意が得られなければ git を一切実行しません。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -1453,6 +1714,7 @@ gz reflog --action                   # エントリを選んで、続けて行�
           <h2>
             <span lang="en"><code>gz commit</code> &mdash; picking the files to commit</span>
             <span lang="ja"><code>gz commit</code> &mdash; コミットするファイルの選択</span>
+            <span class="badges"><span class="badge multi"><span lang="en">multi-select</span><span lang="ja">複数選択</span></span></span>
             <a class="anchor" href="#commit" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
@@ -1470,7 +1732,7 @@ gz commit -m "fix authentication"   # give the message directly (no editor)</cod
               <li>
                 Candidates are staged, unstaged and untracked changes in
                 <strong>one single list</strong>, each line prefixed with the same
-                status code as <code>git status</code>. The two status characters are <strong>left-aligned</strong>: a change that only exists in the working tree reads <code>M&nbsp;</code> where git writes <code>&nbsp;M</code>, and the column stays two characters wide so the paths still line up. They are coloured the way git colours them: green for the index (staged) column, red for the working-tree column, and red for both characters of an untracked file (<code>??</code>). Because of the left alignment, <strong>the colour is the only thing that tells a staged change from an unstaged one</strong> &mdash; where colour is unavailable (<code>NO_COLOR</code>, a pipe) the two look alike.
+                status code as <code>git status</code>. They are <a href="#status-codes">left-aligned and coloured</a> like git&rsquo;s.
               </li>
               <li>
                 <strong>Files with staged changes start out selected.</strong>
@@ -1478,39 +1740,38 @@ gz commit -m "fix authentication"   # give the message directly (no editor)</cod
                 back when you keep typing a filter.
               </li>
               <li>
-                It runs a path-limited commit, <code>git commit -- &lt;paths&gt;...</code>.
-                Therefore <strong>changes you did not pick are not committed even
-                if they were staged; they simply stay staged.</strong>
+                It runs a path-limited commit,
+                <code>git commit -- &lt;paths&gt;...</code>, so
+                <strong>changes you did not pick are not committed even if they
+                were staged</strong> &mdash; they simply stay staged. Untracked
+                files you picked are <code>git add</code>ed first, since a
+                path-limited commit cannot target them.
               </li>
-              <li>Untracked files you picked are <code>git add</code>ed first, because a path-limited commit cannot target them.</li>
               <li>
-                The preview is the diff against HEAD
-                (<code>git diff --color=always HEAD -- &lt;path&gt;</code>; file content
-                for untracked files). A path-limited commit records the working
-                tree content, so the preview shows the difference from HEAD
-                rather than from the index.
+                The preview is the diff against HEAD, not against the index,
+                because that is what a path-limited commit records
+                (<code>git diff --color=always HEAD -- &lt;path&gt;</code>; file
+                content for untracked files).
               </li>
               <li>With no changes at all it prints <span class="muted">&ldquo;There are no candidates to select from&rdquo;</span> and exits.</li>
             </ul>
 
-            <h3>A note about your editor</h3>
-            <p>
-              Without <code>-m</code>, entering the message is left to
-              <code>git commit</code> (that is, <code>EDITOR</code> /
-              <code>GIT_EDITOR</code> / <code>core.editor</code>).
-              <strong>If a GUI editor such as VS Code is configured without
-              waiting for the window to close, the editor exits immediately, git
-              decides the message is empty, and the commit is aborted with
-              <code>Aborting commit due to empty commit message.</code></strong>
-              (Plain <code>git commit</code> behaves the same way.) Add the option
-              that makes it wait:
-            </p>
-            <pre><code>git config --global core.editor "code --wait"   # example for VS Code</code></pre>
-            <p>
-              Passing <code>-m</code> avoids the problem entirely because no
-              editor is started. When a commit fails, fuzgit prints the above as
-              a hint on stderr.
-            </p>
+            <div class="note">
+              <span class="note-label">GUI editors need --wait</span>
+              <p>
+                Without <code>-m</code>, the message is entered through
+                <code>git commit</code> &mdash; your <code>core.editor</code>.
+                <strong>A GUI editor configured without a wait flag exits
+                immediately, so git sees an empty message and aborts</strong>
+                with <code>Aborting commit due to empty commit message.</code>
+                Plain <code>git commit</code> behaves the same way.
+              </p>
+              <pre><code>git config --global core.editor "code --wait"   # example for VS Code</code></pre>
+              <p>
+                <code>-m</code> sidesteps it entirely by never starting an
+                editor. fuzgit prints this hint to stderr when a commit fails.
+              </p>
+            </div>
           </div>
           <div lang="ja">
             <pre><code>gz commit                      # 選んだファイルだけをコミットする（メッセージはエディタで入力）
@@ -1526,7 +1787,7 @@ gz commit -m "認証を修正する"   # メッセージを直接指定する（
             <ul>
               <li>
                 候補はステージ済み・未ステージ・未追跡の変更を<strong>1 つの一覧</strong>にしたもので、
-                行頭には <code>git status</code> と同じ状態コードが付きます。状態コードの 2 文字は<strong>左詰め</strong>で表示します（作業ツリーだけの変更は git の <code>&nbsp;M</code> ではなく <code>M&nbsp;</code>。列幅は 2 文字のままなのでパスの開始位置は揃います）。配色は git と同じで、index（staged）列は緑、作業ツリー列は赤、未追跡（<code>??</code>）は 2 文字とも赤です。左詰めにしたため、<strong>staged と unstaged の区別は色だけが担います</strong>（<code>NO_COLOR</code> やパイプ経由など色の付かない環境では両者が同じ見た目になります）。
+                行頭には <code>git status</code> と同じ状態コードが付きます。表示は git と同じ配色で<a href="#status-codes">左詰め</a>です。
               </li>
               <li>
                 <strong>ステージ済みの変更があるファイルは起動時から選択済み</strong>です。
@@ -1534,33 +1795,34 @@ gz commit -m "認証を修正する"   # メッセージを直接指定する（
               </li>
               <li>
                 実行するのは <code>git commit -- &lt;paths&gt;...</code> のパス指定コミットです。
-                そのため<strong>選ばなかった変更はステージ済みであってもコミットされず、
-                ステージ状態のまま残ります。</strong>
+                そのため<strong>選ばなかった変更はステージ済みであってもコミットされず</strong>、
+                ステージ状態のまま残ります。選んだ未追跡ファイルは、パス指定コミットの対象に
+                できないため先に <code>git add</code> します。
               </li>
-              <li>選んだ未追跡ファイルは、パス指定コミットの対象にできないため先に <code>git add</code> します。</li>
               <li>
-                プレビューは HEAD との差分（<code>git diff --color=always HEAD -- &lt;path&gt;</code>。
-                未追跡ファイルは内容）。パス指定コミットが記録するのは作業ツリーの内容であるため、
-                index との差分ではなく HEAD との差分を表示します。
+                プレビューは index ではなく HEAD との差分です（パス指定コミットが記録するのは
+                作業ツリーの内容であるため。<code>git diff --color=always HEAD -- &lt;path&gt;</code>。
+                未追跡ファイルは内容）。
               </li>
               <li>変更が 1 件も無い場合は「選択できる候補がありません」と表示して終了します。</li>
             </ul>
 
-            <h3>エディタの設定に関する注意</h3>
-            <p>
-              <code>-m</code> を省略した場合、コミットメッセージの入力は <code>git commit</code>
-              （＝ <code>EDITOR</code> / <code>GIT_EDITOR</code> / <code>core.editor</code>）に
-              委ねられます。<strong>VS Code のような GUI エディタを終了待ちなしで設定していると、
-              エディタが即座に終了するため git はメッセージが空だと判断し、
-              <code>Aborting commit due to empty commit message.</code> でコミットが
-              中止されます</strong>（これは素の <code>git commit</code> でも同じです）。
-              終了を待つオプションを付けてください。
-            </p>
-            <pre><code>git config --global core.editor "code --wait"   # VS Code の例</code></pre>
-            <p>
-              <code>-m</code> でメッセージを指定すればエディタを起動しないため、この問題を
-              回避できます。コミットが失敗したときは、上記の内容をヒントとして標準エラーへ表示します。
-            </p>
+            <div class="note">
+              <span class="note-label">GUI エディタには --wait が必要です</span>
+              <p>
+                <code>-m</code> を省略すると、メッセージの入力は <code>git commit</code>
+                （＝ <code>core.editor</code>）に委ねられます。<strong>終了待ちなしで
+                GUI エディタを設定していると、エディタが即座に終了するため git は
+                メッセージが空だと判断し</strong>、
+                <code>Aborting commit due to empty commit message.</code> で中止されます
+                （素の <code>git commit</code> でも同じです）。
+              </p>
+              <pre><code>git config --global core.editor "code --wait"   # VS Code の例</code></pre>
+              <p>
+                <code>-m</code> を指定すればエディタを起動しないため回避できます。
+                コミットが失敗したときは、この内容をヒントとして標準エラーへ表示します。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -1584,23 +1846,19 @@ gz fixup --squash   # git commit --squash=&lt;picked commit&gt;</code></pre>
             <ul>
               <li>
                 What gets committed is <strong>the staged changes</strong>. With
-                nothing staged, fuzgit prints
-                <span class="muted">&ldquo;There are no staged changes. A fixup
-                commit needs staged changes, so stage them with `gz add` and run
-                this command again&rdquo;</span> and exits before starting the
-                finder.
+                nothing staged it exits before the finder even opens, telling
+                you to stage something with <code>gz add</code> first.
               </li>
               <li>Candidates are commits reachable from HEAD (1000 by default, shared with <code>gz log --limit</code>). The preview is <code>git show --color=always</code>.</li>
               <li>
-                Afterwards the steps to fold the commit into history are printed
-                to stderr. <strong>The rebase is not run automatically</strong>
-                &mdash; rewriting history stays an explicit user action.
+                Afterwards the step that folds the commit into history is
+                printed to stderr. <strong>The rebase is never run for
+                you</strong> &mdash; rewriting history stays an explicit action.
                 <pre><code>Hint: run the following to fold the new commit into the history:
   git rebase -i --autosquash &lt;full hash of the picked commit&gt;^</code></pre>
-                If the picked commit is the very first one (no
-                parent), <code>&lt;hash&gt;^</code> cannot be resolved, so the
-                starting point becomes <code>--root</code> and the reason is
-                printed with it.
+                For the very first commit there is no <code>^</code> to resolve,
+                so the starting point becomes <code>--root</code>, with the
+                reason printed alongside.
               </li>
               <li><code>--squash</code> makes git open the editor to append the message body (<code>--fixup</code> does not).</li>
             </ul>
@@ -1626,12 +1884,12 @@ gz fixup --squash   # git commit --squash=&lt;選んだコミット&gt;</code></
                 プレビューは <code>git show --color=always</code>。
               </li>
               <li>
-                実行後、履歴へ取り込むための手順を標準エラーへ表示します。
-                <strong>rebase は自動実行しません</strong>（履歴改変はユーザーの明示操作に委ねます）。
+                実行後、履歴へ取り込む手順を標準エラーへ表示します。
+                <strong>rebase は自動実行しません</strong>（履歴改変は明示操作に委ねます）。
                 <pre><code>ヒント: 作成したコミットを履歴へ取り込むには次を実行してください。
   git rebase -i --autosquash &lt;選んだコミットのフルハッシュ&gt;^</code></pre>
-                選んだコミットが最初のコミット（親が無い）の場合は <code>&lt;hash&gt;^</code> を
-                解決できないため、起点が <code>--root</code> になります（理由も併記します）。
+                最初のコミットには解決できる <code>^</code> が無いため、起点は
+                <code>--root</code> になります（理由も併記します）。
               </li>
               <li><code>--squash</code> は git がメッセージ本文の追記のためにエディタを起動します（<code>--fixup</code> は起動しません）。</li>
             </ul>
@@ -1642,6 +1900,7 @@ gz fixup --squash   # git commit --squash=&lt;選んだコミット&gt;</code></
           <h2>
             <span lang="en"><code>gz merge</code> &mdash; picking the branch to merge</span>
             <span lang="ja"><code>gz merge</code> &mdash; merge するブランチの選択</span>
+            <span class="badges"><span class="badge confirm">y/N</span></span>
             <a class="anchor" href="#merge" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
@@ -1664,26 +1923,29 @@ gz merge --ff-only   # merge only when it can fast-forward</code></pre>
               <li>The merge destination is fixed to the current position (<code>HEAD</code>); candidates are local and remote-tracking branches <strong>excluding the current branch</strong>.</li>
               <li>The preview is the commits that would be pulled in (<code>git log --oneline HEAD..&lt;candidate&gt;</code>, up to 50).</li>
               <li>
-                <strong>A confirmation prompt (<code>[y/N]</code>) is shown
-                first</strong>, listing how many commits will be merged, the exact
-                command that will run, and the conflict prediction.
+                <strong>A confirmation prompt (<code>[y/N]</code>) comes
+                first</strong>, listing how many commits will be merged, the
+                exact command that will run, and the conflict prediction.
               </li>
               <li>
-                The conflict prediction is a dry run of
-                <code>git merge-tree --write-tree</code>
-                (<strong>Git 2.38 or newer required</strong>). When it cannot be
-                produced (older git, for example) the prompt says
-                <span class="muted">&ldquo;Conflict prediction: skipped&rdquo;</span>
-                and the merge still runs. &ldquo;Could not predict&rdquo; is
-                never treated as &ldquo;will not conflict&rdquo;.
-              </li>
-              <li>
-                On a conflict, git&rsquo;s message is shown as-is and the exit code
-                is non-zero. Resolve it with the
+                On a conflict, git&rsquo;s message is shown as-is and the exit
+                code is non-zero. Resolve it with the
                 <a href="#recovery">recovery menu</a> (run <code>gz merge</code>
                 again) or with plain git.
               </li>
             </ul>
+            <div class="note info">
+              <span class="note-label">About the conflict prediction</span>
+              <p>
+                It is a dry run of <code>git merge-tree --write-tree</code> and
+                needs <strong>Git 2.38 or newer</strong>. When it cannot be
+                produced the prompt says
+                <span class="muted">&ldquo;Conflict prediction: skipped&rdquo;</span>
+                and the merge still runs &mdash; <strong>&ldquo;could not
+                predict&rdquo; is never reported as &ldquo;will not
+                conflict&rdquo;</strong>.
+              </p>
+            </div>
           </div>
           <div lang="ja">
             <pre><code>gz merge             # 通常の merge（fast-forward できる場合は fast-forward）
@@ -1709,17 +1971,20 @@ gz merge --ff-only   # fast-forward できる場合のみ merge する</code></p
                 取り込まれるコミット数・実際に実行するコマンド・コンフリクト予測を提示します。
               </li>
               <li>
-                コンフリクト予測は <code>git merge-tree --write-tree</code> のドライラン
-                （<strong>Git 2.38 以降が必要</strong>）です。予測できない場合（2.38 未満など）は
-                「省略しました」と表示し、merge の実行は継続します。「予測できなかった」を
-                「コンフリクトしない」として扱うことはありません。
-              </li>
-              <li>
                 コンフリクトした場合は git のメッセージがそのまま表示され、非ゼロ終了します。
                 解決は<a href="#recovery">復帰メニュー</a>（<code>gz merge</code> を再実行）または
                 素の git で行います。
               </li>
             </ul>
+            <div class="note info">
+              <span class="note-label">コンフリクト予測について</span>
+              <p>
+                <code>git merge-tree --write-tree</code> のドライランであり、
+                <strong>Git 2.38 以降が必要</strong>です。予測できない場合は「省略しました」と
+                表示し、merge の実行は継続します。<strong>「予測できなかった」を
+                「コンフリクトしない」として扱うことはありません。</strong>
+              </p>
+            </div>
           </div>
         </section>
 
@@ -1727,6 +1992,7 @@ gz merge --ff-only   # fast-forward できる場合のみ merge する</code></p
           <h2>
             <span lang="en"><code>gz rebase</code> &mdash; picking the rebase base</span>
             <span lang="ja"><code>gz rebase</code> &mdash; rebase の base の選択</span>
+            <span class="badges"><span class="badge confirm">y/N</span></span>
             <a class="anchor" href="#rebase" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
@@ -1734,25 +2000,33 @@ gz merge --ff-only   # fast-forward できる場合のみ merge する</code></p
             <ul>
               <li>Candidates are local and remote-tracking branches excluding the current branch (tags and arbitrary commits are not offered).</li>
               <li>The preview is the commits that would be replayed (<code>git log --oneline &lt;candidate&gt;..HEAD</code>, up to 50).</li>
-              <li>
-                <strong>Because this rewrites history, a confirmation prompt
-                (<code>[y/N]</code>) is shown first</strong>, stating how many
-                commits will be replayed and that their hashes will change.
-              </li>
               <li>On a conflict, git&rsquo;s message is shown as-is and the exit code is non-zero.</li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">Rewrites history</span>
+              <p>
+                A confirmation prompt (<code>[y/N]</code>) comes first, stating
+                how many commits will be replayed and that their hashes will
+                change. Anyone who has already pulled those commits will have to
+                deal with the rewrite.
+              </p>
+            </div>
           </div>
           <div lang="ja">
             <pre><code>gz rebase   # base を選んで git rebase &lt;base&gt;</code></pre>
             <ul>
               <li>候補は現在のブランチを除くローカルブランチとリモート追跡ブランチです（tag や任意コミットは候補に含めません）。</li>
               <li>プレビューは replay されるコミット（<code>git log --oneline &lt;候補&gt;..HEAD</code>、最大 50 件）。</li>
-              <li>
-                <strong>履歴改変操作のため、実行前に確認プロンプト（<code>[y/N]</code>）を表示します。</strong>
-                replay されるコミット数と、コミットハッシュが変わることを提示します。
-              </li>
               <li>コンフリクトした場合は git のメッセージがそのまま表示され、非ゼロ終了します。</li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">履歴を書き換えます</span>
+              <p>
+                実行前に確認プロンプト（<code>[y/N]</code>）を表示し、replay されるコミット数と
+                コミットハッシュが変わることを提示します。そのコミットを取得済みの相手には、
+                書き換えの影響が及びます。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -1760,6 +2034,7 @@ gz merge --ff-only   # fast-forward できる場合のみ merge する</code></p
           <h2>
             <span lang="en">The recovery menu for conflicts (<code>gz merge</code> / <code>gz rebase</code> / <code>gz pull</code>)</span>
             <span lang="ja">コンフリクト時の復帰メニュー（<code>gz merge</code> / <code>gz rebase</code> / <code>gz pull</code>）</span>
+            <span class="badges"><span class="badge confirm">y/N</span></span>
             <a class="anchor" href="#recovery" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
@@ -1803,10 +2078,17 @@ gz merge --ff-only   # fast-forward できる場合のみ merge する</code></p
                 own editor &mdash; fuzgit never launches one.
               </li>
               <li>If you choose that entry with no unresolved files left, it tells you that you can resume with continue and exits.</li>
-              <li><strong>Aborting loses the resolutions made so far, so a confirmation prompt (<code>[y/N]</code>) is shown first.</strong></li>
               <li>continue / skip run with inherited stdio, so git opens the editor when a commit message is needed.</li>
               <li>There is no recovery menu for cherry-pick or revert (that is left to git&rsquo;s own <code>--continue</code> / <code>--abort</code> guidance).</li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">Abort throws away your resolutions</span>
+              <p>
+                Aborting rolls the working tree back to before the merge or
+                rebase started, losing every conflict you have resolved since.
+                A confirmation prompt (<code>[y/N]</code>) comes first.
+              </p>
+            </div>
           </div>
           <div lang="ja">
             <p>
@@ -1845,10 +2127,17 @@ gz merge --ff-only   # fast-forward できる場合のみ merge する</code></p
                 ファイルの編集そのものは各自のエディタで行ってください（fuzgit はエディタを起動しません）。
               </li>
               <li>未解決のファイルが 1 件も無い状態でこの項目を選んだ場合は、continue で再開できる旨を表示して終了します。</li>
-              <li><strong>中止（abort）はここまでの解決内容が失われるため、実行前に確認プロンプト（<code>[y/N]</code>）を表示します。</strong></li>
               <li>continue / skip は継承 stdio で実行するため、コミットメッセージの入力が必要な場合は git がエディタを起動します。</li>
               <li>cherry-pick / revert には復帰メニューを用意していません（git の <code>--continue</code> / <code>--abort</code> の案内に委ねます）。</li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">中止すると解決内容が失われます</span>
+              <p>
+                中止（abort）は merge / rebase を始める前の状態まで戻すため、それまでに
+                解決したコンフリクトはすべて失われます。実行前に確認プロンプト
+                （<code>[y/N]</code>）を表示します。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -1856,6 +2145,7 @@ gz merge --ff-only   # fast-forward できる場合のみ merge する</code></p
           <h2>
             <span lang="en"><code>gz revert</code> &mdash; picking the commits to undo</span>
             <span lang="ja"><code>gz revert</code> &mdash; 打ち消すコミットの選択</span>
+            <span class="badges"><span class="badge multi"><span lang="en">multi-select</span><span lang="ja">複数選択</span></span></span>
             <a class="anchor" href="#revert" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
@@ -1880,22 +2170,25 @@ gz revert --no-edit   # commit with git's default message, without opening the e
               </li>
               <li>Picking several commits opens the editor once per commit unless you pass <code>--no-edit</code>.</li>
               <li>
-                <strong>If the selection contains a merge commit (two or more
-                parents), fuzgit stops before running
-                <code>git revert</code>.</strong> Reverting a merge commit
-                requires <code>-m &lt;parent-number&gt;</code>, and picking the
-                mainline is not something a fuzzy finder adds value to, so it is
-                unsupported. On stopping, a ready-to-run
-                <code>git revert -m 1 &lt;full hash&gt;</code> is offered (merge
-                commits are never silently removed from the candidates).
-              </li>
-              <li>
                 On a conflict, git&rsquo;s message is shown as-is and the exit
                 code is non-zero. Continue or abort with
                 <code>git revert --continue</code> /
                 <code>git revert --abort</code>.
               </li>
             </ul>
+            <div class="note info">
+              <span class="note-label">Merge commits stop the run</span>
+              <p>
+                Reverting a merge commit needs
+                <code>-m &lt;parent-number&gt;</code>, and picking the mainline
+                is not something a fuzzy finder improves on. So a merge commit
+                in the selection <strong>stops fuzgit before
+                <code>git revert</code> runs</strong> &mdash; and it hands you a
+                ready-to-run <code>git revert -m 1 &lt;full hash&gt;</code>.
+                Merge commits are never silently dropped from the candidate
+                list.
+              </p>
+            </div>
           </div>
           <div lang="ja">
             <pre><code>gz revert             # 選んだコミットを revert する（メッセージはエディタで確認）
@@ -1917,17 +2210,20 @@ gz revert --no-edit   # エディタを起動せず git の既定メッセージ
               </li>
               <li>複数件を選ぶと <code>--no-edit</code> を付けない限りエディタが件数分だけ開きます。</li>
               <li>
-                <strong>選択にマージコミット（親が 2 つ以上）が含まれる場合は、<code>git revert</code> を
-                実行する前に停止します。</strong>マージコミットの revert には
-                <code>-m &lt;parent-number&gt;</code> の指定が必要ですが、mainline の選択は「選ぶ」価値が
-                乗らないため非対応です。停止時には <code>git revert -m 1 &lt;フルハッシュ&gt;</code> の形で
-                そのまま実行できるコマンドを提示します（暗黙に候補から除外することはしません）。
-              </li>
-              <li>
                 コンフリクトした場合は git のメッセージをそのまま表示して非ゼロ終了します。
                 続行・中止は <code>git revert --continue</code> / <code>git revert --abort</code> で行ってください。
               </li>
             </ul>
+            <div class="note info">
+              <span class="note-label">マージコミットは実行前に停止します</span>
+              <p>
+                マージコミットの revert には <code>-m &lt;parent-number&gt;</code> が必要ですが、
+                mainline の選択は「選ぶ」価値が乗らないため非対応です。選択に含まれる場合は
+                <strong><code>git revert</code> を実行する前に停止し</strong>、
+                <code>git revert -m 1 &lt;フルハッシュ&gt;</code> の形でそのまま実行できる
+                コマンドを提示します（暗黙に候補から除外することはしません）。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -1935,6 +2231,7 @@ gz revert --no-edit   # エディタを起動せず git の既定メッセージ
           <h2>
             <span lang="en"><code>gz status</code> &mdash; the state dashboard (two-step selection)</span>
             <span lang="ja"><code>gz status</code> &mdash; 状態ダッシュボード（2 段選択）</span>
+            <span class="badges"><span class="badge multi"><span lang="en">multi-select</span><span lang="ja">複数選択</span></span></span>
             <a class="anchor" href="#status" aria-label="Link to this section">#</a>
           </h2>
           <pre><code>gz status</code></pre>
@@ -1949,7 +2246,7 @@ gz revert --no-edit   # エディタを起動せず git の既定メッセージ
                 Candidates are staged, unstaged and untracked changes in one list
                 (the same candidate generation as <code>gz commit</code>), each
                 line prefixed with the same status code as
-                <code>git status</code>. The two status characters are <strong>left-aligned</strong>: a change that only exists in the working tree reads <code>M&nbsp;</code> where git writes <code>&nbsp;M</code>, and the column stays two characters wide so the paths still line up. They are coloured the way git colours them: green for the index (staged) column, red for the working-tree column, and red for both characters of an untracked file (<code>??</code>). Because of the left alignment, <strong>the colour is the only thing that tells a staged change from an unstaged one</strong> &mdash; where colour is unavailable (<code>NO_COLOR</code>, a pipe) the two look alike.
+                <code>git status</code>. They are <a href="#status-codes">left-aligned and coloured</a> like git&rsquo;s.
               </li>
               <li>
                 The header summarises the current state in one line:
@@ -2005,7 +2302,7 @@ main  |  staged 0 / unstaged 0 / untracked 0 / stash 0</code></pre>
               <li>
                 候補はステージ済み・未ステージ・未追跡の変更を 1 つの一覧にしたもの
                 （<code>gz commit</code> と同じ候補生成）で、行頭には <code>git status</code> と
-                同じ状態コードが付きます。状態コードの 2 文字は<strong>左詰め</strong>で表示します（作業ツリーだけの変更は git の <code>&nbsp;M</code> ではなく <code>M&nbsp;</code>。列幅は 2 文字のままなのでパスの開始位置は揃います）。配色は git と同じで、index（staged）列は緑、作業ツリー列は赤、未追跡（<code>??</code>）は 2 文字とも赤です。左詰めにしたため、<strong>staged と unstaged の区別は色だけが担います</strong>（<code>NO_COLOR</code> やパイプ経由など色の付かない環境では両者が同じ見た目になります）。
+                同じ状態コードが付きます。表示は git と同じ配色で<a href="#status-codes">左詰め</a>です。
               </li>
               <li>
                 ヘッダーに現在の状態を 1 行で表示します。
@@ -2182,6 +2479,7 @@ gz diff --commit     # コミットを 2 回選んで比較する</code></pre>
           <h2>
             <span lang="en"><code>gz fetch</code> &mdash; deciding what to fetch</span>
             <span lang="ja"><code>gz fetch</code> &mdash; fetch 対象の取得</span>
+            <span class="badges"><span class="badge net"><span lang="en">network</span><span lang="ja">通信</span></span><span class="badge multi"><span lang="en">multi-select</span><span lang="ja">複数選択</span></span></span>
             <a class="anchor" href="#fetch" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
@@ -2238,64 +2536,45 @@ Fetching from the remote `origin` (only one remote is registered, so the selecti
             <p>
               Every other fuzgit command touches <strong>only the current
               repository</strong>. <code>--siblings</code> is the single
-              exception: <strong>only when the flag is given</strong>, it scans
-              <strong>the parent directory of the current worktree root, one level
-              deep only</strong> (no recursion) and offers the directories that
-              contain a <code>.git</code>.
+              exception. Given the flag, it scans <strong>the parent directory
+              of the current worktree root, one level deep</strong> (never
+              recursively) and offers the directories that contain a
+              <code>.git</code>.
             </p>
             <pre><code>$ gz fetch --siblings
 The current repository is preselected. Tab: toggle the selection / Enter: fetch  |  1 excluded (no remote / bare)
 &gt;&gt; mike   origin/main
    alpha  origin/main
    zulu   origin/main</code></pre>
+
+            <h4>The candidate list</h4>
             <ul>
               <li>
-                A candidate line is
+                A line is
                 <code>&lt;directory name&gt;  &lt;remote&gt;/&lt;current branch&gt;</code>,
-                with one such pair per remote. Repositories whose HEAD does not
-                point at a branch have no branch to pair and show
-                <code>&lt;directory name&gt;  &lt;remotes&gt;  detached HEAD</code>.
-                Directory names vary in length, so each column is padded to the
-                widest value in the list and the column to its right starts at the
-                same place on every line.
-                Information that would need one <code>git</code> process per
-                repository (ahead/behind, for example) is kept out of the list and
-                moved to the preview, to keep the first paint fast.
-              </li>
-              <li><strong>The current repository starts selected</strong> (<kbd>Tab</kbd> deselects it). The others start unselected.</li>
-              <li>
-                <strong>The preview is local information only</strong> (the URL of
-                each remote, and the tracking state of each local branch via
-                <code>git for-each-ref refs/heads</code>). It runs with
-                <code>--no-optional-locks</code> so it never takes a lock in
-                somebody else&rsquo;s repository.
-                <pre><code>── origin ──
-git@github.com:example/big-repo.git
-── Branch tracking status ──
-  develop → origin/develop [ahead 2]
-* main → origin/main [behind 4]</code></pre>
-                The working tree state (<code>git status</code>) is deliberately
-                not shown: <code>git status</code> walks the whole working tree
-                (refreshing the index) before printing anything, which can take
-                seconds per preview in a repository with many files and would
-                stall every cursor move. The ahead/behind you need in order to
-                decide about a fetch is in the tracking state above.
+                one pair per remote. A repository whose HEAD points at no branch
+                reads <code>&lt;directory name&gt;  &lt;remotes&gt;  detached HEAD</code>
+                instead. Columns are padded to the widest value, so the next
+                column starts in the same place on every line.
               </li>
               <li>
-                Repositories with no remote registered, and bare repositories,
-                cannot be fetched, so they are excluded &mdash; and
-                <strong>the number excluded is shown in the header</strong> (they
-                are never dropped silently).
+                <strong>The current repository starts selected</strong>
+                (<kbd>Tab</kbd> deselects it); the others start unselected.
               </li>
               <li>
-                Linked worktrees of the same repository sitting next door are
-                <strong>deduplicated into one entry</strong> (so the same
-                repository is not contacted twice). Symlinked directories are not
+                <strong>No remote registered</strong> and <strong>bare</strong>
+                repositories cannot be fetched, so they are excluded &mdash; and
+                the header says how many, never silently.
+              </li>
+              <li>
+                Linked worktrees of one repository are
+                <strong>deduplicated into a single entry</strong>, so the same
+                remote is not contacted twice. Symlinked directories are not
                 followed.
               </li>
               <li>
-                <strong>When the only target is the current repository the finder
-                does not open</strong>; the reason is printed in one line and the
+                <strong>When the current repository is the only target the
+                finder does not open.</strong> The reason is printed and the
                 fetch runs.
                 <pre><code>$ gz fetch --siblings
 The current repository is the only target, so the selection was skipped
@@ -2303,51 +2582,65 @@ The current repository is the only target, so the selection was skipped
 1 succeeded / 0 failed</code></pre>
               </li>
               <li>
-                What runs in each repository is
-                <code>git fetch [--prune] --all</code>. They run
-                <strong>in parallel</strong>, up to
-                <code>git config fuzgit.fetchJobs</code> at a time (4 by
-                default). Each repository&rsquo;s output is captured and written
-                out as a single block when it finishes, headed by
+                <strong>The preview is local information only</strong>: each
+                remote&rsquo;s URL, and each local branch&rsquo;s tracking state
+                from <code>git for-each-ref refs/heads</code>. It runs with
+                <code>--no-optional-locks</code>, so it never takes a lock in
+                somebody else&rsquo;s repository.
+                <pre><code>── origin ──
+git@github.com:example/big-repo.git
+── Branch tracking status ──
+  develop → origin/develop [ahead 2]
+* main → origin/main [behind 4]</code></pre>
+              </li>
+            </ul>
+            <div class="note info">
+              <span class="note-label">Why no git status in the preview</span>
+              <p>
+                <code>git status</code> walks the whole working tree before
+                printing anything, which can take seconds per preview in a large
+                repository and would stall every cursor move. The ahead/behind
+                you actually need to decide about a fetch is in the tracking
+                state above. Anything else that would cost one <code>git</code>
+                process per repository is kept out of the list for the same
+                reason &mdash; the first paint stays fast.
+              </p>
+            </div>
+
+            <h4>The run</h4>
+            <ul>
+              <li>
+                Each repository runs
+                <code>git fetch [--prune] --all</code>, <strong>in
+                parallel</strong>. Output is captured and written out as one
+                block per repository when it finishes, headed by
                 <code>[&lt;done&gt;/&lt;total&gt;] &lt;directory name&gt;</code>,
-                so the update tables of different repositories never interleave
-                (git writes them to stderr as well).
+                so update tables never interleave.
               </li>
               <li>
-                The parallel phase <strong>cannot ask you anything</strong> (no
-                password, passphrase or host key prompt). Any repository that
-                fails there is <strong>run again, one at a time, with the
-                terminal attached</strong>, so you can answer the prompt. That
-                second run is not a retry: it happens once, and only to change
-                <em>how</em> the command is run.
-              </li>
-              <li>
-                The number of repositories fetched at once comes from
-                <code>git config fuzgit.fetchJobs</code> (an integer of 1 or
-                more; <strong>4</strong> when unset). <code>1</code> restores the
-                fully serial behaviour. An invalid value <strong>stops the run
-                before anything is fetched</strong> rather than silently falling
-                back to the default. There is no CLI flag for it.
+                How many run at once comes from
+                <code>git config fuzgit.fetchJobs</code> &mdash; an integer of 1
+                or more, <strong>4</strong> when unset, and <code>1</code> for
+                the fully serial behaviour. An invalid value <strong>stops the
+                run before anything is fetched</strong> instead of quietly
+                falling back. There is no CLI flag for it.
                 <pre><code>git config fuzgit.fetchJobs 8   # or --global</code></pre>
               </li>
               <li>
-                If you set <code>core.sshCommand</code> in git config, the
-                parallel phase overrides it (an environment variable beats the
-                config key &mdash; see <code>man git-config</code>), so every
-                target fails there and falls through to the serial pass. The
-                result is still correct; you simply do not get the speedup.
+                <code>--prune</code> <strong>applies to every selected
+                repository</strong>. The finder header says so.
               </li>
               <li>
-                <code>git config fuzgit.notify true</code> makes fuzgit post a
-                <strong>desktop notification when the run finishes</strong>
-                (see <a href="#notify">Completion notifications</a>).
+                <code>git config fuzgit.notify true</code> posts a
+                <strong>desktop notification when the run finishes</strong> (see
+                <a href="#notify">Completion notifications</a>).
               </li>
               <li>
-                <strong>A failing repository does not stop the run</strong>; the
-                rest still execute and a summary of successes, failures and the
-                names of the failed repositories is printed at the end. If even
-                one fails, the exit code is <strong>1</strong> (the reason was
-                already shown by git, so fuzgit does not repeat it).
+                <strong>A failing repository does not stop the run.</strong> The
+                rest still execute, and the summary at the end names the ones
+                that failed. If even one fails the exit code is
+                <strong>1</strong>; git has already shown the reason, so fuzgit
+                does not repeat it.
                 <pre><code>$ gz fetch --siblings
 [1/3] mike
 [2/3] alpha
@@ -2357,27 +2650,42 @@ fatal: Could not read from remote repository.
 2 succeeded / 1 failed (failed: zulu)
 error: Fetching failed for some repositories</code></pre>
               </li>
-              <li><strong>If launching <code>git</code> itself fails (git not installed, for example) the run stops there</strong>, because that is an environment problem rather than a per-repository failure.</li>
               <li>
-                Combined with <code>--prune</code>, the flag
-                <strong>applies to every selected repository</strong>. The finder
-                header says so:
-                <code>--prune: applies to every selected repository</code>.
+                <strong>If launching <code>git</code> itself fails</strong> (git
+                not installed, say) the run stops there &mdash; that is an
+                environment problem, not a per-repository failure.
               </li>
               <li>
-                If there is no repository that can be fetched at all, it stops
-                with a dedicated error. The same happens when the current
-                repository is bare, or when the parent directory of the worktree
-                root cannot be determined (a repository directly at the
-                filesystem root, for instance) &mdash; the scan range itself
-                cannot be decided. In none of these cases does it
-                <strong>silently fall back to just the current
-                repository</strong>, so the range you asked for and the place it
-                contacts can never diverge.
+                With nothing fetchable at all it stops with a dedicated error.
+                So does a bare current repository, or one whose worktree root has
+                no parent directory to scan. <strong>It never falls back to
+                just the current repository</strong>, so the range you asked for
+                and the place it contacts can never diverge.
                 <pre><code>$ gz fetch --siblings
 error: There is no repository to fetch (a repository without a remote and a bare repository are not offered)</code></pre>
               </li>
             </ul>
+            <div class="note info">
+              <span class="note-label">The parallel phase cannot ask you anything</span>
+              <p>
+                No password, passphrase or host-key prompt can reach you while
+                several fetches share the terminal. Any repository that fails
+                there is <strong>run again, once, one at a time, with the
+                terminal attached</strong> so you can answer. That second run is
+                not a retry &mdash; it only changes <em>how</em> the command is
+                run.
+              </p>
+            </div>
+            <div class="note">
+              <span class="note-label">core.sshCommand costs you the speedup</span>
+              <p>
+                The parallel phase overrides <code>core.sshCommand</code> with
+                an environment variable, and an environment variable beats the
+                config key (see <code>man git-config</code>). Every target then
+                fails in parallel and falls through to the serial pass. The
+                result is still correct; you simply do not get the speedup.
+              </p>
+            </div>
 
             <h3>Common to both</h3>
             <ul>
@@ -2433,96 +2741,94 @@ gz fetch --siblings    # 隣に並ぶリポジトリを選んでまとめて fet
             <h3><code>--siblings</code> &mdash; 隣のリポジトリもまとめて取得</h3>
             <p>
               fuzgit の他のコマンドは<strong>現在のリポジトリだけ</strong>を操作します。
-              <code>--siblings</code> はその唯一の例外で、<strong>フラグを明示したときに限り</strong>、
-              現在のリポジトリのワークツリー root の<strong>親ディレクトリ直下のみ</strong>を走査して
-              （再帰しません）、<code>.git</code> を持つディレクトリを候補にします。
+              <code>--siblings</code> はその唯一の例外で、フラグを明示したときに限り、
+              ワークツリー root の<strong>親ディレクトリ直下のみ</strong>を走査し（再帰しません）、
+              <code>.git</code> を持つディレクトリを候補にします。
             </p>
             <pre><code>$ gz fetch --siblings
 現在のリポジトリを選択済みにしています。Tab: 選択の切替 / Enter: 取得  |  除外 1 件（リモート未登録 / bare）
 &gt;&gt; mike   origin/main
    alpha  origin/main
    zulu   origin/main</code></pre>
+
+            <h4>候補一覧</h4>
             <ul>
               <li>
-                候補行は <code>ディレクトリ名  リモート/現在のブランチ</code> です（リモートが複数あれば
-                その数だけ並べます）。HEAD がブランチを指していないリポジトリは対にするブランチが無いため、
-                <code>ディレクトリ名  リモート  detached HEAD</code> と表示します。
-                ディレクトリ名の長さはまちまちであるため、各列は候補一覧の中で最も長いものに合わせて
-                空白で埋め、右の列の開始位置をすべての行で揃えます。ahead / behind のように
-                1 リポジトリあたり git の起動が必要な情報は候補一覧に載せず、プレビューへ回しています
-                （初期表示を速く保つため）。
-              </li>
-              <li><strong>現在のリポジトリは起動時から選択済み</strong>です（<kbd>Tab</kbd> で外せます）。他のリポジトリは未選択です。</li>
-              <li>
-                <strong>プレビューはローカル情報だけ</strong>です（リモートごとの URL と、
-                <code>git for-each-ref refs/heads</code> によるローカルブランチごとの追跡状況）。
-                他人のリポジトリでロックを取らないよう <code>--no-optional-locks</code> を付けて
-                実行します。
-                <pre><code>── origin ──
-git@github.com:example/big-repo.git
-── ブランチの追跡状況 ──
-  develop → origin/develop [ahead 2]
-* main → origin/main [behind 4]</code></pre>
-                作業ツリーの状態（<code>git status</code>）は表示しません。<code>git status</code> は
-                状態を出す前に作業ツリー全体を走査する（インデックスを refresh する）ため、
-                ファイル数の多いリポジトリではプレビュー 1 件の生成に数秒掛かることがあり、
-                カーソルを動かすたびに待たされるためです。fetch の判断に必要な ahead / behind は
-                上記の追跡状況で分かります。
+                候補行は <code>ディレクトリ名  リモート/現在のブランチ</code> で、リモートの数だけ
+                並びます。HEAD がブランチを指していないリポジトリは
+                <code>ディレクトリ名  リモート  detached HEAD</code> と表示します。各列は一覧中で
+                最も長い値に合わせて空白で埋めるため、右の列の開始位置はすべての行で揃います。
               </li>
               <li>
-                リモートが 1 つも登録されていないリポジトリと bare リポジトリは fetch できないため
-                候補から除外し、<strong>除外した件数をヘッダーに示します</strong>（黙って消しません）。
+                <strong>現在のリポジトリは起動時から選択済み</strong>です
+                （<kbd>Tab</kbd> で外せます）。他は未選択です。
+              </li>
+              <li>
+                <strong>リモート未登録</strong>のリポジトリと <strong>bare</strong> リポジトリは
+                fetch できないため除外し、除外件数をヘッダーに示します（黙って消しません）。
               </li>
               <li>
                 同じリポジトリの linked worktree が隣に並んでいる場合は<strong>1 件に重複排除</strong>します
-                （同じリポジトリへ二重に通信しないため）。シンボリックリンクのディレクトリは辿りません。
+                （同じリモートへ二重に通信しないため）。シンボリックリンクのディレクトリは辿りません。
               </li>
               <li>
                 <strong>対象が現在のリポジトリ 1 件だけの場合は finder を起動せず</strong>、
-                理由を 1 行示してそのまま実行します。
+                理由を示してそのまま実行します。
                 <pre><code>$ gz fetch --siblings
 対象が現在のリポジトリ 1 件のため、選択を省略しました
 [1/1] only
 成功 1 件 / 失敗 0 件</code></pre>
               </li>
               <li>
-                実行するのは各リポジトリでの <code>git fetch [--prune] --all</code> です。
-                <strong>並列に</strong>実行し、同時実行数は
-                <code>git config fuzgit.fetchJobs</code>（既定 4）で決まります。
-                各リポジトリの出力はキャプチャして、完了した順に
+                <strong>プレビューはローカル情報だけ</strong>です（リモートごとの URL と、
+                <code>git for-each-ref refs/heads</code> によるローカルブランチごとの追跡状況）。
+                他人のリポジトリでロックを取らないよう <code>--no-optional-locks</code> を付けます。
+                <pre><code>── origin ──
+git@github.com:example/big-repo.git
+── ブランチの追跡状況 ──
+  develop → origin/develop [ahead 2]
+* main → origin/main [behind 4]</code></pre>
+              </li>
+            </ul>
+            <div class="note info">
+              <span class="note-label">プレビューに git status を出さない理由</span>
+              <p>
+                <code>git status</code> は結果を出す前に作業ツリー全体を走査するため、
+                ファイル数の多いリポジトリではプレビュー 1 件に数秒掛かり、カーソルを
+                動かすたびに待たされます。fetch の判断に必要な ahead / behind は上記の
+                追跡状況で分かります。1 リポジトリあたり git の起動が必要な情報を候補一覧に
+                載せないのも同じ理由です（初期表示を速く保つため）。
+              </p>
+            </div>
+
+            <h4>実行</h4>
+            <ul>
+              <li>
+                各リポジトリで <code>git fetch [--prune] --all</code> を<strong>並列に</strong>
+                実行します。出力はキャプチャし、完了した順に
                 <code>[&lt;完了件数&gt;/&lt;全体&gt;] &lt;ディレクトリ名&gt;</code> を頭に付けて
-                ひとまとまりで書き出します。<code>git fetch</code> の更新表も標準エラーに出るため、
-                こうしないと複数のリポジトリの出力が混ざって読み取れなくなります。
+                ひとまとまりで書き出すため、複数リポジトリの更新表が混ざりません。
               </li>
               <li>
-                並列フェーズでは<strong>一切の対話ができません</strong>（パスワード・passphrase・
-                ホスト鍵の確認を求めません）。そこで失敗したリポジトリだけは、端末をつないだまま
-                <strong>1 件ずつ実行し直す</strong>ため、プロンプトに応答できます。
-                これはリトライではなく<em>実行方法</em>の切り替えであり、1 回だけ行います。
-              </li>
-              <li>
-                同時に fetch する件数は <code>git config fuzgit.fetchJobs</code> で決まります
-                （1 以上の整数。未設定なら <strong>4</strong>）。<code>1</code> を指定すると
-                完全な直列実行に戻ります。不正な値のときは既定値へ暗黙に倒さず、
-                <strong>1 件も fetch しないまま停止</strong>します。CLI のフラグは設けていません。
+                同時実行数は <code>git config fuzgit.fetchJobs</code> で決まります
+                （1 以上の整数。未設定なら <strong>4</strong>、<code>1</code> で完全な直列実行）。
+                不正な値のときは既定値へ暗黙に倒さず、<strong>1 件も fetch しないまま停止</strong>
+                します。CLI のフラグは設けていません。
                 <pre><code>git config fuzgit.fetchJobs 8   # --global も可</code></pre>
               </li>
               <li>
-                git config に <code>core.sshCommand</code> を設定している場合、並列フェーズは
-                それを上書きします（環境変数が config より優先されます。<code>man git-config</code>）。
-                そのため対象がすべて並列フェーズで失敗し、直列フェーズへ回ります。
-                結果は正しく得られますが、高速化の恩恵は受けられません。
+                <code>--prune</code> は<strong>選択したすべてのリポジトリに適用</strong>されます
+                （その旨は finder のヘッダーに表示します）。
               </li>
               <li>
                 <code>git config fuzgit.notify true</code> を設定すると、
-                <strong>実行の完了をデスクトップ通知で知らせます</strong>
+                <strong>完了をデスクトップ通知で知らせます</strong>
                 （<a href="#notify">完了通知</a>参照）。
               </li>
               <li>
-                <strong>途中のリポジトリが失敗しても中断せず残りを実行</strong>し、最後に成功件数・
-                失敗件数と失敗したリポジトリ名を集計表示します。1 件でも失敗した場合は
-                <strong>終了コード 1</strong> で終わります（失敗理由は git のメッセージがその場で
-                表示済みのため、fuzgit は再掲しません）。
+                <strong>途中で失敗しても中断せず残りを実行</strong>し、最後に成功・失敗件数と
+                失敗したリポジトリ名を集計します。1 件でも失敗すれば<strong>終了コード 1</strong>
+                です（失敗理由は git が表示済みのため再掲しません）。
                 <pre><code>$ gz fetch --siblings
 [1/3] mike
 [2/3] alpha
@@ -2533,24 +2839,36 @@ fatal: Could not read from remote repository.
 エラー: 一部のリポジトリで取得に失敗しました</code></pre>
               </li>
               <li>
-                <strong><code>git</code> の起動そのものに失敗した場合（git 未インストール等）は、
-                その場で中断します。</strong>環境の問題でありリポジトリごとの失敗ではないためです。
+                <strong><code>git</code> の起動そのものに失敗した場合（git 未インストール等）は
+                その場で中断します</strong>。環境の問題であり、リポジトリごとの失敗ではないためです。
               </li>
               <li>
-                <code>--prune</code> と併用した場合は<strong>選択したすべてのリポジトリに適用</strong>されます。
-                その旨は finder のヘッダーに
-                <code>--prune: 選択したすべてのリポジトリに適用</code> として表示します。
-              </li>
-              <li>
-                fetch できるリポジトリが 1 件も無い場合は専用エラーで停止します。また、現在のリポジトリが
-                bare の場合とワークツリー root の親ディレクトリを取得できない場合（リポジトリが
-                ファイルシステムの root 直下にある等）は、走査範囲そのものを決められないため専用エラーで
-                停止します。いずれも<strong>暗黙に現在のリポジトリだけへ倒すことはしません</strong>
+                fetch できるリポジトリが 1 件も無い場合、現在のリポジトリが bare の場合、
+                ワークツリー root の親ディレクトリを取得できない場合は、いずれも専用エラーで
+                停止します。<strong>暗黙に現在のリポジトリだけへ倒すことはしません</strong>
                 （指定した範囲と通信先が食い違わないようにするため）。
                 <pre><code>$ gz fetch --siblings
 エラー: fetch できるリポジトリがありません（リモートが登録されていないリポジトリと bare リポジトリは対象になりません）</code></pre>
               </li>
             </ul>
+            <div class="note info">
+              <span class="note-label">並列フェーズでは対話できません</span>
+              <p>
+                複数の fetch が端末を共有するため、パスワード・passphrase・ホスト鍵の確認は
+                届きません。そこで失敗したリポジトリだけを、端末をつないだまま
+                <strong>1 件ずつ実行し直します</strong>。これはリトライではなく
+                <em>実行方法</em>の切り替えであり、1 回だけ行います。
+              </p>
+            </div>
+            <div class="note">
+              <span class="note-label">core.sshCommand を設定すると高速化されません</span>
+              <p>
+                並列フェーズは <code>core.sshCommand</code> を環境変数で上書きし、環境変数は
+                config より優先されます（<code>man git-config</code>）。そのため対象がすべて
+                並列フェーズで失敗し、直列フェーズへ回ります。結果は正しく得られますが、
+                高速化の恩恵は受けられません。
+              </p>
+            </div>
 
             <h3>共通</h3>
             <ul>
@@ -2564,38 +2882,34 @@ fatal: Could not read from remote repository.
           <h2>
             <span lang="en"><code>gz pull</code> &mdash; bringing several branches up to date</span>
             <span lang="ja"><code>gz pull</code> &mdash; 複数ブランチの一括取り込み</span>
+            <span class="badges"><span class="badge net"><span lang="en">network</span><span lang="ja">通信</span></span><span class="badge confirm">y/N</span><span class="badge multi"><span lang="en">multi-select</span><span lang="ja">複数選択</span></span></span>
             <a class="anchor" href="#pull" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
-            <pre><code>gz pull    # pick the branches and fast-forward them onto their upstream</code></pre>
+            <pre><code>gz pull            # pick branches and fast-forward them onto their upstream
+gz pull --rebase   # rebase the current branch onto its upstream
+gz pull --merge    # merge the upstream into the current branch</code></pre>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th scope="col">Option</th><th scope="col">Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>-r</code>, <code>--rebase</code></td><td>Integrate <strong>the current branch</strong> by rebasing onto its upstream (rewrites history)</td></tr>
+                  <tr><td><code>--merge</code></td><td>Integrate <strong>the current branch</strong> by merging its upstream</td></tr>
+                </tbody>
+              </table>
+            </div>
             <p>
-              There are no options: no integration flags
-              (<code>--rebase</code> / <code>--merge</code>), no
-              <code>--prune</code>, and no positional branch name.
-            </p>
-            <p>
-              The only thing you pick is
-              <strong>which branches should follow their upstream</strong>. The
-              targets are several local branches of the current repository; you
-              never pick a remote &times; branch combination, because the
-              destination is fixed to each branch&rsquo;s own upstream.
+              Without a flag, the only thing you pick is
+              <strong>which branches should follow their upstream</strong> &mdash;
+              several local branches of the current repository. You never pick a
+              remote &times; branch combination, because the destination is fixed
+              to each branch&rsquo;s own upstream. There is no
+              <code>--prune</code> and no positional branch name.
+              <code>--rebase</code> and <code>--merge</code> are a different
+              shape entirely; see
+              <a href="#pull-shapes">Two shapes</a> below.
             </p>
             <ul>
-              <li>
-                <strong>Integration is fixed to fast-forward only.</strong>
-                &ldquo;Roll back to the state before the pull if a conflict
-                happens&rdquo; is satisfied not by a rollback routine but
-                <strong>by never performing an operation that can break
-                anything</strong>. A fast-forward does not recreate existing
-                commits, and git <strong>refuses without changing anything</strong>
-                when it cannot fast-forward, when the change would clash with the
-                working tree, or when the branch is in use by another worktree.
-                A failure therefore leaves the pre-pull state intact and there is
-                nothing to roll back. (<code>git merge --abort</code> cannot
-                always reconstruct the original state when there are uncommitted
-                changes, and <code>git reset --hard</code> discards uncommitted
-                changes, so neither is used.)
-              </li>
               <li>
                 Candidates are local branches that <strong>have an upstream whose
                 <code>branch.&lt;name&gt;.remote</code> is a registered remote
@@ -2620,12 +2934,11 @@ The current branch is preselected. Tab: toggle the selection / Enter: integrate 
               <li>
                 A candidate line is
                 <code>&lt;mark&gt;&lt;branch&gt;  →  &lt;short upstream name&gt;</code>.
-                <strong>ahead / behind is not shown.</strong> At candidate
-                generation time all that is known is the difference against the
-                tracking refs from the last fetch, which does not match how much
-                is about to be fetched and integrated (showing it would give the
-                false impression of &ldquo;not behind&rdquo;; the actual amount
-                appears in git&rsquo;s own update table at run time).
+                <strong>ahead / behind is deliberately not shown</strong>: at
+                that moment fuzgit only knows the last fetch&rsquo;s tracking
+                refs, which is not how much is about to arrive, and a stale
+                &ldquo;not behind&rdquo; would mislead. The real figure appears
+                in git&rsquo;s own update table at run time.
               </li>
               <li>
                 The preview is headed
@@ -2700,16 +3013,37 @@ error: Integrating failed for some branches</code></pre>
               </li>
               <li><strong>If launching <code>git</code> itself fails (git not installed, for example) the run stops there</strong>, because that is an environment problem rather than a per-branch failure.</li>
               <li>
-                <strong>There is no <code>[y/N]</code> confirmation prompt.</strong>
-                Making a multi-selection and pressing <kbd>Enter</kbd> is already
-                an explicit decision, and a fast-forward loses neither existing
-                commits nor working tree changes (the same judgement as
-                <code>gz fetch --siblings</code>).
+                <strong>No <code>[y/N]</code> prompt in this shape.</strong>
+                Multi-selecting and pressing <kbd>Enter</kbd> is already an
+                explicit decision, and a fast-forward loses neither existing
+                commits nor working tree changes &mdash; the same judgement as
+                <code>gz fetch --siblings</code>. <code>--rebase</code> /
+                <code>--merge</code> do confirm.
               </li>
               <li>Run while a merge or rebase is in progress, it shows the <a href="#recovery">recovery menu</a> instead of the branch selection.</li>
             </ul>
+            <div class="note info">
+              <span class="note-label">Why fast-forward only</span>
+              <p>
+                &ldquo;Get back to the state before the pull if something goes
+                wrong&rdquo; is met not by a rollback routine but
+                <strong>by never running an operation that can break
+                anything</strong>. A fast-forward does not recreate existing
+                commits, and git <strong>refuses without changing
+                anything</strong> when it cannot fast-forward, when the change
+                would clash with the working tree, or when the branch is in use
+                by another worktree. A failure therefore leaves the pre-pull
+                state intact, and there is nothing to roll back.
+              </p>
+              <p class="muted">
+                The alternatives were rejected for the same reason:
+                <code>git merge --abort</code> cannot always reconstruct the
+                original state when there are uncommitted changes, and
+                <code>git reset --hard</code> discards them outright.
+              </p>
+            </div>
 
-            <h3>Two shapes: fast-forward in bulk, or one branch your way</h3>
+            <h3 id="pull-shapes">Two shapes: fast-forward in bulk, or one branch your way</h3>
             <div class="table-wrap">
               <table>
                 <thead><tr><th scope="col">Aspect</th><th scope="col"><code>gz pull</code></th><th scope="col"><code>gz pull --rebase</code> / <code>--merge</code></th></tr></thead>
@@ -2735,38 +3069,38 @@ error: Integrating failed for some branches</code></pre>
               mean switching the working tree, or creating a temporary worktree
               &mdash; both of which put work you have in progress at risk.
             </p>
-            <blockquote>
+            <div class="note info">
+              <span class="note-label">Where gz sync went</span>
               <p>
-                These two flags used to be a separate command, <code>gz sync</code>,
-                removed in favour of folding them in here so that
+                These two flags used to be a separate command,
+                <code>gz sync</code>. It was folded in here so that
                 &ldquo;bring changes in&rdquo; is one command rather than two.
               </p>
-            </blockquote>
+            </div>
           </div>
 
           <div lang="ja">
-            <pre><code>gz pull    # 取り込むブランチを選んで、upstream へ fast-forward で追随させる</code></pre>
+            <pre><code>gz pull            # 取り込むブランチを選んで、upstream へ fast-forward で追随させる
+gz pull --rebase   # 現在のブランチを upstream へ rebase して取り込む
+gz pull --merge    # 現在のブランチへ upstream を merge して取り込む</code></pre>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th scope="col">オプション</th><th scope="col">説明</th></tr></thead>
+                <tbody>
+                  <tr><td><code>-r</code>, <code>--rebase</code></td><td><strong>現在のブランチ</strong>を upstream へ rebase して取り込む（履歴を書き換える）</td></tr>
+                  <tr><td><code>--merge</code></td><td><strong>現在のブランチ</strong>へ upstream を merge して取り込む</td></tr>
+                </tbody>
+              </table>
+            </div>
             <p>
-              オプションはありません。取り込み方式のフラグ（<code>--rebase</code> /
-              <code>--merge</code>）も <code>--prune</code> もブランチ名の位置引数も受け付けません。
-            </p>
-            <p>
-              選ばせるのは<strong>「どのブランチを upstream へ追随させるか」だけ</strong>です。
-              対象は現在のリポジトリの複数のローカルブランチで、リモート × ブランチの組み合わせは
-              選ばせません（追随先は各ブランチの upstream に固定です）。
+              フラグ無しで選ばせるのは<strong>「どのブランチを upstream へ追随させるか」だけ</strong>
+              です。対象は現在のリポジトリの複数のローカルブランチで、リモート × ブランチの
+              組み合わせは選ばせません（追随先は各ブランチの upstream に固定）。
+              <code>--prune</code> やブランチ名の位置引数はありません。
+              <code>--rebase</code> / <code>--merge</code> は形そのものが異なります &mdash;
+              下の<a href="#pull-shapes-ja">2 つの形</a>を参照してください。
             </p>
             <ul>
-              <li>
-                <strong>取り込みは fast-forward のみに固定</strong>です。「コンフリクトが起きたら
-                pull 前の状態に戻す」ことをロールバック処理ではなく、<strong>壊し得る操作を
-                行わない</strong>ことで満たすためです。fast-forward は既存のコミットを作り直さず、
-                fast-forward できない場合・作業ツリーの変更と衝突する場合・他の worktree で
-                使用中の場合はいずれも git が<strong>何も変更せずに拒否</strong>します。そのため
-                失敗しても取り込み前の状態がそのまま残り、巻き戻す対象がありません
-                （<code>git merge --abort</code> は未コミットの変更があると元の状態を再構成できない
-                ことがあり、<code>git reset --hard</code> は未コミットの変更を破棄するため、
-                いずれも使いません）。
-              </li>
               <li>
                 候補は <strong>upstream が設定され、その <code>branch.&lt;name&gt;.remote</code> が
                 登録済みのリモート名である</strong>ローカルブランチです。upstream が無いもの・
@@ -2787,10 +3121,10 @@ error: Integrating failed for some branches</code></pre>
               </li>
               <li>
                 候補行は <code>&lt;マーク&gt;&lt;ブランチ名&gt;  →  &lt;upstream の短縮名&gt;</code> です。
-                <strong>ahead / behind は表示しません。</strong>候補生成の時点で分かるのは前回の
-                fetch までに取得済みの追跡参照との差であり、これから fetch して取り込む本数とは
-                一致しないためです（「遅れていない」という誤った印象を与えないため。取り込み量は
-                実行時に git 自身が出す更新表で分かります）。
+                <strong>ahead / behind は意図的に表示しません</strong>。この時点で分かるのは
+                前回 fetch した追跡参照との差であり、これから取り込む本数とは一致せず、
+                古い「遅れていない」は誤解を招くためです。実際の本数は実行時に git 自身が出す
+                更新表で分かります。
               </li>
               <li>
                 プレビューは <code>── 未取り込みのコミット（前回の fetch 時点） ──</code> の見出しを
@@ -2856,18 +3190,35 @@ fast-forward できなかったブランチは、そのブランチへ切り替�
                 その場で中断します。</strong>環境の問題でありブランチごとの失敗ではないためです。
               </li>
               <li>
-                <strong>実行前の <code>[y/N]</code> 確認プロンプトはありません。</strong>
+                <strong>この形では <code>[y/N]</code> の確認プロンプトはありません。</strong>
                 複数選択して <kbd>Enter</kbd> を押すこと自体が明示的な決定であり、fast-forward は
                 既存のコミットも作業ツリーの変更も失わせないためです
-                （<code>gz fetch --siblings</code> と同じ判断）。
+                （<code>gz fetch --siblings</code> と同じ判断）。<code>--rebase</code> /
+                <code>--merge</code> では確認します。
               </li>
               <li>
                 merge / rebase が進行中の状態で実行した場合は、ブランチ選択ではなく
                 <a href="#recovery">復帰メニュー</a>が表示されます。
               </li>
             </ul>
+            <div class="note info">
+              <span class="note-label">fast-forward のみに固定する理由</span>
+              <p>
+                「何かあれば pull 前の状態に戻す」ことを、ロールバック処理ではなく
+                <strong>壊し得る操作を行わない</strong>ことで満たすためです。fast-forward は
+                既存のコミットを作り直さず、fast-forward できない場合・作業ツリーの変更と
+                衝突する場合・他の worktree で使用中の場合は、いずれも git が
+                <strong>何も変更せずに拒否</strong>します。そのため失敗しても取り込み前の状態が
+                そのまま残り、巻き戻す対象がありません。
+              </p>
+              <p class="muted">
+                代替案を採らなかった理由も同じです。<code>git merge --abort</code> は未コミットの
+                変更があると元の状態を再構成できないことがあり、<code>git reset --hard</code> は
+                未コミットの変更を破棄します。
+              </p>
+            </div>
 
-            <h3>2 つの形 &mdash; まとめて fast-forward か、1 本を方式を選んで取り込むか</h3>
+            <h3 id="pull-shapes-ja">2 つの形 &mdash; まとめて fast-forward か、1 本を方式を選んで取り込むか</h3>
             <div class="table-wrap">
               <table>
                 <thead><tr><th scope="col">観点</th><th scope="col"><code>gz pull</code></th><th scope="col"><code>gz pull --rebase</code> / <code>--merge</code></th></tr></thead>
@@ -2892,13 +3243,14 @@ fast-forward できなかったブランチは、そのブランチへ切り替�
               作業ツリーを切り替えるか一時 worktree を作る必要があり、いずれも進行中の作業を
               危険に晒します。
             </p>
-            <blockquote>
+            <div class="note info">
+              <span class="note-label">gz sync の行き先</span>
               <p>
                 この 2 つのフラグは、以前は <code>gz sync</code> という独立したコマンドでした。
-                「取り込む」操作が 2 つのコマンドに分かれていて使い分けが読み取れなかったため、
+                「取り込む」操作を 2 つのコマンドに分けると使い分けが読み取れないため、
                 こちらへ畳んで 1 つにまとめています。
               </p>
-            </blockquote>
+            </div>
           </div>
         </section>
 
@@ -2906,6 +3258,7 @@ fast-forward できなかったブランチは、そのブランチへ切り替�
           <h2>
             <span lang="en"><code>gz worktree</code> &mdash; listing and managing worktrees</span>
             <span lang="ja"><code>gz worktree</code> &mdash; worktree の一覧・管理</span>
+            <span class="badges"><span class="badge confirm">y/N</span></span>
             <a class="anchor" href="#worktree" aria-label="Link to this section">#</a>
           </h2>
           <div lang="en">
@@ -2921,17 +3274,17 @@ gz worktree prune            # tidy up bookkeeping for worktrees whose directory
               <li>The preview shows the commit log of the highlighted worktree&rsquo;s HEAD (bare worktrees and worktrees without a single commit get no preview).</li>
               <li>On confirmation <strong>only the path of the picked worktree</strong> goes to stdout; messages go to stderr.</li>
             </ul>
-            <blockquote>
+            <div class="note">
+              <span class="note-label">Known behaviour</span>
               <p>
-                <strong>Note (known behaviour):</strong> if you
-                <strong>redirect stdout to a file</strong>, skim&rsquo;s drawing
-                escapes end up in that file too (<code>gz worktree &gt; out.txt</code>
-                and <code>gz log &gt; log.txt</code> behave the same). With pipes
-                and command substitution (<code>$(gz worktree)</code>) the drawing
-                goes to the terminal, so <code>cd "$(gz worktree)"</code> works as
-                expected.
+                <strong>Redirecting stdout to a file</strong> catches skim&rsquo;s
+                drawing escapes in that file too &mdash;
+                <code>gz worktree &gt; out.txt</code> and
+                <code>gz log &gt; log.txt</code> behave the same. Pipes and
+                command substitution are fine, because the drawing goes to the
+                terminal, so <code>cd "$(gz worktree)"</code> works as expected.
               </p>
-            </blockquote>
+            </div>
 
             <h3><code>gz worktree add &lt;name&gt;</code></h3>
             <div class="table-wrap">
@@ -2962,24 +3315,34 @@ gz worktree prune            # tidy up bookkeeping for worktrees whose directory
               <li>The argument is a <strong>name</strong>. Anything containing a path separator (<code>../sample</code>, <code>a/b</code>, an absolute path), as well as <code>.</code> and <code>..</code>, is refused with an explanation rather than being reinterpreted.</li>
               <li>It runs <code>git worktree add -- &lt;resolved path&gt; &lt;branch&gt;</code>. <strong>Names are never suggested automatically.</strong></li>
               <li>For a name starting with <code>-</code>, write <code>gz worktree add -- -dashy</code> (that <code>--</code> is clap&rsquo;s; fuzgit adds its own <code>--</code> when calling git).</li>
-              <li>
-                Afterwards the <code>.claude/</code> directory of the worktree you
-                ran the command from is <strong>copied</strong> into the new one.
-                <code>git worktree add</code> only writes out tracked files, so a
-                gitignored <code>.claude/</code> would otherwise be missing. Files
-                that already exist on the other side are <strong>left alone</strong>,
-                symlinks are not followed, and a failure is reported on stderr
-                without failing the command &mdash; the worktree itself was created.
-                This is a copy, not a link, so the two sides can diverge.
-              </li>
             </ul>
+            <div class="note info">
+              <span class="note-label">.claude/ is copied across</span>
+              <p>
+                <code>git worktree add</code> only writes out tracked files, so a
+                gitignored <code>.claude/</code> would be missing in the new
+                worktree. fuzgit <strong>copies</strong> it over from the
+                worktree you ran the command in. Files that already exist on the
+                other side are <strong>left alone</strong>, symlinks are not
+                followed, and a failure is reported on stderr without failing the
+                command &mdash; the worktree itself was created. It is a copy,
+                not a link, so the two sides can diverge.
+              </p>
+            </div>
 
             <h3><code>gz worktree remove</code></h3>
             <ul>
               <li>Candidates are linked worktrees only &mdash; <strong>the main worktree is not offered</strong> (git does not allow removing it).</li>
-              <li><strong>A confirmation prompt (<code>[y/N]</code>) is shown first.</strong></li>
-              <li>Locked worktrees and worktrees with uncommitted changes fail with git&rsquo;s message as-is and a non-zero exit code (<code>--force</code> is not offered).</li>
+              <li>Locked worktrees and worktrees with uncommitted changes fail with git&rsquo;s message as-is and a non-zero exit code.</li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">Deletes a directory</span>
+              <p>
+                A confirmation prompt (<code>[y/N]</code>) comes first. There is
+                no <code>--force</code>: a worktree holding uncommitted changes
+                is refused by git, and fuzgit does not offer a way past that.
+              </p>
+            </div>
 
             <h3><code>gz worktree prune</code></h3>
             <ul>
@@ -3001,22 +3364,22 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
               <li>プレビューには選択中 worktree の HEAD のコミットログを表示します（bare とコミットが 1 件も無い worktree はプレビューを出しません）。</li>
               <li>決定すると<strong>選んだ worktree のパスだけ</strong>を標準出力へ出します。メッセージ類は標準エラーです。</li>
             </ul>
-            <blockquote>
+            <div class="note">
+              <span class="note-label">既知の挙動</span>
               <p>
-                <strong>注意（既知の挙動）</strong>: 標準出力を<strong>ファイルへリダイレクト</strong>すると、
-                skim の描画エスケープもそのファイルへ混ざります
-                （<code>gz worktree &gt; out.txt</code> / <code>gz log &gt; log.txt</code> のいずれも同じ）。
-                パイプ・コマンド置換（<code>$(gz worktree)</code>）では描画は端末側へ出るため、
-                <code>cd "$(gz worktree)"</code> は期待どおり動作します。
+                標準出力を<strong>ファイルへリダイレクト</strong>すると、skim の描画エスケープも
+                そのファイルへ混ざります（<code>gz worktree &gt; out.txt</code> /
+                <code>gz log &gt; log.txt</code> のいずれも同じ）。パイプ・コマンド置換では
+                描画が端末側へ出るため、<code>cd "$(gz worktree)"</code> は期待どおり動作します。
               </p>
-            </blockquote>
+            </div>
 
             <h3><code>gz worktree add &lt;name&gt;</code></h3>
             <div class="table-wrap">
               <table>
                 <thead><tr><th scope="col">引数</th><th scope="col">説明</th></tr></thead>
                 <tbody>
-                  <tr><td><code>&lt;PATH&gt;</code></td><td>作成する worktree のパス（必須の位置引数）</td></tr>
+                  <tr><td><code>&lt;NAME&gt;</code></td><td>作成する worktree の名前（必須の位置引数）。パスではなく<strong>名前</strong>で、区切り文字は受け付けない</td></tr>
                 </tbody>
               </table>
             </div>
@@ -3043,27 +3406,36 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
               <li>引数は<strong>名前</strong>です。パス区切りを含むもの（<code>../sample</code> / <code>a/b</code> / 絶対パス）と <code>.</code> / <code>..</code> は、読み替えずに理由を示して拒否します。</li>
               <li>実行するのは <code>git worktree add -- &lt;解決後のパス&gt; &lt;branch&gt;</code> です。<strong>名前の自動提案は行いません。</strong></li>
               <li>
-                <code>-</code> で始まるパスを指定する場合は <code>gz worktree add -- -dashy</code> のように
-                書きます（clap 側の <code>--</code> であり、fuzgit は git へ渡す際にも別途
+                <code>-</code> で始まる名前を指定する場合は <code>gz worktree add -- -dashy</code> の
+                ように書きます（clap 側の <code>--</code> であり、fuzgit は git へ渡す際にも別途
                 <code>--</code> で保護します）。
               </li>
-              <li>
-                作成後、コマンドを実行した worktree の <code>.claude/</code> を新しい worktree へ
-                <strong>複写</strong>します。<code>git worktree add</code> は追跡ファイルしか
-                書き出さないため、gitignore された <code>.claude/</code> はそのままでは現れません。
-                複写先に既にあるファイルは<strong>上書きせず残し</strong>、シンボリックリンクは
-                辿りません。失敗しても標準エラーへ知らせるだけでコマンドは失敗しません
-                （worktree の作成自体は成功しているため）。リンクではなく複写なので、
-                両者は独立して変化します。
-              </li>
             </ul>
+            <div class="note info">
+              <span class="note-label">.claude/ を複写します</span>
+              <p>
+                <code>git worktree add</code> は追跡ファイルしか書き出さないため、gitignore された
+                <code>.claude/</code> は新しい worktree に現れません。そこで、コマンドを実行した
+                worktree の <code>.claude/</code> を<strong>複写</strong>します。複写先に既にある
+                ファイルは<strong>上書きせず残し</strong>、シンボリックリンクは辿りません。
+                失敗しても標準エラーへ知らせるだけでコマンドは失敗しません（worktree の作成自体は
+                成功しているため）。リンクではなく複写なので、両者は独立して変化します。
+              </p>
+            </div>
 
             <h3><code>gz worktree remove</code></h3>
             <ul>
               <li>候補は linked worktree のみで、<strong>main worktree は候補に含めません</strong>（git が削除を許可しないため）。</li>
-              <li><strong>実行前に確認プロンプト（<code>[y/N]</code>）を表示します。</strong></li>
-              <li>locked な worktree・未コミット変更を含む worktree は、git のエラーをそのまま表示して非ゼロ終了します（<code>--force</code> は提供していません）。</li>
+              <li>locked な worktree・未コミット変更を含む worktree は、git のエラーをそのまま表示して非ゼロ終了します。</li>
             </ul>
+            <div class="note danger">
+              <span class="note-label">ディレクトリを削除します</span>
+              <p>
+                実行前に確認プロンプト（<code>[y/N]</code>）を表示します。<code>--force</code> は
+                提供していません &mdash; 未コミットの変更を抱えた worktree は git が拒否し、
+                fuzgit はそれを迂回する手段を用意していません。
+              </p>
+            </div>
 
             <h3><code>gz worktree prune</code></h3>
             <ul>
@@ -3074,6 +3446,248 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
               </li>
               <li>対象が 1 件も無い場合は「整理する worktree はありません」と表示して<strong>終了コード 0</strong> で終わります。</li>
             </ul>
+          </div>
+        </section>
+
+        <section id="pr">
+          <h2>
+            <span lang="en"><code>gz pr</code> &mdash; picking a pull request to check out</span>
+            <span lang="ja"><code>gz pr</code> &mdash; checkout する PR の選択</span>
+            <span class="badges"><span class="badge net"><span lang="en">network</span><span lang="ja">通信</span></span></span>
+            <a class="anchor" href="#pr" aria-label="Link to this section">#</a>
+          </h2>
+          <div lang="en">
+            <pre><code>gz pr                            # pick an open pull request and check it out
+gz pr --checks                   # also show the review decision and the CI status (slower)
+gz pr --action                   # pick a pull request, then pick what to do with it
+gz pr --worktree review-142      # check it out into a new worktree next to the repository
+gz pr --worktree review-142 --no-install   # …without installing dependencies</code></pre>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th scope="col">Option</th><th scope="col">Description</th></tr></thead>
+                <tbody>
+                  <tr><td><code>--checks</code></td><td>Also fetch the review decision and the CI status (noticeably slower)</td></tr>
+                  <tr><td><code>--action</code></td><td>After picking, show a menu of what to do (cannot be combined with <code>--worktree</code>)</td></tr>
+                  <tr><td><code>--worktree &lt;NAME&gt;</code></td><td>Check the pull request out into a new worktree with this name</td></tr>
+                  <tr><td><code>--no-install</code></td><td>Do not install dependencies after creating the worktree</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="note info">
+              <span class="note-label">gh is not a required dependency</span>
+              <p>
+                <code>gz pr</code> is the only command that needs
+                <a href="https://cli.github.com">the GitHub CLI</a>. Without it,
+                <strong>only this command stops</strong>, with a message pointing
+                at the install page; every other command keeps working. fuzgit
+                still assumes nothing but <code>git</code>.
+              </p>
+            </div>
+            <ul>
+              <li>
+                Candidates are the <strong>open</strong> pull requests of the
+                current repository. A line is
+                <code>#&lt;number&gt;  &lt;head branch&gt;  &lt;author&gt;  &lt;title&gt;</code>,
+                with a <code>[draft]</code> marker in its own column so the
+                columns stay aligned whether or not a pull request is a draft.
+              </li>
+              <li>
+                On confirmation it runs <code>gh pr checkout &lt;number&gt;</code>.
+                What you end up with is ordinary local git state &mdash; a
+                branch, its tracking config, and a checkout.
+              </li>
+              <li>
+                <code>--action</code> opens a second menu: <em>check the pull
+                request out</em>, <em>show it</em> (<code>gh pr view</code>),
+                <em>show the diff</em> (<code>gh pr diff</code>), <em>print the
+                number</em>, and <em>print the URL</em>. Only the last two write
+                to stdout, so <code>$(…)</code> stays usable.
+              </li>
+              <li>
+                Everything <code>gh</code> prints comes straight from
+                <code>gh</code>. fuzgit never repeats it and never guesses at a
+                cause.
+              </li>
+            </ul>
+
+            <h3>Why the preview never waits</h3>
+            <p>
+              Every other fuzgit command builds its candidate list and previews
+              from local data only, because <strong>a preview is regenerated on
+              every cursor move</strong> and a network round trip there would
+              block the display (see <a href="#network">Network operations</a>).
+              <code>gz pr</code> is the single exception &mdash; and it breaks
+              the rule <strong>exactly once</strong>.
+            </p>
+            <p>
+              The candidate list is fetched with the pull request
+              <strong>body riding along in the same call</strong>. By the time
+              the finder opens, every preview is already in memory, so moving the
+              cursor is a local string draw. Measured against a repository with
+              30 open pull requests, adding the body costs about 0.2 seconds.
+            </p>
+            <div class="note">
+              <span class="note-label">--checks is the slow one</span>
+              <p>
+                <code>reviewDecision</code> and <code>statusCheckRollup</code>
+                are expensive on GitHub's side: the default fetch takes about
+                <strong>1.1 seconds</strong> where <code>--checks</code> takes
+                roughly three times that. They are opt-in for that reason, and
+                the wait is the same whether or not you end up picking anything.
+              </p>
+            </div>
+
+            <h3><code>--worktree &lt;name&gt;</code> &mdash; reviewing without disturbing your tree</h3>
+            <ul>
+              <li>
+                <strong>The argument is a name, not a path.</strong> The worktree
+                is created next to the repository root, exactly like
+                <a href="#worktree"><code>gz worktree add</code></a>. Anything
+                containing a path separator is refused.
+              </li>
+              <li>
+                Afterwards fuzgit does what <code>gz worktree add</code> does:
+                copies your gitignored <code>.claude/</code> across
+                (<a href="#worktree">FR-33</a>) and installs dependencies from
+                the lockfile it finds. <code>--no-install</code> skips only the
+                install; the <code>.claude/</code> copy still happens.
+              </li>
+              <li>
+                <strong>A name already taken by another worktree stops the
+                command before the finder opens</strong> &mdash; you are never
+                asked to pick and then told it will not work.
+              </li>
+            </ul>
+            <div class="note">
+              <span class="note-label">gh reuses an existing worktree silently</span>
+              <p>
+                Run bare, <code>gh pr checkout --worktree</code> accepts a path
+                that already holds a worktree and simply checks out into it,
+                reporting success. That is why fuzgit refuses the name up front
+                rather than passing it through: &ldquo;a new worktree was
+                created&rdquo; and &ldquo;an existing one was reused&rdquo; look
+                the same otherwise.
+              </p>
+            </div>
+            <div class="note info">
+              <span class="note-label">gh speaks English only</span>
+              <p>
+                fuzgit&rsquo;s own messages switch with <code>--lang</code>, but
+                <code>gh</code> has no translations, so its lines stay English
+                even with <code>ja</code>. This is the same limitation as
+                git&rsquo;s own output (see <a href="#language">Language</a>).
+              </p>
+            </div>
+          </div>
+
+          <div lang="ja">
+            <pre><code>gz pr                            # open な PR を選んで checkout する
+gz pr --checks                   # レビュー判定と CI の状況も表示する（遅くなる）
+gz pr --action                   # PR を選んだあと、続けて行う操作も選ぶ
+gz pr --worktree review-142      # リポジトリの隣に新しい worktree を作って checkout する
+gz pr --worktree review-142 --no-install   # …依存インストールは行わない</code></pre>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th scope="col">オプション</th><th scope="col">説明</th></tr></thead>
+                <tbody>
+                  <tr><td><code>--checks</code></td><td>レビュー判定と CI の状況も取得する（体感で遅くなる）</td></tr>
+                  <tr><td><code>--action</code></td><td>選んだあと、続けて行う操作をメニューから選ぶ（<code>--worktree</code> とは併用不可）</td></tr>
+                  <tr><td><code>--worktree &lt;NAME&gt;</code></td><td>この名前の新しい worktree へ checkout する</td></tr>
+                  <tr><td><code>--no-install</code></td><td>worktree 作成後に依存インストールを行わない</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="note info">
+              <span class="note-label">gh は必須依存ではありません</span>
+              <p>
+                <a href="https://cli.github.com">GitHub CLI</a> を必要とするのは
+                <code>gz pr</code> だけです。無い場合は<strong>このコマンドだけが停止し</strong>、
+                導入先を案内します。他のコマンドはそのまま動作します。fuzgit が前提とする
+                外部コマンドは引き続き <code>git</code> のみです。
+              </p>
+            </div>
+            <ul>
+              <li>
+                候補は現在のリポジトリの <strong>open</strong> な PR です。候補行は
+                <code>#&lt;番号&gt;  &lt;head ブランチ&gt;  &lt;作者&gt;  &lt;タイトル&gt;</code> で、
+                <code>[draft]</code> の印は独立した列に置くため、draft の有無で桁がずれません。
+              </li>
+              <li>
+                決定すると <code>gh pr checkout &lt;番号&gt;</code> を実行します。得られるのは
+                ローカルの git 状態（ブランチ・追跡設定・チェックアウト）そのものです。
+              </li>
+              <li>
+                <code>--action</code> を付けると 2 つ目のメニューが出ます &mdash;
+                <em>checkout する</em>・<em>詳細を表示する</em>（<code>gh pr view</code>）・
+                <em>差分を表示する</em>（<code>gh pr diff</code>）・<em>番号を出力する</em>・
+                <em>URL を出力する</em>。標準出力へ書くのは後ろの 2 つだけなので、
+                <code>$(…)</code> はそのまま使えます。
+              </li>
+              <li>
+                <code>gh</code> の出力はそのまま流します。fuzgit は再掲もしませんし、
+                原因を推測することもしません。
+              </li>
+            </ul>
+
+            <h3>プレビューが待たされない理由</h3>
+            <p>
+              fuzgit の他のコマンドは、候補一覧もプレビューもローカルの情報だけで作ります。
+              <strong>プレビューはカーソル移動のたびに作り直される</strong>ため、そこで
+              ネットワーク往復が起きると描画が止まるからです
+              （<a href="#network">ネットワーク操作について</a>参照）。
+              <code>gz pr</code> はその唯一の例外ですが、破るのは<strong>候補生成の 1 回だけ</strong>です。
+            </p>
+            <p>
+              候補の取得では、PR の<strong>本文を同じ 1 回に相乗りさせています</strong>。
+              finder が開いた時点で全プレビューが手元にあるため、カーソル移動はローカルの
+              文字列描画で済みます。open な PR が 30 件のリポジトリでの実測で、本文の追加分は
+              約 0.2 秒です。
+            </p>
+            <div class="note">
+              <span class="note-label">遅いのは --checks です</span>
+              <p>
+                <code>reviewDecision</code> と <code>statusCheckRollup</code> は GitHub 側で
+                高くつきます。既定の取得が約 <strong>1.1 秒</strong>なのに対し、
+                <code>--checks</code> はおよそ 3 倍を要します。オプトインにしているのは
+                このためで、結局何も選ばなかった場合も同じだけ待つことになります。
+              </p>
+            </div>
+
+            <h3><code>--worktree &lt;name&gt;</code> &mdash; 手元を汚さずにレビューする</h3>
+            <ul>
+              <li>
+                <strong>引数はパスではなく名前です。</strong>作成先は
+                <a href="#worktree"><code>gz worktree add</code></a> と同じくリポジトリルートの
+                兄弟に固定で、パス区切りを含むものは拒否します。
+              </li>
+              <li>
+                作成後は <code>gz worktree add</code> と同じことをします &mdash;
+                gitignore された <code>.claude/</code> を複写し（<a href="#worktree">FR-33</a>）、
+                見つけた lockfile から依存をインストールします。<code>--no-install</code> が
+                止めるのはインストールだけで、<code>.claude/</code> の複写は行われます。
+              </li>
+              <li>
+                <strong>他の worktree が既に使っている名前は、finder を開く前に停止します。</strong>
+                選ばせたあとで「使えません」と告げることはありません。
+              </li>
+            </ul>
+            <div class="note">
+              <span class="note-label">gh は既存の worktree を黙って再利用します</span>
+              <p>
+                素の <code>gh pr checkout --worktree</code> は、既に worktree があるパスを
+                指定してもそこへチェックアウトして成功を報告します。fuzgit が名前を事前に
+                拒否するのはこのためです &mdash; そうしないと「新しく作られた」と
+                「既存のものが使われた」が見分けられません。
+              </p>
+            </div>
+            <div class="note info">
+              <span class="note-label">gh は英語だけを話します</span>
+              <p>
+                fuzgit 自身の文言は <code>--lang</code> で切り替わりますが、<code>gh</code> には
+                翻訳がないため、<code>ja</code> を選んでも <code>gh</code> の行は英語のままです。
+                git 本体の出力と同じ制約です（<a href="#language">表示言語</a>参照）。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -3088,16 +3702,23 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 <strong>The only commands that use the network are
                 <a href="#fetch"><code>gz fetch</code></a>,
                 <a href="#pull"><code>gz pull</code></a> and
-                <a href="#pull"><code>gz pull</code></a></strong>. Every other
+                <a href="#pr"><code>gz pr</code></a></strong>. Every other
                 command works purely from local repository data (pushing is left
-                to plain <code>git push</code>).
+                to plain <code>git push</code>). <code>gz pr</code> is also the
+                only one that runs something other than <code>git</code>
+                &mdash; it needs the <code>gh</code> CLI, which is
+                <strong>not a required dependency</strong>.
               </li>
               <li>
-                <strong>Candidate generation and previews never use the
-                network.</strong> This is a design rule. A preview is regenerated
-                every time the highlighted entry changes, so a network round trip
-                there (latency, timeouts, authentication prompts) would block the
-                display. Accordingly the <code>gz fetch</code> preview is limited
+                <strong>Previews never use the network, and candidate
+                generation does so in exactly one place.</strong> A preview is
+                regenerated every time the highlighted entry changes, so a
+                network round trip there (latency, timeouts, authentication
+                prompts) would block the display &mdash; that rule has no
+                exceptions. Candidate generation has one:
+                <a href="#pr"><code>gz pr</code></a> lists pull requests from
+                GitHub, and it <strong>fetches their bodies in the same
+                call</strong> so its previews stay a local draw. Accordingly the <code>gz fetch</code> preview is limited
                 to local data (<code>git remote get-url</code> /
                 <code>git for-each-ref refs/remotes/&lt;remote&gt;</code>) and
                 never runs <code>git fetch --dry-run</code> inside a preview; the
@@ -3125,52 +3746,66 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
               </li>
               <li>
                 <strong>Authentication is left to git.</strong>
-                <code>git fetch</code> / <code>git push</code> run with inherited
-                stdio, so credential entry, credential helpers and progress output
-                are all git&rsquo;s own. fuzgit performs no timeouts, no retries
+                <code>git fetch</code> runs with inherited stdio, so credential
+                entry, credential helpers and progress output are all
+                git&rsquo;s own. fuzgit performs no timeouts, no retries
                 and no direct socket handling whatsoever.
               </li>
               <li>
-                <strong><code>gz fetch --siblings</code> runs the selected
-                repositories in parallel</strong> (up to
-                <code>git config fuzgit.fetchJobs</code>, 4 by default), because
-                the wait is network round trips and the targets are separate
-                repositories. To keep the output readable and the prompts
-                unambiguous, that phase captures each repository&rsquo;s output
-                and <strong>forbids interaction</strong>
-                (<code>GIT_TERMINAL_PROMPT=0</code>, <code>GIT_ASKPASS=""</code>,
-                <code>ssh -o BatchMode=yes -o ControlMaster=no</code>); whatever
-                fails there is then run again one at a time with the terminal
-                attached. <strong><code>gz pull</code> stays serial</strong>: its
-                per-remote fetch is effectively a single call, and integrating
-                branches writes to one repository, where the index and ref locks
-                would collide.
-                <kbd>Ctrl-C</kbd> during a run is not handled specially: the
-                SIGINT delivered to the foreground process group terminates fuzgit
-                along with it (targets not yet started are not run).
+                <strong><code>gz fetch --siblings</code> runs its repositories in
+                parallel; <code>gz pull</code> stays serial.</strong> The
+                repositories are independent and the wait is network round trips,
+                so they parallelise. <code>gz pull</code> does not: its
+                per-remote fetch is effectively one call, and integrating
+                branches writes to a single repository where the index and ref
+                locks would collide.
               </li>
               <li>
-                <strong>Without <code>--siblings</code>, neighbouring repositories
-                are not even offered as candidates.</strong> To prevent a mere
-                change of directory from firing traffic at many repositories, the
-                scan origin is always derived from the current repository and
-                cannot be given as a path.
+                <strong>Without <code>--siblings</code>, neighbouring
+                repositories are not even offered as candidates.</strong> So that
+                a mere change of directory cannot fire traffic at many
+                repositories, the scan origin is always derived from the current
+                repository and can never be given as a path.
+              </li>
+              <li>
+                <kbd>Ctrl-C</kbd> during a run is not handled specially: the
+                SIGINT delivered to the foreground process group terminates
+                fuzgit with it, and targets not yet started never run.
               </li>
             </ul>
+            <div class="note info">
+              <span class="note-label">How the parallel phase is kept safe</span>
+              <p>
+                It captures each repository&rsquo;s output so update tables
+                cannot interleave, and it <strong>forbids interaction</strong>
+                &mdash; <code>GIT_TERMINAL_PROMPT=0</code>,
+                <code>GIT_ASKPASS=""</code>,
+                <code>ssh -o BatchMode=yes -o ControlMaster=no</code> &mdash; so
+                no prompt can appear with no way to tell which repository it came
+                from. Whatever fails there is run again, one at a time, with the
+                terminal attached.
+              </p>
+            </div>
           </div>
           <div lang="ja">
             <ul>
               <li>
-                <strong>ネットワークを使うのは <a href="#fetch"><code>gz fetch</code></a> と
-                <a href="#pull"><code>gz pull</code></a>
+                <strong>ネットワークを使うのは <a href="#fetch"><code>gz fetch</code></a>・
+                <a href="#pull"><code>gz pull</code></a>・<a href="#pr"><code>gz pr</code></a>
                 だけです</strong>。ほかのコマンドはすべてローカルのリポジトリ情報だけで
                 動作します（push は素の <code>git push</code> に委ねます）。
+                <code>gz pr</code> は <code>git</code> 以外の外部コマンドを起動する
+                唯一のコマンドでもあります &mdash; <code>gh</code> CLI を使いますが、
+                これは<strong>必須依存ではありません</strong>。
               </li>
               <li>
-                <strong>候補一覧の生成とプレビューではネットワークを使いません。</strong>
-                これは設計上の原則です。プレビューは選択項目が変わるたびに生成されるため、
+                <strong>プレビューはネットワークを使いません。候補生成も 1 か所を除いて
+                使いません。</strong>プレビューは選択項目が変わるたびに生成されるため、
                 そこでネットワーク往復（遅延・タイムアウト・認証プロンプト）が発生すると描画が
-                ブロックされてしまいます。したがって <code>gz fetch</code> のプレビューは
+                ブロックされます &mdash; こちらに例外はありません。候補生成には 1 つだけ例外が
+                あり、<a href="#pr"><code>gz pr</code></a> は GitHub から PR を一覧します。
+                ただし<strong>本文を同じ 1 回で取り切る</strong>ため、プレビューは
+                ローカルの描画に閉じます。したがって <code>gz fetch</code> のプレビューは
                 ローカル情報（<code>git remote get-url</code> /
                 <code>git for-each-ref refs/remotes/&lt;remote&gt;</code>）に限定しており、
                 <code>git fetch --dry-run</code> をプレビュー内で実行することはしません。
@@ -3192,32 +3827,38 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 読んだ結果です。最新の状態と比べたい場合は先に <code>gz fetch</code> を実行してください。
               </li>
               <li>
-                <strong>認証は git に委ねます。</strong><code>git fetch</code> /
-                <code>git push</code> は継承 stdio で実行するため、認証情報の入力・credential helper・
-                進捗表示はすべて git のものがそのまま動きます。fuzgit 側でのタイムアウト・リトライ・
+                <strong>認証は git に委ねます。</strong><code>git fetch</code> は継承 stdio で
+                実行するため、認証情報の入力・credential helper・進捗表示はすべて git のものが
+                そのまま動きます。fuzgit 側でのタイムアウト・リトライ・
                 ソケットの直接操作は一切行いません。
               </li>
               <li>
-                <strong><code>gz fetch --siblings</code> は選択したリポジトリを並列に実行します</strong>
-                （同時実行数は <code>git config fuzgit.fetchJobs</code>、既定 4）。待ちの実体が
-                ネットワークの往復であり、対象が互いに独立した別リポジトリであるためです。
-                出力が読めなくなることとプロンプトの宛先が分からなくなることを防ぐため、
-                並列フェーズはリポジトリごとに出力をキャプチャし、<strong>対話を禁止</strong>します
-                （<code>GIT_TERMINAL_PROMPT=0</code>・<code>GIT_ASKPASS=""</code>・
-                <code>ssh -o BatchMode=yes -o ControlMaster=no</code>）。そこで失敗した対象は、
-                端末をつないだまま 1 件ずつ実行し直します。
-                <strong><code>gz pull</code> は直列のままです</strong>。リモートごとの fetch は
-                対象数が実質 1 件であり、ブランチの取り込みは同一リポジトリへの書き込みで
-                index や参照の lock が競合するためです。
-                実行中の <kbd>Ctrl-C</kbd> は独自に処理せず、前面プロセスグループへ届いた SIGINT で
-                fuzgit ごと終了します（まだ着手していない対象は実行されません）。
+                <strong><code>gz fetch --siblings</code> は並列、<code>gz pull</code> は直列</strong>
+                です。前者は対象が互いに独立した別リポジトリで、待ちの実体がネットワークの
+                往復であるため並列化できます。後者はリモートごとの fetch が実質 1 件であり、
+                ブランチの取り込みは同一リポジトリへの書き込みで index や参照の lock が
+                競合するため直列のままです。
               </li>
               <li>
                 <strong><code>--siblings</code> を指定しない限り、隣のリポジトリは候補にすら
                 なりません。</strong>ディレクトリを移動しただけで多数のリポジトリへ通信が飛ぶことを
-                防ぐため、探索の起点は常に現在のリポジトリから導出し、パスで指定することもできません。
+                防ぐため、探索の起点は常に現在のリポジトリから導出し、パスでは指定できません。
+              </li>
+              <li>
+                実行中の <kbd>Ctrl-C</kbd> は独自に処理せず、前面プロセスグループへ届いた SIGINT で
+                fuzgit ごと終了します（まだ着手していない対象は実行されません）。
               </li>
             </ul>
+            <div class="note info">
+              <span class="note-label">並列フェーズの安全策</span>
+              <p>
+                リポジトリごとに出力をキャプチャして更新表が混ざらないようにし、さらに
+                <strong>対話を禁止</strong>します（<code>GIT_TERMINAL_PROMPT=0</code>・
+                <code>GIT_ASKPASS=""</code>・<code>ssh -o BatchMode=yes -o ControlMaster=no</code>）。
+                どのリポジトリのものか分からないプロンプトが出ないようにするためです。
+                そこで失敗した対象は、端末をつないだまま 1 件ずつ実行し直します。
+              </p>
+            </div>
           </div>
         </section>
 
@@ -3481,9 +4122,9 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 <thead><tr><th scope="col">Item</th><th scope="col">Reason</th></tr></thead>
                 <tbody>
                   <tr>
-                    <td><code>--rebase</code> / <code>--merge</code> for <code>gz pull</code> (integration other than fast-forward)</td>
+                    <td>Rebasing or merging a branch that is <strong>not checked out</strong> (<code>gz pull</code> in bulk)</td>
                     <td>
-                      <code>gz pull</code> (fast-forwarding several branches at once) is implemented; what is not offered is the choice of method. Rebasing or merging a branch that is not checked out would require temporarily switching the working tree or creating a temporary worktree, both of which introduce risks that contradict the &ldquo;never lose the user&rsquo;s work&rdquo; policy. Also, if the k-th of N branches conflicts, truly returning to the pre-pull state would mean rolling back the k-1 that already succeeded, which cannot be done without something as dangerous as <code>git reset --hard</code>. <strong>Revised on 2026-08-23:</strong> the escape hatch used to be a separate <code>gz sync</code> command; folding it in means <code>--rebase</code> / <code>--merge</code> now exist on <code>gz pull</code>, but <strong>only for the current branch</strong>, so none of the reasoning above is weakened &mdash; branches you did not check out are still fast-forward only
+                      <code>gz pull --rebase</code> / <code>--merge</code> do exist, but <strong>only for the current branch</strong>. Doing it to a branch you have not checked out would mean temporarily switching the working tree or creating a temporary worktree &mdash; both of which put work in progress at risk. And if the k-th of N branches conflicted, truly returning to the pre-pull state would mean rolling back the k&minus;1 that already succeeded, which needs something as dangerous as <code>git reset --hard</code>. Branches you did not check out therefore stay fast-forward only
                     </td>
                   </tr>
                   <tr>
@@ -3584,15 +4225,16 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 <thead><tr><th scope="col">項目</th><th scope="col">理由</th></tr></thead>
                 <tbody>
                   <tr>
-                    <td><code>gz pull</code> の <code>--rebase</code> / <code>--merge</code>（fast-forward 以外の取り込み方式）</td>
+                    <td><strong>チェックアウトしていない</strong>ブランチの rebase / merge（<code>gz pull</code> の一括取り込み）</td>
                     <td>
-                      <code>gz pull</code>（複数ブランチを fast-forward で一括取り込み）は実装済み。
-                      方式を選べるようにしないのは、チェックアウトしていないブランチを rebase / merge するには
-                      作業ツリーを一時的に切り替えるか一時 worktree を作るしかなく、いずれも
-                      「ユーザーの作業を失わせない」方針に反するリスクを持ち込むため。また N 本中 k 本目で
-                      コンフリクトした場合、真に「pull 前」へ戻すには成功済みの k-1 本も巻き戻す必要があり、
-                      <code>git reset --hard</code> 相当の危険な操作なしには成立しない。単一ブランチを任意の
-                      <strong>2026-08-23 改訂:</strong> その逃げ道は独立した <code>gz sync</code> だったが、こちらへ畳んだため <code>gz pull --rebase</code> / <code>--merge</code> として存在する。ただし<strong>対象は現在のブランチのみ</strong>であり、上記の理由は変わらない（チェックアウトしていないブランチは引き続き fast-forward のみ）
+                      <code>gz pull --rebase</code> / <code>--merge</code> は存在しますが、
+                      <strong>対象は現在のブランチのみ</strong>です。チェックアウトしていない
+                      ブランチに対して行うには作業ツリーを一時的に切り替えるか一時 worktree を
+                      作るしかなく、いずれも進行中の作業を危険に晒します。また N 本中 k 本目で
+                      コンフリクトした場合、真に「pull 前」へ戻すには成功済みの k&minus;1 本も
+                      巻き戻す必要があり、<code>git reset --hard</code> 相当の危険な操作なしには
+                      成立しません。そのため、チェックアウトしていないブランチは
+                      fast-forward のみです
                     </td>
                   </tr>
                   <tr>
@@ -3815,8 +4457,8 @@ cargo test</code></pre>
                 （<code>assert_cmd</code> による統合テスト）です。
               </li>
               <li>
-                ネットワークを伴う経路（<code>gz fetch</code> / <code>gz pull</code> /
-                <code>gz pull</code>）は自動テスト化せず、非対話パス（リモートゼロ・upstream 未設定・
+                ネットワークを伴う経路（<code>gz fetch</code> / <code>gz pull</code>）は
+                自動テスト化せず、非対話パス（リモートゼロ・upstream 未設定・
                 候補ゼロなどのエラー）のみを検証します。実機確認はローカルの bare リポジトリを
                 remote に設定して行い、外部ネットワークへは接続しません。
               </li>
@@ -3850,15 +4492,15 @@ cargo test</code></pre>
               <li>
                 Positional arguments that cannot be protected with <code>--</code>,
                 such as branch names and commit hashes (<code>switch</code> /
-                <code>merge</code> / <code>rebase</code> / <code>push</code> /
+                <code>merge</code> / <code>rebase</code> /
                 <code>fixup</code> / <code>revert</code> / <code>diff</code>), are
                 passed to git <strong>only after checking that the selection is
                 present in the candidate list</strong>. The only values that get
                 through originate from real refs enumerated by gix.
-                <code>gz sync</code> and <code>gz pull</code> verify that
+                <code>gz pull</code> verifies that
                 <code>branch.&lt;name&gt;.remote</code> is a registered remote name
                 before running <code>git fetch</code> (the configuration can hold a
-                URL directly, so without the check they could connect to something
+                URL directly, so without the check it could connect to something
                 that was never enumerated). The refspec <code>gz pull</code> uses
                 for branches that are not checked out carries no forcing
                 <code>+</code>, so git rejects non-fast-forward updates and local
@@ -3882,9 +4524,9 @@ cargo test</code></pre>
                 <code>restore</code>, <code>stash drop</code>,
                 <code>branch delete</code> / <code>cleanup</code>, history
                 rewriting with <code>rebase</code>, the integration performed by
-                <code>sync</code>, <code>worktree remove</code> /
-                <code>prune</code>, and aborting a merge / rebase) are confirmed
-                first. <code>merge</code> is confirmed too, showing how many
+                <code>pull --rebase</code> / <code>--merge</code>,
+                <code>worktree remove</code> / <code>prune</code>, and aborting a
+                merge / rebase) are confirmed first. <code>merge</code> is confirmed too, showing how many
                 commits will come in and the conflict prediction.
               </li>
               <li>History rewriting is never run automatically (<code>gz fixup</code> only prints the autosquash steps; it does not rebase).</li>
@@ -3912,13 +4554,13 @@ cargo test</code></pre>
               </li>
               <li>
                 ブランチ名・コミットハッシュのように <code>--</code> で保護できない位置引数
-                （<code>switch</code> / <code>merge</code> / <code>rebase</code> / <code>push</code> /
+                （<code>switch</code> / <code>merge</code> / <code>rebase</code> /
                 <code>fixup</code> / <code>revert</code> / <code>diff</code>）は、
                 <strong>選択結果が候補一覧に含まれることを確かめてから</strong> git へ渡します。
-                渡る値は gix が列挙した実在の参照に由来するものだけです。<code>gz sync</code> と
-                <code>gz pull</code> は <code>branch.&lt;name&gt;.remote</code> が登録済みのリモート名で
-                あることを検証してから <code>git fetch</code> します（設定には URL を直接書けるため、
-                検証しないと列挙していない対象へ接続することになります）。<code>gz pull</code> が
+                渡る値は gix が列挙した実在の参照に由来するものだけです。<code>gz pull</code> は
+                <code>branch.&lt;name&gt;.remote</code> が登録済みのリモート名であることを検証して
+                から <code>git fetch</code> します（設定には URL を直接書けるため、検証しないと
+                列挙していない対象へ接続することになります）。<code>gz pull</code> が
                 チェックアウトしていないブランチを更新する refspec には、強制更新の <code>+</code> を
                 付けません（非 fast-forward の更新を git に拒否させ、ローカルのコミットを
                 失わせないためです）。
@@ -3936,7 +4578,8 @@ cargo test</code></pre>
               <li>
                 破壊的操作（<code>restore</code> による変更破棄、<code>stash drop</code>、
                 <code>branch delete</code> / <code>cleanup</code>、<code>rebase</code> による履歴改変、
-                <code>sync</code> の取り込み、<code>worktree remove</code> / <code>prune</code>、
+                <code>pull --rebase</code> / <code>--merge</code> の取り込み、
+                <code>worktree remove</code> / <code>prune</code>、
                 merge / rebase の <code>abort</code>）は実行前に確認を挟みます。<code>merge</code> にも
                 確認を設け、取り込まれるコミット数とコンフリクト予測を提示します。
               </li>

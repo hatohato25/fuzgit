@@ -7,6 +7,7 @@ pub mod cli;
 pub mod commands;
 pub mod error;
 pub mod finder;
+pub mod gh;
 pub mod git;
 pub mod i18n;
 pub mod notify;

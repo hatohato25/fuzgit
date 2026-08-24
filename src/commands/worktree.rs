@@ -175,18 +175,42 @@ fn add(
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     run_git(language, &arguments).with_context(|| messages.worktree().creation_failed(path))?;
 
+    finish_creation(messages, repository, path, install, PathReport::Needed)
+}
+
+/// worktree を作ったあとの後処理をまとめて行う。
+///
+/// **作成の手段に依らない共通部分**である。`gz worktree add` は `git worktree add` で、
+/// `gz pr --worktree`（FR-35）は `gh pr checkout --worktree` で作るが、作られたあとに
+/// 行うこと——どこへ作られたかを知らせ、登録内容と照合し、`.claude/` を複写し、
+/// 依存をインストールする——は同一である。
+///
+/// # Errors
+///
+/// worktree 一覧の読み直し、標準エラーへの書き込み、依存インストールに失敗した場合。
+pub fn finish_creation(
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    path: &str,
+    install: InstallMode,
+    report: PathReport,
+) -> Result<()> {
     // 叩いた場所ではなくリポジトリの兄弟へ作るため、どこへ作られたのかを必ず知らせる。
     // 標準出力は使わない（`git worktree add` 自身が `HEAD is now at ...` を標準出力へ
     // 書くため、パスだけを取り出せる状態にはならない。実測で確認済み）
-    writeln!(
-        std::io::stderr(),
-        "{message}",
-        message = messages.worktree().created_at(path)
-    )
-    .context(messages.common().stderr_write_failed())?;
+    if report == PathReport::Needed {
+        writeln!(
+            std::io::stderr(),
+            "{message}",
+            message = messages.worktree().created_at(path)
+        )
+        .context(messages.common().stderr_write_failed())?;
+    }
 
     // 作業ディレクトリには利用者が打った文字列（`../feature` のような相対パス）を使わない。
-    // 一覧を読み直して照合した登録済みパスを使う（design.md セキュリティ設計）
+    // 一覧を読み直して照合した登録済みパスを使う（design.md セキュリティ設計）。
+    // **どこへ作られたかを fuzgit の推測ではなく git の登録内容で確かめる**という意図は、
+    // 作成を `gh` に任せる FR-35 でこそ重要になる
     let created = created_worktree(messages, repository, path)?;
     let Some(directory) = created else {
         // 照合できない以上、複写もインストールも実行できない
@@ -211,6 +235,57 @@ fn add(
     }
 
     Ok(())
+}
+
+/// 作成先のパスを fuzgit が知らせる必要があるかどうか。
+///
+/// 作成の手段によって変わる。`git worktree add` は**作成先のパスを出さない**ため
+/// fuzgit が知らせる必要があるが、`gh pr checkout --worktree` は
+/// `✓ Checked out PR #<n> in worktree <path>` を自ら出す（実測確認済み・T-478）。
+/// そこで fuzgit も出すと同じパスが 2 行並ぶ。
+///
+/// 「外部コマンドが既に見せたものを再掲しない」という既存方針
+/// （`gz fetch --siblings` が git の失敗理由を再掲しないのと同じ）に従い、
+/// **どちらなのかを呼び出し側が明示する**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathReport {
+    /// fuzgit が作成先のパスを知らせる（`git worktree add` 経由）。
+    Needed,
+    /// 作成したコマンドが既に知らせている（`gh pr checkout --worktree` 経由）。
+    AlreadyReported,
+}
+
+/// 新しい worktree の名前を検査し、作成先の絶対パスを返す。
+///
+/// **選ばせる前に呼ぶ**ことを想定している。名前が使えない場合も、その名前の worktree が
+/// 既にある場合も、finder を開いたあとに失敗させる理由が無い（FR-31 が同名ブランチを
+/// finder の前で止めるのと同型）。
+///
+/// 受け取るのは**名前であってパスではない**。`gh pr checkout --worktree` はパスを取るが、
+/// そこへ渡すのは利用者が打った文字列ではなく、ここで組み立てた値である
+/// （自由入力パスで別のディレクトリを触らせないという既存方針を保つ）。
+///
+/// # Errors
+///
+/// 名前がディレクトリ名として使えない場合、worktree 一覧を読めない場合、
+/// 同じ場所に worktree が既に登録されている場合にエラーを返す。
+pub fn resolve_new_name(
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    name: &str,
+) -> Result<String> {
+    let worktrees = read_worktrees(messages, repository)?;
+    let destination = sibling_destination(messages, &worktrees, name)?;
+    let path = destination
+        .to_str()
+        .ok_or_else(|| anyhow!(messages.worktree().path_not_utf8(&destination)))?
+        .to_owned();
+
+    if worktrees.iter().any(|worktree| worktree.path == path) {
+        bail!(messages.worktree().already_exists(&path));
+    }
+
+    Ok(path)
 }
 
 /// `gz worktree add` を叩いた位置に対応するディレクトリで、依存インストールを実行する。

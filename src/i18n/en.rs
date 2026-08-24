@@ -10,8 +10,8 @@ use super::messages::{
     BranchManageMessages, BranchMessages, CherryPickMessages, CliMessages, CommitMenuMessages,
     CommitMessages, CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
     FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, LogMessages,
-    MergeMessages, Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages,
-    RevertMessages, StashMessages, StatusMessages, WorktreeMessages,
+    MergeMessages, Messages, PrMessages, PullMessages, RebaseMessages, ReflogMessages,
+    RestoreMessages, RevertMessages, StashMessages, StatusMessages, WorktreeMessages,
 };
 use crate::error::{Error, stderr_suffix};
 use crate::git::read::{BRANCH_REF_PREFIX, MalformedOutput, ReadOperation, WORKTREE_LABEL};
@@ -124,6 +124,10 @@ impl Messages for EnglishMessages {
 
     fn log(&self) -> &dyn LogMessages {
         &EnglishLogMessages
+    }
+
+    fn pr(&self) -> &dyn PrMessages {
+        &EnglishPrMessages
     }
 
     fn commit_menu(&self) -> &dyn CommitMenuMessages {
@@ -288,6 +292,30 @@ impl ErrorMessages for EnglishErrorMessages {
             Error::GitNotFound => {
                 "git was not found. Install git and make sure it is on your PATH".to_owned()
             }
+            // コマンド名・URL は訳さない（design.md「翻訳しないもの」）
+            Error::GhNotFound => "gh (the GitHub CLI) was not found. `gz pr` needs it; \
+install it from https://cli.github.com and make sure it is on your PATH. \
+Every other command works without it"
+                .to_owned(),
+            Error::GhUnauthenticated => {
+                "gh is not authenticated. Sign in with `gh auth login`".to_owned()
+            }
+            Error::GhCommandFailed { args, stderr } => {
+                format!(
+                    "The gh command failed: gh {args}{suffix}",
+                    suffix = stderr_suffix(stderr)
+                )
+            }
+            Error::GhRunFailed { command, code } => {
+                format!("{command} {status}", status = exit_status_text(*code))
+            }
+            Error::GhSpawnFailed { args, .. } => {
+                format!("Failed to start the gh command: gh {args}")
+            }
+            Error::GhOutputMalformed { expected, found } => format!(
+                "The output of gh could not be read \
+(expected {expected} fields per line, found {found})"
+            ),
             Error::GitSpawnFailed { args, .. } => {
                 format!("Failed to start the git command: git {args}")
             }
@@ -1116,6 +1144,10 @@ impl WorktreeMessages for EnglishWorktreeMessages {
         format!("The selected branch `{selected}` is not among the candidates")
     }
 
+    fn already_exists(&self, path: &str) -> String {
+        format!("A worktree is already registered at `{path}`")
+    }
+
     fn creation_failed(&self, path: &str) -> String {
         format!("Failed to create the worktree `{path}`")
     }
@@ -1547,6 +1579,86 @@ or set the upstream again with `git branch --set-upstream-to=<remote>/<branch>`)
     }
 }
 
+/// `gz pr`（[`crate::commands::pr`]）の英語表示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnglishPrMessages;
+
+impl PrMessages for EnglishPrMessages {
+    fn fetching(&self) -> &'static str {
+        "Fetching the open pull requests from GitHub"
+    }
+
+    /// コマンド列（`gh pr create`）は訳さない（design.md「翻訳しないもの」）。
+    fn no_candidates(&self) -> &'static str {
+        "There is no open pull request in this repository \
+(only open pull requests are offered). Open one with `gh pr create`"
+    }
+
+    fn header_subject(&self) -> &'static str {
+        "Pick a pull request"
+    }
+
+    fn header_outcome(&self) -> &'static str {
+        "check it out"
+    }
+
+    fn selection_not_found(&self, selected: &str) -> String {
+        format!("The selected pull request `{selected}` is not among the candidates")
+    }
+
+    fn branches_section(&self) -> &'static str {
+        "Branches"
+    }
+
+    fn draft_label(&self) -> &'static str {
+        "[draft]"
+    }
+
+    fn no_review(&self) -> &'static str {
+        "no review"
+    }
+
+    fn checks_summary(&self, passed: usize, failed: usize, pending: usize) -> String {
+        format!("checks {passed} passed / {failed} failed / {pending} pending")
+    }
+
+    /// プレースホルダ（`<name>`）は読み手のための語であり表示言語に合わせる。
+    fn worktree_name_invalid(&self, name: &str) -> String {
+        format!(
+            "`{name}` cannot be used as a worktree name. \
+Give a name, not a path: it is always created next to the repository root"
+        )
+    }
+
+    fn action_checkout(&self) -> &'static str {
+        "Check the pull request out"
+    }
+
+    fn action_view(&self) -> &'static str {
+        "Show the pull request (gh pr view)"
+    }
+
+    fn action_diff(&self) -> &'static str {
+        "Show the diff (gh pr diff)"
+    }
+
+    fn action_print_number(&self) -> &'static str {
+        "Print the number to stdout"
+    }
+
+    fn action_print_url(&self) -> &'static str {
+        "Print the URL to stdout"
+    }
+
+    fn action_header_subject(&self, number: u64) -> String {
+        format!("Pick what to do with #{number}")
+    }
+
+    fn action_header_outcome(&self) -> &'static str {
+        "run it"
+    }
+}
+
 /// `gz log`（[`crate::commands::log`]）の英語表示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnglishLogMessages;
@@ -1860,6 +1972,26 @@ impl CliMessages for EnglishCliMessages {
 
     fn fetch_siblings_help(&self) -> &'static str {
         "Include the repositories next to this one and fetch them all at once"
+    }
+
+    fn pr_about(&self) -> &'static str {
+        "Pick a pull request and check it out (needs the gh CLI)"
+    }
+
+    fn pr_checks_help(&self) -> &'static str {
+        "Also fetch the review decision and the CI status (noticeably slower)"
+    }
+
+    fn pr_action_help(&self) -> &'static str {
+        "Pick what to do with the chosen pull request from a menu"
+    }
+
+    fn pr_worktree_help(&self) -> &'static str {
+        "Check the pull request out into a new worktree with this name"
+    }
+
+    fn pr_no_install_help(&self) -> &'static str {
+        "Do not install dependencies after creating the worktree"
     }
 
     fn pull_about(&self) -> &'static str {

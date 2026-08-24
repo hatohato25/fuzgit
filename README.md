@@ -153,7 +153,7 @@ Two limits are worth knowing:
 
 ## Highlights
 
-Four of the 20 commands that best show what fuzgit is about.
+Five of the 18 commands that best show what fuzgit is about.
 
 ### Search and pick
 
@@ -265,9 +265,53 @@ way you learn the result**.
 | [`gz fetch`](https://hatohato25.github.io/fuzgit/docs.html#fetch) | Choose what to fetch (`--siblings` fetches neighboring repositories too. **uses the network**) |
 | [`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) | Pick branches and bring them up to their upstream at once (fast-forward only. **uses the network**) |
 | [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | List and manage worktrees (`add <name>` creates it next to the repository and copies `.claude/` into it) |
+| [`gz pr`](https://hatohato25.github.io/fuzgit/docs.html#pr) | Pick a GitHub pull request and check it out (`--worktree <name>` opens it in a review worktree. **needs the `gh` CLI. uses the network**) |
 
 Options, how candidates are built, what the preview shows, and whether a confirmation prompt appears
 are all described in the [documentation](https://hatohato25.github.io/fuzgit/docs.html).
+
+### Pull requests, if you have the gh CLI
+
+**[`gz pr`](https://hatohato25.github.io/fuzgit/docs.html#pr) — pick a pull request and check it out**
+
+The one command that reaches outside git. It lists your open pull requests, you filter and
+pick one, and it runs `gh pr checkout`. What you end up with is ordinary local git state: a
+branch, its tracking config, and a checkout.
+
+```
+$ gz pr
+Fetching the open pull requests from GitHub
+>  #142  fix/login-redirect   octocat           Fix the redirect after login
+   #139  feat/search-filters  contributor       Add filters to the search form
+   #131  chore/bump-deps      app/dependabot    chore(deps): bump the actions group
+```
+
+The preview is the pull request body, and it is **already in memory** — the candidate list is
+fetched once with the body riding along, so moving the cursor never touches the network.
+That is the whole reason this command fits fuzgit: everywhere else, candidate lists and
+previews are built from local data only, and `gz pr` breaks that rule exactly once.
+
+`--checks` adds the review decision and the CI status to each line. It is off by default
+because it is slow: measured against a repository with 30 open PRs, the default fetch takes
+about 1.1s while `--checks` takes roughly three times that.
+
+`--action` opens a second menu after you pick — show the pull request, show the diff, print
+the number, print the URL — the same shape as `gz log --action`.
+
+**`gz pr --worktree <name>` opens the pull request in its own worktree**, next to the
+repository root, and then does what `gz worktree add` does afterwards: copies your
+gitignored `.claude/` across and installs dependencies from the lockfile it finds. Reviewing
+a pull request no longer disturbs the tree you are working in.
+
+```sh
+gz pr --worktree review-142              # check PR out into ../review-142, install deps
+gz pr --worktree review-142 --no-install # skip the dependency install
+```
+
+**`gh` is not a required dependency.** fuzgit still assumes only `git`. Without `gh`,
+`gz pr` stops with a message pointing at https://cli.github.com and every other command
+keeps working. One thing to know: **`gh` speaks English only**, so its lines stay English
+even with `--lang ja` — the same limitation as git's own messages.
 
 ## Development
 

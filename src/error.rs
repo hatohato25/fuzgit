@@ -82,6 +82,69 @@ pub enum Error {
     #[error("git command not found")]
     GitNotFound,
 
+    /// `gh`（GitHub CLI）実行ファイルが PATH 上に存在しない。
+    ///
+    /// `gh` は**必須依存ではない**（制約条件が前提とする外部コマンドは `git` のみ）。
+    /// したがって不在は環境の異常ではなく、`gh` を用いるコマンド（`gz pr`）だけが
+    /// この専用エラーで停止し、他のコマンドは影響を受けない。
+    #[error("gh command not found")]
+    GhNotFound,
+
+    /// `gh` が「資格情報が無い」ことを示す終了コード 4 で終了した。
+    ///
+    /// **`gh` の非ゼロ終了のうち、この 1 つだけを特別扱いする。**無効・期限切れの
+    /// トークン（HTTP 401）は 4 ではなく 1 で返るため（実測確認済み・design.md
+    /// 「実機で確認済みの前提」）、「非ゼロなら未認証」と扱ってはならない。
+    #[error("gh requires authentication")]
+    GhUnauthenticated,
+
+    /// `gh` が非ゼロ終了した（未認証以外）。
+    ///
+    /// 原因は認証拒否・GitHub 以外のリモート・リモート未登録など多岐にわたり、
+    /// 終了コードでは区別できない。**fuzgit 側で原因を推測せず**、`gh` が出した
+    /// 標準エラーをそのまま提示する。
+    #[error("gh command failed: gh {args}{}", stderr_suffix(.stderr))]
+    GhCommandFailed {
+        /// 実行した引数（表示用にスペース区切りで連結したもの）。
+        args: String,
+        /// キャプチャできた標準エラー出力。
+        stderr: String,
+    },
+
+    /// 標準入出力を継承して実行した `gh` コマンドが非ゼロ終了した。
+    ///
+    /// `gh` 自身のエラーメッセージは既に端末へ出力済みであるため、
+    /// [`Error::GitRunFailed`] と同じくコマンド名と終了状況だけを示す。
+    #[error("{command} {}", exit_status_text(.code))]
+    GhRunFailed {
+        /// 表示用のコマンド名（例: `gh pr checkout`）。
+        command: String,
+        /// プロセスの終了コード。シグナルで終了した場合は `None`。
+        code: Option<i32>,
+    },
+
+    /// `gh` の起動そのものに失敗した（権限不足など、実行ファイル不在以外の理由）。
+    #[error("failed to start the gh command: gh {args}")]
+    GhSpawnFailed {
+        /// 実行しようとした引数（表示用にスペース区切りで連結したもの）。
+        args: String,
+        /// プロセス起動時の I/O エラー。
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// `gh` の出力が想定した形式ではない。
+    ///
+    /// `--jq ... | @tsv` の出力はフィールド数が固定である。想定と違う行を
+    /// **黙って捨てず**エラーにする（暗黙のフォールバック禁止）。
+    #[error("unexpected gh output: expected {expected} fields, found {found}")]
+    GhOutputMalformed {
+        /// 期待したフィールド数。
+        expected: usize,
+        /// 実際に得られたフィールド数。
+        found: usize,
+    },
+
     /// `git` の起動そのものに失敗した（権限不足など、実行ファイル不在以外の理由）。
     #[error("failed to start the git command: git {args}")]
     GitSpawnFailed {

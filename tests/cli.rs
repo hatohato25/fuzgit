@@ -2321,3 +2321,89 @@ fn cherry_pick_reports_an_unknown_branch_by_name() {
         );
     }
 }
+
+/// `gh` が PATH 上に無い場合、`gz pr` だけが専用エラーで停止する。
+///
+/// `gh` は**必須依存ではない**（制約条件が前提とする外部コマンドは `git` のみ）。
+/// このテストはその境界を固定する: `gz pr` は止まるが、`gh` を通らない他のコマンドは
+/// 同じ環境で従来どおり動く。
+///
+/// `PATH` から `gh` を取り除くために、`git` だけを含む一時ディレクトリを `PATH` にする。
+#[test]
+fn pr_stops_with_a_dedicated_error_when_gh_is_missing() {
+    // (表示言語, エラーに含まれるべき語)
+    for (language, expected) in [("ja", "gh"), ("en", "gh")] {
+        let dir = empty_repository(&format!("pr-without-gh-{language}"));
+        let path = git_only_path(&format!("pr-without-gh-path-{language}"));
+
+        let output = gz_with(language)
+            .arg("pr")
+            .env("PATH", path.path())
+            .current_dir(dir.path())
+            .output()
+            .expect("failed to run gz pr");
+
+        assert!(
+            !output.status.success(),
+            "gh が無ければ gz pr は非ゼロ終了すること"
+        );
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains(expected),
+            "{language} のエラーは gh の不在を名指しすること:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("cli.github.com"),
+            "{language} のエラーは導入先を案内すること:\n{stderr}"
+        );
+    }
+}
+
+/// `gh` が無くても、`gh` を通らないコマンドは従来どおり動く。
+///
+/// 上のテストと対になっており、「`gh` の不在が `gz pr` だけを止める」ことを両側から固定する。
+#[test]
+fn the_other_commands_keep_working_without_gh() {
+    let dir = empty_repository("without-gh-other-commands");
+    let path = git_only_path("without-gh-other-commands-path");
+
+    let output = gz()
+        .arg("status")
+        .env("PATH", path.path())
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to run gz status");
+
+    let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+    assert!(
+        !stderr.contains("gh"),
+        "gh の不在が他のコマンドへ波及しないこと:\n{stderr}"
+    );
+    assert!(
+        output.status.success(),
+        "変更の無い作業ツリーでの gz status は成功すること:\n{stderr}"
+    );
+}
+
+/// `git` だけを含み `gh` を含まない `PATH` 用のディレクトリを用意する。
+///
+/// `PATH` を空にすると `git` まで失われ、`gh` の不在ではなく `git` の不在を
+/// 見ていることになる。確かめたいのは `gh` の不在だけであるため、`git` は残す。
+fn git_only_path(label: &str) -> TempDir {
+    let dir = TempDir::new(label);
+    let git = which_git();
+    std::os::unix::fs::symlink(&git, dir.path().join("git"))
+        .expect("git へのシンボリックリンクを作れること");
+    dir
+}
+
+/// 実行環境の `git` の絶対パスを求める。
+fn which_git() -> std::path::PathBuf {
+    let output = std::process::Command::new("/usr/bin/env")
+        .args(["which", "git"])
+        .output()
+        .expect("which git should run");
+    let path = String::from_utf8(output.stdout).expect("which output should be utf-8");
+    std::path::PathBuf::from(path.trim())
+}

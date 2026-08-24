@@ -109,6 +109,16 @@ pub enum PreviewSource {
     /// 未追跡ファイルは git の管理下に無く差分を取れないため、内容を直接読んで表示する。
     /// カレントディレクトリに依存しないよう絶対パスを渡すこと。
     File(PathBuf),
+    /// あらかじめ取得済みの文字列をそのまま表示する。
+    ///
+    /// **プレビューで外部コマンドを起動しないための variant である。**`gz pr` は候補取得の
+    /// 1 回で PR の本文まで取り切り、プレビューはその文字列を描く（design.md
+    /// 「FR-34 / FR-35 の設計」）。`gh` を実行する variant を**作らない**ことで、
+    /// 「プレビューはネットワークを使わない」という設計原則を型のレベルで担保する。
+    ///
+    /// 内容は fuzgit の管理外（GitHub 上の他人が書いた文字列）であるため、
+    /// [`PreviewSource::File`] と同じくエスケープ文字を無害化してから描画する。
+    Text(String),
     /// ラベル付きの複数ソースを 1 つのプレビューへ連結する。
     ///
     /// `gz status` の「staged / unstaged」のように、1 つの候補について複数の観点を
@@ -171,6 +181,9 @@ fn render(messages: &dyn Messages, source: &PreviewSource) -> String {
             render_git_in(messages, directory, args).unwrap_or_else(|message| message)
         }
         PreviewSource::File(path) => render_file(messages, path).unwrap_or_else(|message| message),
+        // 取得済みの文字列は fuzgit の管理外の内容を含み得るため、そのまま ANSI として
+        // 解釈させない（[`escape_ansi`] を参照。`File` と同じ扱い）
+        PreviewSource::Text(text) => escape_ansi(text),
         PreviewSource::Composite(sections) => render_composite(messages, sections),
     }
 }
@@ -675,6 +688,15 @@ impl FinderItem {
         &self.key
     }
 
+    /// この候補が使うプレビューの取得元。
+    ///
+    /// **プレビューが外部コマンドを起動しないことをテストで固定する**ために公開する
+    /// （`gz pr` は取得済み本文の描画に閉じる。[`PreviewSource::Text`] を参照）。
+    #[cfg(test)]
+    pub fn preview_source(&self) -> &PreviewSource {
+        &self.preview
+    }
+
     /// プレビュー本文を組み立てる。返る文字列は ANSI として解釈される前提。
     ///
     /// 失敗しても選択操作を止めず、表示用のメッセージを本文として返す
@@ -687,6 +709,7 @@ impl FinderItem {
             PreviewSource::File(path) => {
                 escape_ansi(&render_file(self.messages, path).unwrap_or_else(|message| message))
             }
+            // `Text` も管理外の内容だが、無害化は `render` 側で行う（二重に掛けない）
             source => render(self.messages, source),
         }
     }

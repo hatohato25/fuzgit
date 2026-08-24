@@ -7,8 +7,8 @@ use super::messages::{
     BranchManageMessages, BranchMessages, CherryPickMessages, CliMessages, CommitMenuMessages,
     CommitMessages, CommonMessages, ConfirmMessages, DiffMessages, ErrorMessages, FetchMessages,
     FileSelectionMessages, FinderMessages, FixupMessages, InProgressMessages, LogMessages,
-    MergeMessages, Messages, PullMessages, RebaseMessages, ReflogMessages, RestoreMessages,
-    RevertMessages, StashMessages, StatusMessages, WorktreeMessages,
+    MergeMessages, Messages, PrMessages, PullMessages, RebaseMessages, ReflogMessages,
+    RestoreMessages, RevertMessages, StashMessages, StatusMessages, WorktreeMessages,
 };
 use crate::error::{Error, stderr_suffix};
 use crate::git::read::{BRANCH_REF_PREFIX, MalformedOutput, ReadOperation, WORKTREE_LABEL};
@@ -121,6 +121,10 @@ impl Messages for JapaneseMessages {
 
     fn log(&self) -> &dyn LogMessages {
         &JapaneseLogMessages
+    }
+
+    fn pr(&self) -> &dyn PrMessages {
+        &JapanesePrMessages
     }
 
     fn commit_menu(&self) -> &dyn CommitMenuMessages {
@@ -272,6 +276,30 @@ impl ErrorMessages for JapaneseErrorMessages {
                 "git コマンドが見つかりません。git をインストールして PATH を通してください"
                     .to_owned()
             }
+            // コマンド名・URL は訳さない（design.md「翻訳しないもの」）
+            Error::GhNotFound => "gh（GitHub CLI）が見つかりません。`gz pr` にのみ必要です。\
+https://cli.github.com からインストールして PATH を通してください\
+（他のコマンドは gh が無くても動作します）"
+                .to_owned(),
+            Error::GhUnauthenticated => {
+                "gh が認証されていません。`gh auth login` でサインインしてください".to_owned()
+            }
+            Error::GhCommandFailed { args, stderr } => {
+                format!(
+                    "gh コマンドが失敗しました: gh {args}{suffix}",
+                    suffix = stderr_suffix(stderr)
+                )
+            }
+            Error::GhRunFailed { command, code } => {
+                format!("{command} が{status}", status = exit_status_text(*code))
+            }
+            Error::GhSpawnFailed { args, .. } => {
+                format!("gh コマンドの起動に失敗しました: gh {args}")
+            }
+            Error::GhOutputMalformed { expected, found } => format!(
+                "gh の出力を読み取れませんでした\
+（1 行あたり {expected} 個のフィールドを期待しましたが {found} 個でした）"
+            ),
             Error::GitSpawnFailed { args, .. } => {
                 format!("git コマンドの起動に失敗しました: git {args}")
             }
@@ -1017,6 +1045,10 @@ impl WorktreeMessages for JapaneseWorktreeMessages {
         format!("選択されたブランチ `{selected}` が候補に見つかりません")
     }
 
+    fn already_exists(&self, path: &str) -> String {
+        format!("`{path}` には既に worktree が登録されています")
+    }
+
     fn creation_failed(&self, path: &str) -> String {
         format!("worktree `{path}` の作成に失敗しました")
     }
@@ -1417,6 +1449,85 @@ impl PullMessages for JapanesePullMessages {
     }
 }
 
+/// `gz pr`（[`crate::commands::pr`]）の日本語表示。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JapanesePrMessages;
+
+impl PrMessages for JapanesePrMessages {
+    fn fetching(&self) -> &'static str {
+        "GitHub から open な PR の一覧を取得しています"
+    }
+
+    /// コマンド列（`gh pr create`）は訳さない（design.md「翻訳しないもの」）。
+    fn no_candidates(&self) -> &'static str {
+        "このリポジトリに open な PR がありません（候補は open な PR に限ります）。\
+`gh pr create` で作成できます"
+    }
+
+    fn header_subject(&self) -> &'static str {
+        "PR を選択"
+    }
+
+    fn header_outcome(&self) -> &'static str {
+        "checkout する"
+    }
+
+    fn selection_not_found(&self, selected: &str) -> String {
+        format!("選択した PR `{selected}` が候補一覧にありません")
+    }
+
+    fn branches_section(&self) -> &'static str {
+        "ブランチ"
+    }
+
+    fn draft_label(&self) -> &'static str {
+        "[draft]"
+    }
+
+    fn no_review(&self) -> &'static str {
+        "レビュー未"
+    }
+
+    fn checks_summary(&self, passed: usize, failed: usize, pending: usize) -> String {
+        format!("チェック 成功 {passed} / 失敗 {failed} / 保留 {pending}")
+    }
+
+    fn worktree_name_invalid(&self, name: &str) -> String {
+        format!(
+            "`{name}` は worktree の名前として使えません。\
+パスではなく名前を指定してください（作成先は常にリポジトリルートの兄弟です）"
+        )
+    }
+
+    fn action_checkout(&self) -> &'static str {
+        "PR を checkout する"
+    }
+
+    fn action_view(&self) -> &'static str {
+        "PR の詳細を表示する (gh pr view)"
+    }
+
+    fn action_diff(&self) -> &'static str {
+        "差分を表示する (gh pr diff)"
+    }
+
+    fn action_print_number(&self) -> &'static str {
+        "番号を標準出力へ出す"
+    }
+
+    fn action_print_url(&self) -> &'static str {
+        "URL を標準出力へ出す"
+    }
+
+    fn action_header_subject(&self, number: u64) -> String {
+        format!("#{number} に対する操作を選択")
+    }
+
+    fn action_header_outcome(&self) -> &'static str {
+        "実行する"
+    }
+}
+
 /// `gz log`（[`crate::commands::log`]）の日本語表示。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JapaneseLogMessages;
@@ -1730,6 +1841,26 @@ impl CliMessages for JapaneseCliMessages {
 
     fn fetch_siblings_help(&self) -> &'static str {
         "同じ階層に並ぶリポジトリも対象に含めて一括で取得する"
+    }
+
+    fn pr_about(&self) -> &'static str {
+        "PR を選んで checkout する（gh CLI が必要）"
+    }
+
+    fn pr_checks_help(&self) -> &'static str {
+        "レビュー判定と CI の状況も取得する（体感で遅くなる）"
+    }
+
+    fn pr_action_help(&self) -> &'static str {
+        "選んだ PR に対する操作をメニューから選ぶ"
+    }
+
+    fn pr_worktree_help(&self) -> &'static str {
+        "この名前の新しい worktree へ checkout する"
+    }
+
+    fn pr_no_install_help(&self) -> &'static str {
+        "worktree 作成後に依存インストールを行わない"
     }
 
     fn pull_about(&self) -> &'static str {

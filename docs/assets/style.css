@@ -24,6 +24,10 @@
   --accent: #8fd3a3;
   --accent-dim: #5f9c73;
   --amber: #d9ae6b;
+  --rose: #e59a9a;
+  --rose-dim: #7a3b3b;
+  --cyan: #7fcdd6;
+  --cyan-dim: #2f6b73;
   --sel-bg: #1b2a33;
   --sel-bar: #8fd3a3;
   --link: #9dc6ff;
@@ -45,6 +49,10 @@
     --accent: #1f7a4d;
     --accent-dim: #2f8a5c;
     --amber: #8a5a12;
+    --rose: #9d2f2f;
+    --rose-dim: #e8cccc;
+    --cyan: #0f6570;
+    --cyan-dim: #c6e2e6;
     --sel-bg: #e7eef3;
     --sel-bar: #1f7a4d;
     --link: #14539a;
@@ -350,6 +358,10 @@ th code {
 
 .warn {
   color: var(--amber);
+}
+
+.err {
+  color: var(--rose);
 }
 
 .caret {
@@ -782,6 +794,10 @@ a.anchor:focus-visible {
    Small print
    -------------------------------------------------------------------------- */
 
+/* Callouts. Three kinds, told apart by colour as well as by their label:
+   amber = a caveat worth knowing, rose = something you cannot undo,
+   cyan = an aside you can skip. The colour is never the only signal — every
+   callout carries a worded label, so it still reads without colour vision. */
 .note {
   border: 1px solid var(--border);
   border-left: 3px solid var(--amber);
@@ -791,6 +807,73 @@ a.anchor:focus-visible {
   margin: 1.2rem 0;
   font-size: 0.9rem;
   max-width: var(--measure);
+}
+
+.note.danger {
+  border-left-color: var(--rose);
+}
+
+.note.info {
+  border-left-color: var(--cyan);
+}
+
+.note-label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--amber);
+  margin-bottom: 0.25rem;
+}
+
+.note.danger .note-label {
+  color: var(--rose);
+}
+
+.note.info .note-label {
+  color: var(--cyan);
+}
+
+/* Chips next to a command heading: what the command needs and what it costs
+   you, visible before you read a word of the section. */
+.badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  vertical-align: middle;
+  margin-left: 0.5rem;
+}
+
+.badge {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid;
+  white-space: nowrap;
+  line-height: 1.6;
+}
+
+.badge.net {
+  color: var(--cyan);
+  border-color: var(--cyan-dim);
+  background: color-mix(in srgb, var(--cyan) 12%, transparent);
+}
+
+.badge.confirm {
+  color: var(--rose);
+  border-color: var(--rose-dim);
+  background: color-mix(in srgb, var(--rose) 12%, transparent);
+}
+
+.badge.multi {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .note p {

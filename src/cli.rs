@@ -239,6 +239,38 @@ pub enum Command {
         merge: bool,
     },
 
+    /// Pick a pull request and check it out (needs the gh CLI)
+    //
+    // `gh` は**必須依存ではない**。他のサブコマンドは `gh` を通らないため、
+    // 未インストールでも影響を受けない（requirements.md FR-34）。
+    //
+    // `--action` と `--worktree` を排他にするのは、前者が「操作の選択」、後者が
+    // 「結果の置き場所の指定」であり、同時に指定されると checkout 以外を選んだときの
+    // 意味が決まらないため。
+    Pr {
+        /// Also fetch the review decision and the CI status (noticeably slower)
+        //
+        // 既定で取らないのは実測に基づく。`reviewDecision` は +1.45 秒、
+        // `statusCheckRollup` は +2.7 秒であり、既定の応答性を大きく損なう
+        #[arg(long)]
+        checks: bool,
+
+        /// Pick what to do with the chosen pull request from a menu
+        #[arg(long, conflicts_with = "worktree")]
+        action: bool,
+
+        /// Check the pull request out into a new worktree with this name
+        //
+        // 受け取るのは**名前であってパスではない**（`gz worktree add` と同じ解決規則で
+        // リポジトリルートの兄弟に作る）。短縮形は設けない（gh 側にも無い）
+        #[arg(long, value_name = "NAME", conflicts_with = "action")]
+        worktree: Option<String>,
+
+        /// Do not install dependencies after creating the worktree
+        #[arg(long)]
+        no_install: bool,
+    },
+
     /// List and manage worktrees (without arguments, prints the path picked from the list)
     Worktree {
         /// 実行する worktree の操作（省略時は一覧からの選択）。
@@ -452,6 +484,16 @@ pub fn localized_command(messages: &dyn Messages) -> ClapCommand {
                 .about(cli.pull_about())
                 .mut_arg("rebase", |argument| argument.help(cli.sync_rebase_help()))
                 .mut_arg("merge", |argument| argument.help(cli.sync_merge_help()))
+        })
+        .mut_subcommand("pr", |command| {
+            command
+                .about(cli.pr_about())
+                .mut_arg("checks", |argument| argument.help(cli.pr_checks_help()))
+                .mut_arg("action", |argument| argument.help(cli.pr_action_help()))
+                .mut_arg("worktree", |argument| argument.help(cli.pr_worktree_help()))
+                .mut_arg("no_install", |argument| {
+                    argument.help(cli.pr_no_install_help())
+                })
         })
         .mut_subcommand("worktree", |command| localize_worktree(command, cli))
 }
