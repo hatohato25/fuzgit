@@ -2503,13 +2503,26 @@ fn worktree_add_refuses_a_name_that_is_a_path() {
 /// `-b` の作成元候補は「コミットまたはタグ」であるため、コミットが 1 件要る。
 /// 一方で本体が `main` を使用中になるため、`-b` 無しの候補は 0 件になる
 /// ——これが FR-31 が塞ぐ穴そのものである。
+///
+/// identity は [`commit_in`] と同じく **`-c` でこの実行にだけ与える**。`git commit` は
+/// author / committer が決まらないと `fatal: empty ident name` で失敗するが、CI の
+/// ランナーには `user.name` / `user.email` が無い。実行環境の git config に頼ると、
+/// 開発者の手元では通って CI だけが落ちる。
 fn repository_with_one_commit(label: &str) -> TempDir {
     let dir = empty_repository(label);
-    let status = std::process::Command::new("git")
-        .args(["commit", "--quiet", "--allow-empty", "-m", "initial"])
-        .current_dir(dir.path())
-        .status()
-        .expect("git commit should run");
-    assert!(status.success(), "git commit should succeed");
+    git_in(
+        dir.path(),
+        &[
+            "-c",
+            "user.name=fuzgit test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "--message",
+            "initial",
+        ],
+    );
     dir
 }
