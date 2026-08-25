@@ -1135,9 +1135,43 @@ impl WorktreeMessages for EnglishWorktreeMessages {
         )
     }
 
+    /// コマンド列（`-b`）は訳さない（design.md「翻訳しないもの」）。
+    ///
+    /// **行き止まりのエラーを残さない。**候補ゼロで止まるとき、`-b` を使えば先へ進める
+    /// ことを併せて示す（暗黙に `-b` の動作へ倒すことはしない）。
     fn no_available_branch(&self) -> &'static str {
         "There is no local branch left to put in a worktree \
-(a branch checked out in another worktree is not offered)"
+(a branch checked out in another worktree is not offered). \
+Pass `-b <branch>` to create a new branch and put that in the worktree instead"
+    }
+
+    fn add_header_subject(&self) -> &'static str {
+        "Pick the branch to put in the worktree"
+    }
+
+    fn add_header_outcome(&self) -> &'static str {
+        "create the worktree"
+    }
+
+    fn add_branch_header_subject(&self) -> &'static str {
+        "Pick the starting point of the new branch"
+    }
+
+    fn add_branch_header_outcome(&self, branch: &str) -> String {
+        format!("create `{branch}` and put it in the worktree")
+    }
+
+    /// コマンド列（`-b`）は訳さない（design.md「翻訳しないもの」）。
+    fn branch_already_exists(&self, branch: &str) -> String {
+        format!(
+            "The local branch `{branch}` already exists. \
+Drop `-b` to put that branch in the worktree instead"
+        )
+    }
+
+    fn no_base_candidate(&self) -> &'static str {
+        "There is no starting point to create a branch from \
+(the repository has neither a commit nor a tag yet)"
     }
 
     fn branch_selection_not_found(&self, selected: &str) -> String {
@@ -1606,8 +1640,8 @@ impl PrMessages for EnglishPrMessages {
         format!("The selected pull request `{selected}` is not among the candidates")
     }
 
-    fn branches_section(&self) -> &'static str {
-        "Branches"
+    fn base_section(&self) -> &'static str {
+        "into"
     }
 
     fn draft_label(&self) -> &'static str {
@@ -2030,6 +2064,10 @@ impl CliMessages for EnglishCliMessages {
 
     fn worktree_prune_about(&self) -> &'static str {
         "Tidy up the bookkeeping of worktrees whose directory is gone"
+    }
+
+    fn worktree_add_branch_help(&self) -> &'static str {
+        "Create a new branch with this name and check it out (you pick its starting point)"
     }
 
     fn worktree_add_no_install_help(&self) -> &'static str {

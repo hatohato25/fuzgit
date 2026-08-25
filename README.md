@@ -117,11 +117,12 @@ for everything that does not. The two cannot be combined.
 
 ## Language
 
-Messages, prompts, finder headers, and `--help` come in **English and Japanese**. The default is
-English; switch to Japanese with:
+Messages, prompts, finder headers, and `--help` come in **English and Japanese**. The language is
+detected from your locale, and falls back to **English** whenever the locale is not Japanese or
+cannot be interpreted. Pin it explicitly with:
 
 ```sh
-git config --global fuzgit.lang ja   # persistent. --local sets it per repository
+git config --global fuzgit.lang ja   # persistent. --local sets it per repository. `en` pins English
 gz --lang ja branch                  # one-off, on any subcommand
 ```
 
@@ -264,7 +265,7 @@ way you learn the result**.
 | [`gz diff`](https://hatohato25.github.io/fuzgit/docs.html#diff) | Pick what to compare and show the diff |
 | [`gz fetch`](https://hatohato25.github.io/fuzgit/docs.html#fetch) | Choose what to fetch (`--siblings` fetches neighboring repositories too. **uses the network**) |
 | [`gz pull`](https://hatohato25.github.io/fuzgit/docs.html#pull) | Pick branches and bring them up to their upstream at once (fast-forward only. **uses the network**) |
-| [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | List and manage worktrees (`add <name>` creates it next to the repository and copies `.claude/` into it) |
+| [`gz worktree`](https://hatohato25.github.io/fuzgit/docs.html#worktree) | List and manage worktrees (`add <name>` creates it next to the repository and copies `.claude/` into it; `-b <branch>` creates a new branch for it) |
 | [`gz pr`](https://hatohato25.github.io/fuzgit/docs.html#pr) | Pick a GitHub pull request and check it out (`--worktree <name>` opens it in a review worktree. **needs the `gh` CLI. uses the network**) |
 
 Options, how candidates are built, what the preview shows, and whether a confirmation prompt appears
@@ -281,10 +282,14 @@ branch, its tracking config, and a checkout.
 ```
 $ gz pr
 Fetching the open pull requests from GitHub
->  #142  fix/login-redirect   octocat           Fix the redirect after login
-   #139  feat/search-filters  contributor       Add filters to the search form
-   #131  chore/bump-deps      app/dependabot    chore(deps): bump the actions group
+>  #142  octocat                  Fix the redirect after login
+   #139  contributor      [draft] Add filters to the search form
+   #131  app/dependabot           chore(deps): bump the actions group
 ```
+
+The head branch name is not on the line. Pull request branches run long, and putting one on
+every row pushes the title — the thing you actually scan — off the screen. It shows at the
+right edge of the preview's summary instead, where there is room for it.
 
 The preview is the pull request body, and it is **already in memory** — the candidate list is
 fetched once with the body riding along, so moving the cursor never touches the network.

@@ -324,9 +324,21 @@ pub enum BranchCommand {
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub enum WorktreeCommand {
     /// Pick a branch and create a new worktree for it
+    //
+    // `-b` の有無で**選ばせる対象が入れ替わる**（無しは既存のローカルブランチ、
+    // 有りは新しいブランチの作成元）。候補行だけでは区別が付かないため、
+    // finder のヘッダーで何を選ぶのかを必ず示す（FR-31）。
     Add {
         /// Name of the worktree to create (always made next to the repository root)
         name: String,
+
+        /// Create a new branch with this name and check it out
+        //
+        // 長綴りは設けない（git 本体の `git worktree add` にも `-b` の長綴りが無く、
+        // fuzgit 固有の綴りを足すと覚え直しを強いる。
+        // requirements.md「オプションの短縮形の方針」）
+        #[arg(short = 'b', value_name = "BRANCH")]
+        branch: Option<String>,
 
         /// Do not install dependencies after creating it (no lockfile is looked up either)
         //
@@ -558,6 +570,9 @@ fn localize_worktree(command: ClapCommand, cli: &dyn CliMessages) -> ClapCommand
             add.about(cli.worktree_add_about())
                 .mut_arg("name", |argument| {
                     argument.help(cli.worktree_add_path_help())
+                })
+                .mut_arg("branch", |argument| {
+                    argument.help(cli.worktree_add_branch_help())
                 })
                 .mut_arg("no_install", |argument| {
                     argument.help(cli.worktree_add_no_install_help())
@@ -1218,6 +1233,7 @@ mod tests {
                 command,
                 Some(WorktreeCommand::Add {
                     name: "feature".to_owned(),
+                    branch: None,
                     no_install: false,
                 })
             ),
@@ -1239,6 +1255,59 @@ mod tests {
     }
 
     #[test]
+    fn worktree_add_takes_a_new_branch_name_with_a_short_flag_only() {
+        // 綴りは `git worktree add -b` に合わせる。**長綴りは設けない**
+        // （git 本体にも無く、fuzgit 固有の綴りは覚え直しを強いる）
+        let cli = Cli::try_parse_from(["gz", "worktree", "add", "-b", "feature/new", "wt"])
+            .expect("`-b` should parse");
+
+        match cli.command {
+            Command::Worktree { command } => assert_eq!(
+                command,
+                Some(WorktreeCommand::Add {
+                    name: "wt".to_owned(),
+                    branch: Some("feature/new".to_owned()),
+                    no_install: false,
+                })
+            ),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        assert!(
+            Cli::try_parse_from(["gz", "worktree", "add", "--new-branch", "x", "wt"]).is_err(),
+            "長綴りは設けない"
+        );
+    }
+
+    #[test]
+    fn worktree_add_keeps_the_new_branch_and_the_install_flag_orthogonal() {
+        // `-b <name> --no-install` は「新しいブランチで作るがインストールはしない」であり、
+        // どちらも意味を持つ組み合わせである。相互排他にしない
+        let cli = Cli::try_parse_from([
+            "gz",
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            "--no-install",
+            "wt",
+        ])
+        .expect("`-b` と `--no-install` は併用できること");
+
+        match cli.command {
+            Command::Worktree { command } => assert_eq!(
+                command,
+                Some(WorktreeCommand::Add {
+                    name: "wt".to_owned(),
+                    branch: Some("feature".to_owned()),
+                    no_install: true,
+                })
+            ),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
     fn worktree_add_installs_dependencies_unless_it_is_told_not_to() {
         // 既定は有効。`gz worktree add` を打った直後にだけ起きる実行であり、
         // 既定で無効にすると FR-30 の目的（作った直後に動かせる worktree）が失われる
@@ -1250,6 +1319,7 @@ mod tests {
                 command,
                 Some(WorktreeCommand::Add {
                     name: "feature".to_owned(),
+                    branch: None,
                     no_install: true,
                 })
             ),

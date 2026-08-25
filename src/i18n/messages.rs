@@ -471,6 +471,9 @@ pub trait CliMessages: Sync + std::fmt::Debug {
     /// `gz worktree prune` の説明。
     fn worktree_prune_about(&self) -> &'static str;
 
+    /// `gz worktree add -b <BRANCH>` の説明。
+    fn worktree_add_branch_help(&self) -> &'static str;
+
     /// `gz worktree add --no-install` の説明。
     fn worktree_add_no_install_help(&self) -> &'static str;
 }
@@ -1009,6 +1012,29 @@ pub trait WorktreeMessages: Sync + std::fmt::Debug {
     /// 選択されたブランチが候補一覧に見つからなかったことを伝える。
     fn branch_selection_not_found(&self, selected: &str) -> String;
 
+    /// `gz worktree add`（`-b` 無し）の finder のヘッダー（何を選ぶか）。
+    fn add_header_subject(&self) -> &'static str;
+
+    /// `gz worktree add`（`-b` 無し）の finder のヘッダー（Enter で何が起きるか）。
+    fn add_header_outcome(&self) -> &'static str;
+
+    /// `gz worktree add -b` の finder のヘッダー（何を選ぶか）。
+    ///
+    /// `-b` の有無で**選ばせる対象が入れ替わる**ため、候補行だけでは区別が付かない。
+    fn add_branch_header_subject(&self) -> &'static str;
+
+    /// `gz worktree add -b` の finder のヘッダー（Enter で何が起きるか）。
+    fn add_branch_header_outcome(&self, branch: &str) -> String;
+
+    /// `-b` に指定した名前のローカルブランチが既にある場合のエラー。
+    ///
+    /// finder を開く前に停止するために使う。`-b` を外せばそのブランチを worktree に
+    /// 入れられることを案内する。
+    fn branch_already_exists(&self, branch: &str) -> String;
+
+    /// `-b` 指定時に作成元の候補が 1 件も無い場合のエラー。
+    fn no_base_candidate(&self) -> &'static str;
+
     /// 作成しようとした場所に worktree が既に登録されている場合のエラー。
     ///
     /// finder を開く前に停止するために使う（選ばせたあとに失敗させない）。
@@ -1515,8 +1541,10 @@ pub trait PrMessages: Sync + std::fmt::Debug {
     /// 選択結果が候補一覧に無い場合のエラー。
     fn selection_not_found(&self, selected: &str) -> String;
 
-    /// プレビューの枠に出す「取り込み先 ← 取り込み元」の見出し。
-    fn branches_section(&self) -> &'static str;
+    /// プレビューの枠に出す「取り込み先」の見出し。
+    ///
+    /// 取り込み**元**（head）は枠の 1 行目へ右寄せで出すため、ここには含めない。
+    fn base_section(&self) -> &'static str;
 
     /// draft の PR に付ける短いラベル。
     ///

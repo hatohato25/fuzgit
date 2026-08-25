@@ -22,7 +22,7 @@ use std::io::Write as _;
 use anyhow::{Context as _, Result, anyhow, bail};
 
 use crate::commands::worktree_install::InstallMode;
-use crate::commands::{COLUMN_SEPARATOR, aligned_candidates, selection_header, worktree};
+use crate::commands::{aligned_candidates_with_columns, selection_header, worktree};
 use crate::finder::{
     FinderItem, FinderOptions, Highlight, HighlightColor, PreviewPanel, PreviewSource,
     SelectionMode, select_one_with,
@@ -48,6 +48,15 @@ const FIELD_COUNT: usize = 8;
 
 /// `--checks` を付けた場合の 1 行あたりのフィールド数。
 const FIELD_COUNT_WITH_CHECKS: usize = 12;
+
+/// 候補行における `[draft]` 列の位置（[`cells`] の並びと対）。
+const DRAFT_COLUMN: usize = 2;
+
+/// 候補行におけるレビュー判定の列の位置（`--checks` 指定時のみ存在する）。
+const REVIEW_COLUMN: usize = 3;
+
+/// 候補行における CI 集計の列の位置（`--checks` 指定時のみ存在する）。
+const CHECKS_COLUMN: usize = 4;
 
 /// 基本フィールドを `@tsv` の 1 行へ並べる jq 式。
 ///
@@ -458,10 +467,13 @@ fn select<'a>(
     candidates: &'a [PrCandidate],
     checks: bool,
 ) -> Result<&'a PrCandidate> {
-    let rows = aligned_candidates(candidates, |candidate| cells(messages, candidate, checks));
+    let rows =
+        aligned_candidates_with_columns(candidates, |candidate| cells(messages, candidate, checks));
     let items = rows
         .iter()
-        .map(|(candidate, display)| to_item(language, messages, candidate, display))
+        .map(|(candidate, display, columns)| {
+            to_item(language, messages, candidate, display, columns)
+        })
         .collect();
 
     let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
@@ -479,6 +491,11 @@ fn select<'a>(
 }
 
 /// 候補 1 件を列の並びへ分解する。
+///
+/// **head ブランチ名は載せない。**PR のブランチ名は長くなりがちで（`feature/…` に
+/// チケット番号やバージョンが続く）、一覧に置くと横幅を食い尽くして**タイトルが
+/// 見切れる**。タイトルは候補を見分ける主要な手掛かりであり、そこを削ってはならない。
+/// ブランチ名はプレビューの枠へ回す（[`panel`] を参照）。
 fn cells(messages: &dyn Messages, candidate: &PrCandidate, checks: bool) -> Vec<String> {
     let pr = messages.pr();
     let draft = if candidate.is_draft {
@@ -489,7 +506,6 @@ fn cells(messages: &dyn Messages, candidate: &PrCandidate, checks: bool) -> Vec<
 
     let mut cells = vec![
         format!("#{number}", number = candidate.number),
-        candidate.head_ref.clone(),
         candidate.author.clone(),
         draft,
     ];
@@ -531,6 +547,7 @@ fn to_item(
     messages: &dyn Messages,
     candidate: &PrCandidate,
     display: &str,
+    columns: &[std::ops::Range<usize>],
 ) -> FinderItem {
     FinderItem::new(
         display.to_owned(),
@@ -538,33 +555,129 @@ fn to_item(
         PreviewSource::Text(candidate.body.clone()),
         language.messages(),
     )
+    .with_highlights(highlights(candidate, columns))
     .with_panel(panel(messages, candidate))
 }
 
-/// プレビュー先頭の要約枠を組み立てる。
-fn panel(messages: &dyn Messages, candidate: &PrCandidate) -> PreviewPanel {
-    let metric = format!("#{number}", number = candidate.number);
-    // draft は「まだレビューを求めていない」という状態であり、
-    // 通常の PR と取り違えないよう番号ごと色を変える
-    let highlights = if candidate.is_draft {
-        vec![Highlight::new(0, metric.len(), HighlightColor::Yellow)]
-    } else {
-        Vec::new()
+/// 候補行のうち色を付ける範囲。
+///
+/// **配色は `gh` に合わせる**（fuzgit が独自に決めない。`commit_highlights` が git の
+/// `%C(yellow)%h` に合わせたのと同じ判断）。実測した `gh pr list` の配色は次のとおり:
+///
+/// | 対象 | `gh` の色 | fuzgit |
+/// |---|---|---|
+/// | 番号（open） | 緑（32） | [`HighlightColor::Green`] |
+/// | 番号（draft） | 灰（256 色の 242） | [`HighlightColor::Dim`] |
+/// | タイトル | 無色 | 無色 |
+///
+/// draft に色番号の灰を使わないのは、明るいテーマで読めなくなる組み合わせが生じるため
+/// （[`HighlightColor::Dim`] を参照）。**装飾で弱める**ほうが `gh` の意図——draft を
+/// 目立たせない——を忠実に写す。
+///
+/// **タイトルと作者には色を付けない。**一覧の大半を占める列に色を付けると、
+/// 目印にしたい部分が埋もれる（`commit_highlights` / `sibling_highlights` と同じ判断）。
+///
+/// `--checks` の 2 列は「この PR は取り込める状態か」を示すためだけに在るので、
+/// そこは状態で塗り分ける（`gh pr checks` の ✓ 緑 / X 赤に合わせる。実測確認済み）。
+fn highlights(candidate: &PrCandidate, columns: &[std::ops::Range<usize>]) -> Vec<Highlight> {
+    let mut highlights = Vec::new();
+
+    // 番号は行の識別子であり、状態（open / draft）を載せるのに最も目が行く場所である
+    if let Some(range) = columns.first() {
+        let color = if candidate.is_draft {
+            HighlightColor::Dim
+        } else {
+            HighlightColor::Green
+        };
+        highlights.push(Highlight::new(range.start, range.end, color));
+    }
+
+    // `[draft]` の印も番号と同じ扱いで弱める（強調すると draft のほうが目立ってしまう）
+    if candidate.is_draft
+        && let Some(range) = columns.get(DRAFT_COLUMN)
+        && !range.is_empty()
+    {
+        highlights.push(Highlight::new(range.start, range.end, HighlightColor::Dim));
+    }
+
+    let Some(checks) = candidate.checks else {
+        return highlights;
     };
 
+    if let Some(range) = columns.get(REVIEW_COLUMN)
+        && !range.is_empty()
+        && let Some(color) = review_color(candidate)
+    {
+        highlights.push(Highlight::new(range.start, range.end, color));
+    }
+
+    if let Some(range) = columns.get(CHECKS_COLUMN)
+        && !range.is_empty()
+    {
+        highlights.push(Highlight::new(range.start, range.end, checks_color(checks)));
+    }
+
+    highlights
+}
+
+/// レビュー判定の色。判定が出ていないものは色を付けない（無色＝まだ何も決まっていない）。
+fn review_color(candidate: &PrCandidate) -> Option<HighlightColor> {
+    match candidate.review_decision.as_deref() {
+        Some("APPROVED") => Some(HighlightColor::Green),
+        Some("CHANGES_REQUESTED") => Some(HighlightColor::Red),
+        _ => None,
+    }
+}
+
+/// CI 集計の色。
+///
+/// **失敗を最優先で示す。**保留が残っていても、失敗が 1 件でもあれば赤にする
+/// （取り込めない理由として先に知りたいのはそちらであるため）。
+fn checks_color(checks: Checks) -> HighlightColor {
+    if checks.failed > 0 {
+        HighlightColor::Red
+    } else if checks.pending > 0 {
+        HighlightColor::Yellow
+    } else {
+        HighlightColor::Green
+    }
+}
+
+/// プレビュー先頭の要約枠を組み立てる。
+///
+/// 枠の 1 行目は**候補行＋右寄せの指標**である。候補行が `#<番号> …` で始まるため、
+/// 指標に番号を置くと同じ行に番号が 2 度出るだけになる。そこで指標には
+/// **一覧から外した head ブランチ名**を置く。結果として 1 行目は
+/// 「左端に番号・右端にブランチ名」となり、一覧で削った情報がここで戻る。
+fn panel(messages: &dyn Messages, candidate: &PrCandidate) -> PreviewPanel {
+    let mut context = Vec::new();
+    // 一覧の `[draft]` 列と同じ印を枠にも置く。プレビューだけを見ている状態でも
+    // 「まだレビューを求めていない」ことが読み取れるようにするため
+    if candidate.is_draft {
+        context.push(messages.pr().draft_label().to_owned());
+    }
+    context.push(format!(
+        "{section} {base}",
+        section = messages.pr().base_section(),
+        base = candidate.base_ref
+    ));
+    context.push(candidate.url.clone());
+
     PreviewPanel::new()
-        .with_metric(metric, highlights)
-        .with_context(vec![
-            candidate.author.clone(),
-            format!(
-                "{section}: {base}{separator}<- {head}",
-                section = messages.pr().branches_section(),
-                base = candidate.base_ref,
-                separator = COLUMN_SEPARATOR,
-                head = candidate.head_ref
-            ),
-            candidate.url.clone(),
-        ])
+        // `gh pr list` は head ブランチ名をシアンで出す（実測確認済み）。fuzgit の
+        // 選べる色にシアンは無く、参照名を示す色として既に使っている青を充てる
+        //（`sibling_highlights` が `git branch -vv` の `[origin/main]` に合わせた色）。
+        // 状態（draft）では塗り分けない——ブランチ名を状態の色にすると、
+        // その色が何を表すのか読み取れなくなる
+        .with_metric(
+            candidate.head_ref.clone(),
+            vec![Highlight::new(
+                0,
+                candidate.head_ref.len(),
+                HighlightColor::Blue,
+            )],
+        )
+        .with_context(context)
 }
 
 #[cfg(test)]
@@ -769,9 +882,9 @@ mod tests {
         let draft = cells(messages(), &candidate(&draft_fields, false), false);
         let plain = cells(messages(), &candidate(&base_fields(), false), false);
 
-        assert_eq!(draft[3].chars().count(), plain[3].chars().count());
-        assert_eq!(draft[3], messages().pr().draft_label());
-        assert!(plain[3].trim().is_empty());
+        assert_eq!(draft[2].chars().count(), plain[2].chars().count());
+        assert_eq!(draft[2], messages().pr().draft_label());
+        assert!(plain[2].trim().is_empty());
     }
 
     #[test]
@@ -787,8 +900,8 @@ mod tests {
             plain.len() + 2,
             "レビューと CI の 2 列だけ増える"
         );
-        assert_eq!(checked[4], "APPROVED");
-        assert!(checked[5].contains('3') && checked[5].contains('1') && checked[5].contains('2'));
+        assert_eq!(checked[3], "APPROVED");
+        assert!(checked[4].contains('3') && checked[4].contains('1') && checked[4].contains('2'));
     }
 
     #[test]
@@ -798,7 +911,134 @@ mod tests {
 
         let row = cells(messages(), &candidate(&fields, true), true);
 
-        assert_eq!(row[4], messages().pr().no_review());
+        assert_eq!(row[3], messages().pr().no_review());
+    }
+
+    /// 候補 1 件を整形し、行と列範囲の対を返す。
+    fn aligned(
+        fields: &[&str],
+        checks: bool,
+    ) -> (PrCandidate, String, Vec<std::ops::Range<usize>>) {
+        let candidates = parse(line(fields).as_bytes(), checks).expect("パースできること");
+        let mut rows =
+            aligned_candidates_with_columns(&candidates, |c| cells(messages(), c, checks));
+        let (candidate, display, columns) = rows.remove(0);
+        (candidate.clone(), display, columns)
+    }
+
+    /// 列範囲から期待するハイライトを 1 つ組み立てる。
+    fn expected(
+        columns: &[std::ops::Range<usize>],
+        index: usize,
+        color: HighlightColor,
+    ) -> Highlight {
+        let range = columns[index].clone();
+        Highlight::new(range.start, range.end, color)
+    }
+
+    #[test]
+    fn the_number_is_green_when_the_pull_request_is_ready() {
+        // 配色は `gh pr list` に合わせる（実測: open は緑 32）。
+        // **期待値そのものと突き合わせる**ため、タイトルや作者に色が付いていれば落ちる
+        let (candidate, _line, columns) = aligned(&base_fields(), false);
+
+        assert_eq!(
+            highlights(&candidate, &columns),
+            [expected(&columns, 0, HighlightColor::Green)]
+        );
+    }
+
+    #[test]
+    fn a_draft_is_dimmed_rather_than_highlighted() {
+        // `gh` は draft の番号を灰（256 色の 242）にする。色番号の灰は明るいテーマで
+        // 読めなくなるため、fuzgit は装飾（faint）で弱める。**強調ではない**
+        let mut fields = base_fields();
+        fields[4] = "true";
+        let (candidate, _line, columns) = aligned(&fields, false);
+
+        assert_eq!(
+            highlights(&candidate, &columns),
+            [
+                expected(&columns, 0, HighlightColor::Dim),
+                expected(&columns, DRAFT_COLUMN, HighlightColor::Dim),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_title_and_the_author_keep_no_colour_even_with_checks() {
+        // 一覧の大半を占める列に色を付けると、目印にしたい部分が埋もれる。
+        // 色が付くのは番号とレビュー・CI の 3 つだけであることを、全体の一致で固定する
+        let mut fields = base_fields();
+        fields.extend(["APPROVED", "3", "0", "0"]);
+        let (candidate, _line, columns) = aligned(&fields, true);
+
+        assert_eq!(
+            highlights(&candidate, &columns),
+            [
+                expected(&columns, 0, HighlightColor::Green),
+                expected(&columns, REVIEW_COLUMN, HighlightColor::Green),
+                expected(&columns, CHECKS_COLUMN, HighlightColor::Green),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failing_check_is_red_even_when_something_is_still_pending() {
+        // 取り込めない理由として先に知りたいのは失敗のほうである
+        for (passed, failed, pending, want) in [
+            ("3", "0", "0", HighlightColor::Green),
+            ("3", "0", "2", HighlightColor::Yellow),
+            ("3", "1", "2", HighlightColor::Red),
+            ("0", "1", "0", HighlightColor::Red),
+        ] {
+            let mut fields = base_fields();
+            fields.extend(["", passed, failed, pending]);
+            let (candidate, _line, columns) = aligned(&fields, true);
+
+            assert!(
+                highlights(&candidate, &columns).contains(&expected(&columns, CHECKS_COLUMN, want)),
+                "成功 {passed} / 失敗 {failed} / 保留 {pending} は {want:?} になること"
+            );
+        }
+    }
+
+    #[test]
+    fn the_review_decision_is_coloured_only_once_it_says_something() {
+        for (decision, want) in [
+            ("APPROVED", Some(HighlightColor::Green)),
+            ("CHANGES_REQUESTED", Some(HighlightColor::Red)),
+            ("REVIEW_REQUIRED", None),
+        ] {
+            let mut fields = base_fields();
+            fields.extend([decision, "1", "0", "0"]);
+            let (candidate, _line, columns) = aligned(&fields, true);
+            let found = highlights(&candidate, &columns);
+
+            match want {
+                Some(color) => assert!(
+                    found.contains(&expected(&columns, REVIEW_COLUMN, color)),
+                    "レビュー判定 `{decision}` は {color:?} になること"
+                ),
+                None => assert!(
+                    !found.iter().any(|highlight| *highlight
+                        == expected(&columns, REVIEW_COLUMN, HighlightColor::Green)
+                        || *highlight == expected(&columns, REVIEW_COLUMN, HighlightColor::Red)),
+                    "判定が出ていないものへ色を付けてはならない: `{decision}`"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn the_panel_metric_is_blue_like_the_branch_name_in_gh() {
+        let candidate = candidate(&base_fields(), false);
+        let rendered = format!("{:?}", panel(messages(), &candidate));
+
+        assert!(
+            rendered.contains("Blue"),
+            "ブランチ名は参照名の色で示すこと: {rendered}"
+        );
     }
 
     #[test]
@@ -806,7 +1046,13 @@ mod tests {
         // 採用基準 C の例外は候補生成の 1 回だけである。プレビューが外部コマンドを
         // 起動しないことを、`PreviewSource` の variant で構造的に固定する
         let candidate = candidate(&base_fields(), false);
-        let item = to_item(Language::English, messages(), &candidate, "#12  feature");
+        let item = to_item(
+            Language::English,
+            messages(),
+            &candidate,
+            "#12  feature",
+            &[],
+        );
 
         assert_eq!(
             item.preview_source(),
@@ -816,13 +1062,65 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_shows_where_the_pull_request_would_land() {
-        let candidate = candidate(&base_fields(), false);
-        let panel = panel(messages(), &candidate);
-        let rendered = format!("{panel:?}");
+    fn the_branch_name_is_kept_out_of_the_list() {
+        // PR のブランチ名は長くなりがちで、一覧に置くとタイトルが見切れる。
+        // 一覧から外し、プレビューの枠へ回す
+        let long = "feature/update_rds-mysql-version-8-4-10";
+        let mut fields = base_fields();
+        fields[1] = long;
 
-        assert!(rendered.contains("#12"));
-        assert!(rendered.contains("octocat"));
+        let row = cells(messages(), &candidate(&fields, false), false);
+
+        assert!(
+            !row.iter().any(|cell| cell.contains(long)),
+            "ブランチ名を一覧へ載せてはならない: {row:?}"
+        );
+    }
+
+    #[test]
+    fn the_list_is_the_number_the_author_and_the_title() {
+        let row = cells(messages(), &candidate(&base_fields(), false), false);
+
+        assert_eq!(row[0], "#12");
+        assert_eq!(row[1], "octocat");
+        assert_eq!(row.last().map(String::as_str), Some("Add login"));
+    }
+
+    #[test]
+    fn the_panel_metric_carries_the_branch_name_instead_of_the_number() {
+        // 枠の 1 行目は「候補行＋右寄せの指標」である。候補行が `#<番号>` で始まる以上、
+        // 指標に番号を置くと同じ行に番号が 2 度出るだけになる
+        let long = "feature/update_rds-mysql-version-8-4-10";
+        let mut fields = base_fields();
+        fields[1] = long;
+
+        let rendered = format!("{:?}", panel(messages(), &candidate(&fields, false)));
+
+        assert!(
+            rendered.contains(long),
+            "一覧から外したブランチ名は枠で戻ること: {rendered}"
+        );
+        assert!(
+            !rendered.contains("#12"),
+            "番号は候補行が持つ。枠の指標で重ねない: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_draft_is_marked_in_the_panel_too() {
+        // プレビューだけを見ている状態でも draft だと分かること
+        let mut fields = base_fields();
+        fields[4] = "true";
+
+        let rendered = format!("{:?}", panel(messages(), &candidate(&fields, false)));
+
+        assert!(rendered.contains(messages().pr().draft_label()));
+    }
+
+    #[test]
+    fn the_panel_shows_where_the_pull_request_would_land() {
+        let rendered = format!("{:?}", panel(messages(), &candidate(&base_fields(), false)));
+
         assert!(
             rendered.contains("main"),
             "取り込み先が読めること: {rendered}"

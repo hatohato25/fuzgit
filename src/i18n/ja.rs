@@ -1036,9 +1036,42 @@ impl WorktreeMessages for JapaneseWorktreeMessages {
         )
     }
 
+    /// コマンド列（`-b`）は訳さない（design.md「翻訳しないもの」）。
+    ///
+    /// **行き止まりのエラーを残さない。**候補ゼロで止まるとき、`-b` を使えば先へ進める
+    /// ことを併せて示す（暗黙に `-b` の動作へ倒すことはしない）。
     fn no_available_branch(&self) -> &'static str {
         "worktree に割り当てられるローカルブランチがありません\
-（他の worktree でチェックアウト中のブランチは対象になりません）"
+（他の worktree でチェックアウト中のブランチは対象になりません）。\
+`-b <branch>` を付けると、新しいブランチを作って worktree に入れられます"
+    }
+
+    fn add_header_subject(&self) -> &'static str {
+        "worktree に入れるブランチを選択"
+    }
+
+    fn add_header_outcome(&self) -> &'static str {
+        "worktree を作成する"
+    }
+
+    fn add_branch_header_subject(&self) -> &'static str {
+        "新しいブランチの作成元を選択"
+    }
+
+    fn add_branch_header_outcome(&self, branch: &str) -> String {
+        format!("`{branch}` を作成して worktree に入れる")
+    }
+
+    /// コマンド列（`-b`）は訳さない（design.md「翻訳しないもの」）。
+    fn branch_already_exists(&self, branch: &str) -> String {
+        format!(
+            "ローカルブランチ `{branch}` は既に存在します。\
+`-b` を外すと、そのブランチを worktree に入れられます"
+        )
+    }
+
+    fn no_base_candidate(&self) -> &'static str {
+        "ブランチの作成元がありません（このリポジトリにはコミットもタグもまだありません）"
     }
 
     fn branch_selection_not_found(&self, selected: &str) -> String {
@@ -1476,8 +1509,8 @@ impl PrMessages for JapanesePrMessages {
         format!("選択した PR `{selected}` が候補一覧にありません")
     }
 
-    fn branches_section(&self) -> &'static str {
-        "ブランチ"
+    fn base_section(&self) -> &'static str {
+        "取り込み先"
     }
 
     fn draft_label(&self) -> &'static str {
@@ -1899,6 +1932,10 @@ impl CliMessages for JapaneseCliMessages {
 
     fn worktree_prune_about(&self) -> &'static str {
         "実体を失った worktree の管理情報を整理する"
+    }
+
+    fn worktree_add_branch_help(&self) -> &'static str {
+        "この名前で新しいブランチを作ってチェックアウトする（作成元は選択する）"
     }
 
     fn worktree_add_no_install_help(&self) -> &'static str {

@@ -2407,3 +2407,109 @@ fn which_git() -> std::path::PathBuf {
     let path = String::from_utf8(output.stdout).expect("which output should be utf-8");
     std::path::PathBuf::from(path.trim())
 }
+
+/// `-b` 無しで候補が 0 件のとき、行き止まりにせず `-b` を案内する。
+///
+/// ローカルブランチが `main` 1 本で本体が使用中、というごく普通の状態で候補が
+/// ゼロになるのが FR-31 の出発点である。**暗黙に `-b` の動作へ倒さない**ことも
+/// 併せて確かめる（案内するだけで、勝手にブランチを作らない）。
+#[test]
+fn worktree_add_without_a_branch_points_at_the_new_branch_flag() {
+    // (表示言語, 案内に含まれるべき語)
+    for (language, expected) in [
+        ("ja", "新しいブランチを作って"),
+        ("en", "create a new branch"),
+    ] {
+        let dir = repository_with_one_commit(&format!("worktree-add-dead-end-{language}"));
+
+        let output = gz_with(language)
+            .args(["worktree", "add", "wt"])
+            .current_dir(dir.path())
+            .output()
+            .expect("failed to run gz worktree add");
+
+        assert!(!output.status.success(), "候補ゼロでは非ゼロ終了すること");
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains("-b"),
+            "{language} は `-b` を名指しで案内すること:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(expected),
+            "{language} は `-b` で何ができるのかを示すこと:\n{stderr}"
+        );
+        assert!(
+            !dir.path().parent().is_some_and(|p| p.join("wt").exists()),
+            "案内するだけで、暗黙に worktree を作ってはならない"
+        );
+    }
+}
+
+/// `-b` に既存のローカルブランチ名を渡すと、finder を開く前に停止する。
+///
+/// 選ばせたあとで「その名前は使えません」と告げない。`-b` を外せばよいことも案内する。
+#[test]
+fn worktree_add_rejects_a_new_branch_name_that_already_exists() {
+    for (language, expected) in [("ja", "既に存在します"), ("en", "already exists")] {
+        let dir = repository_with_one_commit(&format!("worktree-add-dup-branch-{language}"));
+
+        let output = gz_with(language)
+            .args(["worktree", "add", "-b", "main", "wt"])
+            .current_dir(dir.path())
+            .output()
+            .expect("failed to run gz worktree add -b");
+
+        assert!(!output.status.success(), "衝突する名前は非ゼロ終了すること");
+
+        let stderr = String::from_utf8(output.stderr).expect("error output should be utf-8");
+        assert!(
+            stderr.contains(expected),
+            "{language} は衝突を伝えること:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("-b"),
+            "{language} は `-b` を外せばよいことを案内すること:\n{stderr}"
+        );
+    }
+}
+
+/// worktree の名前にパス区切りを含むものは、`-b` の有無に関わらず拒否する。
+///
+/// 受け取るのは**名前であってパスではない**。読み替えずに理由を示して止める。
+#[test]
+fn worktree_add_refuses_a_name_that_is_a_path() {
+    for arguments in [
+        vec!["worktree", "add", "../escape"],
+        vec!["worktree", "add", "-b", "feature", "../escape"],
+    ] {
+        let dir = repository_with_one_commit("worktree-add-path-name");
+
+        let output = gz()
+            .args(&arguments)
+            .current_dir(dir.path())
+            .output()
+            .expect("failed to run gz worktree add");
+
+        assert!(
+            !output.status.success(),
+            "パスを名前として受け取ってはならない: {arguments:?}"
+        );
+    }
+}
+
+/// コミットを 1 件だけ持つ git リポジトリを用意する。
+///
+/// `-b` の作成元候補は「コミットまたはタグ」であるため、コミットが 1 件要る。
+/// 一方で本体が `main` を使用中になるため、`-b` 無しの候補は 0 件になる
+/// ——これが FR-31 が塞ぐ穴そのものである。
+fn repository_with_one_commit(label: &str) -> TempDir {
+    let dir = empty_repository(label);
+    let status = std::process::Command::new("git")
+        .args(["commit", "--quiet", "--allow-empty", "-m", "initial"])
+        .current_dir(dir.path())
+        .status()
+        .expect("git commit should run");
+    assert!(status.success(), "git commit should succeed");
+    dir
+}

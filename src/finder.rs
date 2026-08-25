@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use skim::prelude::*;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -253,16 +253,28 @@ pub enum HighlightColor {
     Yellow,
     /// 青（ANSI 34）。
     Blue,
+    /// 前景を暗くする（ANSI 2 / faint）。
+    ///
+    /// **色ではなく装飾である。**「重要でない」「まだ本番ではない」ことを、目立たせずに
+    /// 示すために用いる（`gz pr` の draft な PR 番号）。色番号の灰
+    /// （`gh` は 256 色の 242 を使う）を採らないのは [`ANSI_DIM`] と同じ理由で、
+    /// 明るいテーマで読めなくなる組み合わせが生じるためである。
+    Dim,
 }
 
 impl HighlightColor {
-    /// 描画に用いる ratatui の色へ変換する。
-    fn to_color(self) -> Color {
+    /// 候補一覧の描画で用いる装飾を、既存の装飾へ重ねる。
+    ///
+    /// 前景色を差し替えるものと、[`HighlightColor::Dim`] のように**装飾を足す**ものが
+    /// あるため、色を返すのではなく `Style` の変換として持つ。
+    fn apply(self, style: Style) -> Style {
         match self {
-            Self::Green => Color::Green,
-            Self::Red => Color::Red,
-            Self::Yellow => Color::Yellow,
-            Self::Blue => Color::Blue,
+            Self::Green => style.fg(Color::Green),
+            Self::Red => style.fg(Color::Red),
+            Self::Yellow => style.fg(Color::Yellow),
+            Self::Blue => style.fg(Color::Blue),
+            // 色ではなく装飾。前景色は端末テーマのまま弱める
+            Self::Dim => style.add_modifier(Modifier::DIM),
         }
     }
 
@@ -278,6 +290,7 @@ impl HighlightColor {
             Self::Red => "\u{1b}[31m",
             Self::Yellow => "\u{1b}[33m",
             Self::Blue => "\u{1b}[34m",
+            Self::Dim => ANSI_DIM,
         }
     }
 }
@@ -386,7 +399,7 @@ fn split_span<'a>(span: Span<'a>, offset: usize, highlights: &[Highlight]) -> Ve
 fn highlighted_style(style: Style, color: Option<HighlightColor>) -> Style {
     match color {
         None => style,
-        Some(color) => style.fg(color.to_color()),
+        Some(color) => color.apply(style),
     }
 }
 

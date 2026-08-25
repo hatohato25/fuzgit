@@ -153,29 +153,51 @@ impl BaseKind {
 }
 
 /// 新しいブランチの作成元候補 1 件分。
+///
+/// **`gz worktree add -b` が借りる**（FR-31）。候補の持ち主は `gz branch create` のままで
+/// あり、共有のために第三のモジュールへ移していない——どちらの都合で変わったのかを
+/// 追えるようにするためである。借りる側は [`base_candidates`] と [`to_base_item`] を
+/// 併せて使うこと（同じ規則を 2 か所へ書くと、片方だけ直したときに**コンパイルも
+/// テストも通ったまま挙動だけがずれる**）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct BaseCandidate {
+pub(crate) struct BaseCandidate {
     /// finder のキー。
     ///
     /// 同じ名前のブランチとタグは共存できるため（`v1.0` のブランチとタグなど）、
     /// 名前だけをキーにすると別の対象を掴んでしまう。種別を前置きして一意にする
     /// （参照名は空白を含めない規則のため、`<種別> <名前>` は曖昧にならない）。
-    key: String,
+    pub(crate) key: String,
     /// 一覧表示および絞り込み対象の文字列。
-    display: String,
+    pub(crate) display: String,
     /// `git branch` へ渡すリビジョン。
     ///
     /// ブランチは名前をそのまま、タグは解決済みのオブジェクト ID を渡す
     /// （annotated tag のタグオブジェクトは git 側でコミットまで peel される）。
-    revision: String,
+    pub(crate) revision: String,
     /// 表示文字列のうち色を付ける範囲（先頭の種別ラベル）。
-    highlights: Vec<Highlight>,
+    pub(crate) highlights: Vec<Highlight>,
     /// 作成完了の報告に用いる名前（ブランチ名またはタグ名）。
     ///
     /// [`Self::key`] と分けているのは、キーが finder 内での一意化のために種別を前置きした
     /// 内部表現であり、そのまま読ませると `b main` のような文言になってしまうため。
     /// [`Self::revision`] とも分ける（タグの revision はオブジェクト ID であり読めない）。
-    name: String,
+    pub(crate) name: String,
+}
+
+/// `name` が既存のローカルブランチと衝突するか。
+///
+/// **書式の検証ではなく、列挙済み候補との照合である。**名前の妥当性そのものは
+/// `git check-ref-format` に委ねる方針（FR-20）と両立する——ここが見ているのは
+/// 「その名前が既に使われているか」だけであり、git の命名規則を再実装していない。
+///
+/// `gz worktree add -b`（FR-31）が **finder を開く前**に呼ぶ。ブランチ一覧は作成元候補の
+/// 生成のために既に読んでおり、追加の git プロセスは要らない。取りこぼしても最終的には
+/// `git worktree add -b` 自身が拒否する（**`-B` は使わない**ため、既存ブランチが
+/// 黙って作り直されることはない）。
+pub(crate) fn collides_with_local_branch(branches: &[BranchInfo], name: &str) -> bool {
+    branches
+        .iter()
+        .any(|branch| !branch.is_remote && branch.name == name)
 }
 
 /// 削除候補 1 件分。
@@ -287,7 +309,7 @@ fn create(
 /// ブランチを先に並べる。作成元は多くの場合ブランチであり、タグからの作成
 /// （リリース時点からの枝分かれ）は相対的に少ないため。
 /// ブランチの中では既定ブランチ（[`PREFERRED_BASE_BRANCHES`]）を先頭へ寄せる。
-fn base_candidates(branches: &[BranchInfo], tags: &[TagInfo]) -> Vec<BaseCandidate> {
+pub(crate) fn base_candidates(branches: &[BranchInfo], tags: &[TagInfo]) -> Vec<BaseCandidate> {
     let from_branches = preferred_first(branches)
         .into_iter()
         .map(|branch| BaseCandidate {
@@ -369,7 +391,7 @@ fn kind_highlights(kind: BaseKind) -> Vec<Highlight> {
 }
 
 /// 作成元候補を finder のアイテムへ変換する。
-fn to_base_item(language: Language, candidate: &BaseCandidate) -> FinderItem {
+pub(crate) fn to_base_item(language: Language, candidate: &BaseCandidate) -> FinderItem {
     FinderItem::new(
         candidate.display.clone(),
         candidate.key.clone(),
@@ -901,6 +923,60 @@ mod tests {
     use skim::prelude::SkimItem as _;
 
     use super::*;
+
+    /// FR-31 の事前検査は「列挙済み候補との照合」であり、書式の検証ではない。
+    mod branch_name_collision {
+        use super::*;
+
+        fn local(name: &str) -> BranchInfo {
+            BranchInfo {
+                name: name.to_owned(),
+                is_current: false,
+                is_remote: false,
+            }
+        }
+
+        fn remote(name: &str) -> BranchInfo {
+            BranchInfo {
+                name: name.to_owned(),
+                is_current: false,
+                is_remote: true,
+            }
+        }
+
+        #[test]
+        fn an_existing_local_branch_collides() {
+            let branches = [local("main"), local("feature/login")];
+
+            assert!(collides_with_local_branch(&branches, "feature/login"));
+        }
+
+        #[test]
+        fn an_unused_name_does_not_collide() {
+            let branches = [local("main")];
+
+            assert!(!collides_with_local_branch(&branches, "feature/new"));
+        }
+
+        #[test]
+        fn a_remote_tracking_branch_of_the_same_name_does_not_collide() {
+            // `origin/feature` が在っても、ローカルの `feature` は作れる
+            let branches = [local("main"), remote("origin/feature")];
+
+            assert!(!collides_with_local_branch(&branches, "origin/feature"));
+            assert!(!collides_with_local_branch(&branches, "feature"));
+        }
+
+        #[test]
+        fn the_check_does_not_validate_the_format() {
+            // 書式の妥当性は `git check-ref-format` の仕事である。ここでは
+            // 使われていない名前は、git が拒む綴りであっても「衝突なし」と答える
+            let branches = [local("main")];
+
+            assert!(!collides_with_local_branch(&branches, "-dashy"));
+            assert!(!collides_with_local_branch(&branches, "a..b"));
+        }
+    }
     use crate::commands::COLUMN_SEPARATOR;
 
     const TAG_OBJECT_ID: &str = "1f0c9a4b3d2e5f60718293a4b5c6d7e8f9012345";

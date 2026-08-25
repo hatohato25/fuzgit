@@ -20,11 +20,13 @@ use crate::cli::WorktreeCommand;
 use crate::commands::confirmation::confirm;
 use crate::commands::worktree_claude::copy_agent_config;
 use crate::commands::worktree_install::{InstallMode, install_dependencies};
-use crate::commands::{COLUMN_SEPARATOR, aligned_candidates};
-use crate::finder::{FinderItem, PreviewSource, select_one};
+use crate::commands::{COLUMN_SEPARATOR, aligned_candidates, branch_manage, selection_header};
+use crate::finder::{
+    FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one, select_one_with,
+};
 use crate::git::exec::{capture_git_stderr_in, run_git};
 use crate::git::read::{
-    BranchInfo, BranchScope, WorktreeInfo, branches, checked_out_branches, worktrees,
+    BranchInfo, BranchScope, WorktreeInfo, branches, checked_out_branches, tags, worktrees,
 };
 use crate::git::repo::workdir;
 use crate::i18n::{Language, Messages};
@@ -83,11 +85,16 @@ pub fn run(
         None => list(language, messages, repository),
         // `--no-install` の真偽値をここで型へ畳み、commands 層へ `bool` を持ち回さない
         // （既存の `PruneMode` / `FetchScope` と同方針）
-        Some(WorktreeCommand::Add { name, no_install }) => add(
+        Some(WorktreeCommand::Add {
+            name,
+            branch,
+            no_install,
+        }) => add(
             language,
             messages,
             repository,
             name,
+            branch.as_deref(),
             InstallMode::from_no_install(*no_install),
         ),
         Some(WorktreeCommand::Remove) => remove(language, messages, repository),
@@ -136,25 +143,45 @@ fn add(
     messages: &dyn Messages,
     repository: &gix::Repository,
     name: &str,
+    new_branch: Option<&str>,
     install: InstallMode,
 ) -> Result<()> {
-    let worktrees = read_worktrees(messages, repository)?;
-
     // 置き場所は叩いた位置ではなくリポジトリルートの兄弟に固定する。worktree の中身は
     // 「`.git` のある階層まるごと」であり、その単位はリポジトリと並べたときに最も素直に
     // 読めるため（リポジトリの内側に作ると、本体からは未追跡の埋め込みリポジトリとして
     // 見え、`.gitignore` の手当てが要る）
-    let destination = sibling_destination(messages, &worktrees, name)?;
-    let path = destination
-        .to_str()
-        .ok_or_else(|| anyhow!(messages.worktree().path_not_utf8(&destination)))?
-        .to_owned();
+    let path = resolve_new_name(messages, repository, name)?;
     let path = path.as_str();
+
+    let arguments = match new_branch {
+        // `-b` 無しは従来どおり「既存のローカルブランチを選ぶ」
+        None => existing_branch_args(language, messages, repository, path)?,
+        // `-b` 有りは「新しいブランチの作成元を選ぶ」。**選ばせる対象が入れ替わる**
+        Some(new_branch) => new_branch_args(language, messages, repository, path, new_branch)?,
+    };
+
+    let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    run_git(language, &arguments).with_context(|| messages.worktree().creation_failed(path))?;
+
+    finish_creation(messages, repository, path, install, PathReport::Needed)
+}
+
+/// 既存のローカルブランチを選んで `git worktree add` の引数を組み立てる（`-b` 無し）。
+fn existing_branch_args(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    path: &str,
+) -> Result<Vec<String>> {
+    let worktrees = read_worktrees(messages, repository)?;
     let in_use = checked_out_branches(&worktrees);
     let locals = branches(repository, BranchScope::Local)
         .context(messages.common().branch_list_read_failed())?;
     let candidates = available_branches(&locals, &in_use);
     if candidates.is_empty() {
+        // 行き止まりのエラーを残さない。`-b` を付ければ先へ進めることを案内する。
+        // **候補ゼロを検出して暗黙に `-b` の動作へ倒すことはしない**
+        //（名前を受け取る手段が無く、暗黙のフォールバック禁止にも反する）
         bail!(messages.worktree().no_available_branch());
     }
 
@@ -162,7 +189,13 @@ fn add(
         .iter()
         .map(|branch| to_branch_item(language, branch))
         .collect();
-    let selected = select_one(items)?;
+    // `-b` の有無で選ばせる対象が入れ替わるため、候補行だけでは区別が付かない。
+    // 何を選ぶのか・Enter で何が起きるのかをヘッダーで示す
+    let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
+        messages.worktree().add_header_subject(),
+        messages.worktree().add_header_outcome(),
+    ));
+    let selected = select_one_with(items, &options)?;
 
     // ブランチ名は `--` の後ろに置いてもパスと区別できない位置に来るため、
     // 選択結果が候補一覧に含まれることを確かめてから引数に渡す（design.md セキュリティ設計）
@@ -171,11 +204,54 @@ fn add(
         .find(|candidate| candidate.name == selected)
         .ok_or_else(|| anyhow!(messages.worktree().branch_selection_not_found(&selected)))?;
 
-    let arguments = add_args(path, &branch.name);
-    let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(language, &arguments).with_context(|| messages.worktree().creation_failed(path))?;
+    Ok(add_args(path, &branch.name))
+}
 
-    finish_creation(messages, repository, path, install, PathReport::Needed)
+/// 新しいブランチの作成元を選んで `git worktree add -b` の引数を組み立てる（FR-31）。
+///
+/// 候補の生成と表示は `gz branch create` と**実装ごと共有する**
+/// （[`branch_manage::base_candidates`] / [`branch_manage::to_base_item`]）。
+/// 同じ規則を 2 か所へ書くと、片方だけ直したときに挙動だけがずれるためである。
+fn new_branch_args(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    path: &str,
+    new_branch: &str,
+) -> Result<Vec<String>> {
+    let all = branches(repository, BranchScope::All)
+        .context(messages.common().branch_list_read_failed())?;
+
+    // **finder を開く前に**衝突を弾く。選ばせたあとで「その名前は使えません」と
+    // 告げない（`gz pr --worktree` で確立した方針）。ブランチ一覧は作成元候補の
+    // 生成にも使うため、この検査に追加の git プロセスは要らない
+    if branch_manage::collides_with_local_branch(&all, new_branch) {
+        bail!(messages.worktree().branch_already_exists(new_branch));
+    }
+
+    let tags = tags(repository).context(messages.common().tag_list_read_failed())?;
+    let candidates = branch_manage::base_candidates(&all, &tags);
+    if candidates.is_empty() {
+        // 選ぶものが無い画面を出さない
+        bail!(messages.worktree().no_base_candidate());
+    }
+
+    let items = candidates
+        .iter()
+        .map(|candidate| branch_manage::to_base_item(language, candidate))
+        .collect();
+    let options = FinderOptions::new(SelectionMode::Single).with_header(selection_header(
+        messages.worktree().add_branch_header_subject(),
+        &messages.worktree().add_branch_header_outcome(new_branch),
+    ));
+    let selected = select_one_with(items, &options)?;
+
+    let base = candidates
+        .iter()
+        .find(|candidate| candidate.key == selected)
+        .ok_or_else(|| anyhow!(messages.branch_manage().base_selection_not_found(&selected)))?;
+
+    Ok(add_with_branch_args(path, new_branch, &base.revision))
 }
 
 /// worktree を作ったあとの後処理をまとめて行う。
@@ -724,6 +800,21 @@ fn add_args(path: &str, branch: &str) -> Vec<String> {
         .map(str::to_owned)
         .collect()
 }
+/// `git worktree add -b <name> -- <path> <start-point>` の引数を組み立てる（FR-31）。
+///
+/// **`-b` はオプションなので `--` より前に置く。**`<path>` と `<start-point>` はこの順の
+/// 位置引数である（man git-worktree の SYNOPSIS）。`<path>` の `--` による保護は
+/// [`add_args`] と同じく維持する。
+///
+/// **`-B` は使わない。**`-B` は既存ブランチを黙って作り直すため、
+/// 事前検査（[`branch_manage::collides_with_local_branch`]）を擦り抜けた場合の
+/// 最後の砦として git 自身に拒否させる。
+fn add_with_branch_args(path: &str, new_branch: &str, start_point: &str) -> Vec<String> {
+    ["worktree", "add", "-b", new_branch, "--", path, start_point]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
 
 /// `git worktree remove -- <path>` の引数を組み立てる。
 ///
@@ -999,6 +1090,59 @@ mod tests {
 
     fn in_use(names: &[&str]) -> HashSet<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn adding_with_a_new_branch_puts_the_flag_before_the_separator() {
+        // `-b` は**オプション**なので `--` より前に置く。`<path>` と `<start-point>` は
+        // この順の位置引数である（man git-worktree の SYNOPSIS）
+        let arguments = add_with_branch_args("/repos/wt", "feature/new", "main");
+
+        assert_eq!(
+            arguments,
+            [
+                "worktree",
+                "add",
+                "-b",
+                "feature/new",
+                "--",
+                "/repos/wt",
+                "main"
+            ]
+        );
+
+        let separator = arguments
+            .iter()
+            .position(|argument| argument == "--")
+            .expect("`--` が含まれること");
+        let flag = arguments
+            .iter()
+            .position(|argument| argument == "-b")
+            .expect("`-b` が含まれること");
+        assert!(flag < separator, "`-b` は `--` より前に来ること");
+    }
+
+    #[test]
+    fn adding_with_a_new_branch_never_uses_the_forcing_flag() {
+        // `-B` は既存ブランチを黙って作り直す。事前検査を擦り抜けた場合の最後の砦として
+        // git 自身に拒否させるため、強制の綴りは決して使わない
+        let arguments = add_with_branch_args("/repos/wt", "feature", "main");
+
+        assert!(
+            !arguments.iter().any(|argument| argument == "-B"),
+            "既存ブランチを作り直す `-B` を使ってはならない: {arguments:?}"
+        );
+    }
+
+    #[test]
+    fn adding_with_a_new_branch_passes_the_resolved_start_point() {
+        // タグを選んだ場合、`revision` は解決済みのオブジェクト ID である
+        let arguments = add_with_branch_args("/repos/wt", "from-tag", "0123456789abcdef");
+
+        assert_eq!(
+            arguments.last().map(String::as_str),
+            Some("0123456789abcdef")
+        );
     }
 
     #[test]

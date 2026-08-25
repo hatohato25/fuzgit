@@ -88,10 +88,62 @@ pub(crate) fn aligned_candidates<T>(
     candidates: &[T],
     cells: impl Fn(&T) -> Vec<String>,
 ) -> Vec<(&T, String)> {
-    let rows: Vec<Vec<String>> = candidates.iter().map(cells).collect();
+    aligned_candidates_with_columns(candidates, cells)
+        .into_iter()
+        .map(|(candidate, line, _columns)| (candidate, line))
+        .collect()
+}
 
+/// [`aligned_candidates`] に加えて、**整形後の行における列ごとのバイト範囲**を返す。
+///
+/// 途中の列に色を付けるために要る。列の幅は候補一覧全体で決まるため、候補 1 件だけからは
+/// 位置を求められない。かといって呼び出し側が整形後の文字列を走査して復元すると、
+/// 空白を含む列（`[draft]` の桁を合わせる空白など）で境界を見失う。
+///
+/// **位置を決めているのはこのモジュールの整形処理であるため、位置を求める術もここに置く**
+/// （[`last_column_range`] と同じ判断）。呼び出し側が独自に計算すると、整形の仕様が
+/// 変わったときに**コンパイルもテストも通ったまま範囲だけが静かにずれる**。
+///
+/// 返る範囲は**埋める前の内容が占める部分だけ**であり、桁を合わせる空白は含まない
+/// （色を空白へ伸ばすと、行末や列間に意味の無い着色が残る）。
+/// 空の列は空の範囲（`start == end`）になる。
+pub(crate) fn aligned_candidates_with_columns<T>(
+    candidates: &[T],
+    cells: impl Fn(&T) -> Vec<String>,
+) -> Vec<(&T, String, Vec<std::ops::Range<usize>>)> {
+    let rows: Vec<Vec<String>> = candidates.iter().map(cells).collect();
+    let widths = column_widths(&rows);
+
+    // 行の組み立ては [`align_columns`] へ委ねる。ここで別に組み立てると、
+    // 色を付ける側と一覧に出る側で行が食い違い得る。
     // `align_columns` は行数を変えないため、対応関係は候補の並びのまま保たれる
-    candidates.iter().zip(align_columns(&rows)).collect()
+    candidates
+        .iter()
+        .zip(align_columns(&rows))
+        .zip(rows.iter())
+        .map(|((candidate, line), row)| (candidate, line, column_ranges(row, &widths)))
+        .collect()
+}
+
+/// [`join_row`] が組み立てる行における、列ごとのバイト範囲を求める。
+///
+/// [`join_row`] と**同じ規則を辿る**ことで位置を出す（埋めてから区切りを足し、最終列は
+/// 埋めない）。両者が食い違えば範囲がずれるため、変更するときは必ず対で直すこと。
+fn column_ranges(row: &[String], widths: &[usize]) -> Vec<std::ops::Range<usize>> {
+    let Some((last, leading)) = row.split_last() else {
+        return Vec::new();
+    };
+
+    let mut ranges = Vec::with_capacity(row.len());
+    let mut offset = 0;
+    for (cell, width) in leading.iter().zip(widths) {
+        ranges.push(offset..offset + cell.len());
+        // 埋めた結果の長さで進める（内容そのものの長さではない）
+        offset += pad(cell, *width).len() + COLUMN_SEPARATOR.len();
+    }
+    ranges.push(offset..offset + last.len());
+
+    ranges
 }
 
 /// 行ごとの列を、列ごとの最大表示幅に合わせて空白で埋めながら連結する。

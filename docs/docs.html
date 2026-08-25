@@ -648,19 +648,22 @@ cargo install --path .</code></pre>
               Every piece of text fuzgit produces &mdash; messages, errors,
               finder headers, confirmation prompts and <code>--help</code>
               &mdash; is available in <strong>English and Japanese</strong>.
-              <strong>English is the default.</strong> To use Japanese:
+              The language is detected from your locale, and
+              <strong>falls back to English</strong> whenever the locale is not
+              Japanese or cannot be interpreted. To pin it explicitly:
             </p>
-            <pre><code>git config --global fuzgit.lang ja   # persistent (--local sets it per repository)
+            <pre><code>git config --global fuzgit.lang ja   # persistent (--local sets it per repository; `en` pins English)
 gz --lang ja branch                  # one-off, accepted by every subcommand</code></pre>
           </div>
           <div lang="ja">
             <p>
               fuzgit が表示するすべての文言（メッセージ・エラー・finder のヘッダー・
               確認プロンプト・<code>--help</code>）が<strong>日本語と英語</strong>に
-              対応しています。<strong>既定は英語</strong>です。日本語にするには次のように
-              指定します。
+              対応しています。表示言語は<strong>ロケールから自動的に決まり</strong>、
+              日本語ロケールでない場合や解釈できない場合は<strong>英語</strong>に
+              なります。明示的に固定するには次のように指定します。
             </p>
-            <pre><code>git config --global fuzgit.lang ja   # 永続設定（--local ならリポジトリごと）
+            <pre><code>git config --global fuzgit.lang ja   # 永続設定（--local ならリポジトリごと。`en` なら英語に固定）
 gz --lang ja branch                  # 単発の上書き。全サブコマンドで指定できる</code></pre>
           </div>
 
@@ -3265,6 +3268,7 @@ fast-forward できなかったブランチは、そのブランチへ切り替�
             <pre><code>gz worktree                  # pick from the list and print the path to stdout
 cd "$(gz worktree)"          # shell integration (move to the picked worktree)
 gz worktree add &lt;name&gt;       # pick a branch and create a new worktree next to the repository
+gz worktree add -b &lt;branch&gt; &lt;name&gt;   # create a new branch for it, picking its starting point
 gz worktree remove           # pick a worktree and remove it (with confirmation)
 gz worktree prune            # tidy up bookkeeping for worktrees whose directory is gone (with confirmation)</code></pre>
 
@@ -3292,6 +3296,7 @@ gz worktree prune            # tidy up bookkeeping for worktrees whose directory
                 <thead><tr><th scope="col">Argument</th><th scope="col">Description</th></tr></thead>
                 <tbody>
                   <tr><td><code>&lt;NAME&gt;</code></td><td>Name of the worktree to create (required positional argument). A <strong>name</strong>, not a path &mdash; separators are refused</td></tr>
+                  <tr><td><code>-b &lt;BRANCH&gt;</code></td><td>Create a new branch with this name and put <em>that</em> in the worktree. <strong>No long spelling</strong> &mdash; <code>git worktree add -b</code> has none either</td></tr>
                 </tbody>
               </table>
             </div>
@@ -3330,6 +3335,50 @@ gz worktree prune            # tidy up bookkeeping for worktrees whose directory
               </p>
             </div>
 
+            <h3><code>-b &lt;branch&gt;</code> &mdash; when there is no branch left to pick</h3>
+            <p>
+              With one local branch (<code>main</code>) checked out by the main
+              worktree, the candidate list is <strong>empty</strong> and
+              <code>gz worktree add</code> is a dead end. <code>-b</code> is the
+              way out: it creates a new branch and puts that in the worktree.
+            </p>
+            <div class="note info">
+              <span class="note-label">-b changes what you pick</span>
+              <p>
+                Without <code>-b</code> you pick <strong>an existing local
+                branch</strong>. With it you pick <strong>the starting point</strong>
+                of the new branch &mdash; local branches, remote-tracking
+                branches and tags, exactly the candidates
+                <a href="#branch"><code>gz branch create</code></a> offers. The
+                finder header says which one you are looking at, because the rows
+                alone do not tell you.
+              </p>
+            </div>
+            <ul>
+              <li>
+                <strong>The starting point is not fixed to HEAD.</strong> Cutting
+                a work branch from <code>main</code> is the common case, but the
+                main worktree is often on something else &mdash; HEAD would give
+                you the wrong parent. <code>main</code> / <code>master</code> are
+                sorted first, so Enter alone usually lands where you meant.
+              </li>
+              <li>
+                <strong>A name already taken by a local branch stops the command
+                before the finder opens</strong>, and says that dropping
+                <code>-b</code> would put that branch in the worktree instead.
+              </li>
+              <li>
+                The upstream is left to git&rsquo;s own default: it is set only
+                when the starting point is a remote-tracking branch, matching
+                what <code>gz branch create</code> produces.
+              </li>
+              <li>
+                <code>-b</code> and <code>--no-install</code> are
+                <strong>independent</strong>. The dependency install and the
+                <code>.claude/</code> copy run for <code>-b</code> too.
+              </li>
+            </ul>
+
             <h3><code>gz worktree remove</code></h3>
             <ul>
               <li>Candidates are linked worktrees only &mdash; <strong>the main worktree is not offered</strong> (git does not allow removing it).</li>
@@ -3355,6 +3404,7 @@ gz worktree prune            # tidy up bookkeeping for worktrees whose directory
             <pre><code>gz worktree                  # 一覧から選んでパスを標準出力へ出す
 cd "$(gz worktree)"          # シェル連携（選んだ worktree へ移動する）
 gz worktree add &lt;name&gt;       # ブランチを選び、リポジトリの兄弟として worktree を作る
+gz worktree add -b &lt;branch&gt; &lt;name&gt;   # 新しいブランチを作って入れる（作成元を選ぶ）
 gz worktree remove           # worktree を選んで削除する（確認あり）
 gz worktree prune            # 実体を失った worktree の管理情報を整理する（確認あり）</code></pre>
 
@@ -3380,6 +3430,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 <thead><tr><th scope="col">引数</th><th scope="col">説明</th></tr></thead>
                 <tbody>
                   <tr><td><code>&lt;NAME&gt;</code></td><td>作成する worktree の名前（必須の位置引数）。パスではなく<strong>名前</strong>で、区切り文字は受け付けない</td></tr>
+                  <tr><td><code>-b &lt;BRANCH&gt;</code></td><td>この名前で新しいブランチを作り、<em>それ</em>を worktree に入れる。<strong>長綴りは無い</strong>（<code>git worktree add -b</code> にも無いため）</td></tr>
                 </tbody>
               </table>
             </div>
@@ -3422,6 +3473,45 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 成功しているため）。リンクではなく複写なので、両者は独立して変化します。
               </p>
             </div>
+
+            <h3><code>-b &lt;branch&gt;</code> &mdash; 選べるブランチが無いとき</h3>
+            <p>
+              ローカルブランチが <code>main</code> 1 本で、それを本体が使用中——という
+              ごく普通の状態では候補が<strong>ゼロ</strong>になり、<code>gz worktree add</code>
+              はそこで行き止まりになります。<code>-b</code> はその抜け道で、新しいブランチを
+              作ってそれを worktree に入れます。
+            </p>
+            <div class="note info">
+              <span class="note-label">-b は「選ぶもの」を変えます</span>
+              <p>
+                <code>-b</code> 無しで選ぶのは<strong>既存のローカルブランチ</strong>、
+                有りで選ぶのは新しいブランチの<strong>作成元</strong>です（ローカル・
+                リモート追跡ブランチ・タグ。<a href="#branch"><code>gz branch create</code></a>
+                とまったく同じ候補）。候補行だけでは区別が付かないため、どちらを見ているかは
+                finder のヘッダーが示します。
+              </p>
+            </div>
+            <ul>
+              <li>
+                <strong>作成元は HEAD 固定ではありません。</strong><code>main</code> から
+                作業ブランチを切るのが典型ですが、本体が別のブランチをチェックアウト中である
+                ことは珍しくなく、HEAD 固定では望まない親から切ってしまいます。
+                <code>main</code> / <code>master</code> を先頭へ寄せているため、
+                多くの場合は Enter 1 回で意図した作成元になります。
+              </li>
+              <li>
+                <strong>既存のローカルブランチと同名の場合は、finder を開く前に停止します。</strong>
+                <code>-b</code> を外せばそのブランチを worktree に入れられることも案内します。
+              </li>
+              <li>
+                upstream は git の既定に委ねます。作成元がリモート追跡ブランチのときだけ
+                設定され、<code>gz branch create</code> の結果と一致します。
+              </li>
+              <li>
+                <code>-b</code> と <code>--no-install</code> は<strong>独立</strong>です。
+                依存インストールと <code>.claude/</code> の複写は <code>-b</code> でも走ります。
+              </li>
+            </ul>
 
             <h3><code>gz worktree remove</code></h3>
             <ul>
@@ -3487,9 +3577,13 @@ gz pr --worktree review-142 --no-install   # …without installing dependencies<
               <li>
                 Candidates are the <strong>open</strong> pull requests of the
                 current repository. A line is
-                <code>#&lt;number&gt;  &lt;head branch&gt;  &lt;author&gt;  &lt;title&gt;</code>,
-                with a <code>[draft]</code> marker in its own column so the
-                columns stay aligned whether or not a pull request is a draft.
+                <code>#&lt;number&gt;  &lt;author&gt;  &lt;title&gt;</code>, with a
+                <code>[draft]</code> marker in its own column so the columns stay
+                aligned whether or not a pull request is a draft.
+                <strong>The head branch name is deliberately not on the
+                line</strong> &mdash; it is often long enough to push the title
+                off the screen, and the title is what you scan. It appears at the
+                right edge of the preview&rsquo;s summary instead.
               </li>
               <li>
                 On confirmation it runs <code>gh pr checkout &lt;number&gt;</code>.
@@ -3609,8 +3703,11 @@ gz pr --worktree review-142 --no-install   # …依存インストールは行�
             <ul>
               <li>
                 候補は現在のリポジトリの <strong>open</strong> な PR です。候補行は
-                <code>#&lt;番号&gt;  &lt;head ブランチ&gt;  &lt;作者&gt;  &lt;タイトル&gt;</code> で、
+                <code>#&lt;番号&gt;  &lt;作者&gt;  &lt;タイトル&gt;</code> で、
                 <code>[draft]</code> の印は独立した列に置くため、draft の有無で桁がずれません。
+                <strong>head ブランチ名は意図的に載せていません</strong> &mdash;
+                長くなりがちでタイトルを画面外へ押し出してしまう一方、目で追うのは
+                タイトルだからです。ブランチ名はプレビュー枠の右端に出ます。
               </li>
               <li>
                 決定すると <code>gh pr checkout &lt;番号&gt;</code> を実行します。得られるのは
