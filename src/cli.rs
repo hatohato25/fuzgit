@@ -248,6 +248,10 @@ pub enum Command {
     // 「結果の置き場所の指定」であり、同時に指定されると checkout 以外を選んだときの
     // 意味が決まらないため。
     Pr {
+        /// Maximum number of pull requests to list
+        #[arg(short = 'n', long, value_name = "N")]
+        limit: Option<usize>,
+
         /// Also fetch the review decision and the CI status (noticeably slower)
         //
         // 既定で取らないのは実測に基づく。`reviewDecision` は +1.45 秒、
