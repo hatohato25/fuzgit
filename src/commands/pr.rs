@@ -74,6 +74,8 @@ const JQ_BASE: &str = r#"(.number|tostring), .headRefName, .baseRefName, (.autho
 const JQ_CHECKS: &str = r#"(.reviewDecision // ""), ([.statusCheckRollup[]? | select((.conclusion // "") as $c | $c=="SUCCESS" or $c=="SKIPPED" or $c=="NEUTRAL" or (.state=="SUCCESS"))] | length | tostring), ([.statusCheckRollup[]? | select((.conclusion // "") as $c | $c=="FAILURE" or $c=="TIMED_OUT" or $c=="CANCELLED" or $c=="ACTION_REQUIRED" or $c=="STARTUP_FAILURE" or (.state=="FAILURE") or (.state=="ERROR"))] | length | tostring), ([.statusCheckRollup[]? | select(((.status // "") != "COMPLETED" and (.state // "") == "") or (.state=="PENDING"))] | length | tostring)"#;
 
 /// `--checks` で取得する CI の集計。
+///
+/// TODO: 同一実行の中で `--action` から再度参照する場合に取り直さない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Checks {
     /// 成功（SKIPPED / NEUTRAL を含む）した件数。
