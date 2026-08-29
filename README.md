@@ -4,6 +4,8 @@
 
 A git CLI built around picking, searching, and tracing with a fuzzy finder.
 
+![demo](https://github.com/hatohato25/fuzgit/releases/download/v0.9.0/t-rec_1.gif)
+
 Even when you don't remember the exact branch name or commit hash, you can complete everyday git
 operations just by filtering and selecting. Every subcommand follows the same model:
 **collect candidates → filter and select in a fuzzy finder (with preview) → run the git operation**.
@@ -179,6 +181,8 @@ message instead of by number. The preview is `git stash show -p --color=always`,
 confirmation (`[y/N]`) before running. `gz stash push` supports multi-select with `Tab`, and stashes
 **only the files you picked** (unselected changes stay in the working tree).
 
+![demo](https://github.com/hatohato25/fuzgit/releases/download/v0.9.0/t-rec_3.gif)
+
 ### Pick many, run once
 
 **[`gz fetch -s`](https://hatohato25.github.io/fuzgit/docs.html#fetch) — fetch neighboring repositories too**
@@ -196,6 +200,8 @@ The current repository is preselected. Tab: toggle the selection / Enter: fetch 
    alpha  origin/main
    zulu   origin/main
 ```
+
+![demo](https://github.com/hatohato25/fuzgit/releases/download/v0.9.0/t-rec_2.gif)
 
 The selected repositories are fetched **in parallel** — the wait is network round trips, and the
 targets are separate repositories. Four run at a time by default; `git config fuzgit.fetchJobs <n>`
