@@ -4,7 +4,7 @@
 
 fuzzy finder で「選ぶ」「探す」「辿る」ことを軸にした git 操作 CLI ツールです。
 
-![demo](https://github.com/hatohato25/fuzgit/releases/download/v0.9.0/t-rec_1.gif)
+![demo](https://github.com/hatohato25/fuzgit/releases/download/v0.9.0/t-rec_2.gif)
 
 ブランチ名やコミットハッシュを正確に覚えていなくても、絞り込みと選択だけで日常的な git 操作を
 完結できることを目指しています。すべてのサブコマンドが
@@ -200,7 +200,7 @@ $ gz fetch --siblings
    zulu   origin/main
 ```
 
-![demo](https://github.com/hatohato25/fuzgit/releases/download/v0.9.0/t-rec_2.gif)
+![demo](https://github.com/hatohato25/fuzgit/releases/download/v0.9.0/t-rec_1.gif)
 
 選んだリポジトリは**並列に**取得します。待ちの実体がネットワークの往復であり、対象が互いに独立した
 別リポジトリだからです。同時実行数は既定 4 で、`git config fuzgit.fetchJobs <n>` で変更できます

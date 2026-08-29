@@ -4,7 +4,7 @@
 
 A git CLI built around picking, searching, and tracing with a fuzzy finder.
 
-![demo](https://github.com/hatohato25/fuzgit/releases/download/v0.9.0/t-rec_1.gif)
+![demo](https://github.com/hatohato25/fuzgit/releases/download/v0.9.0/t-rec_2.gif)
 
 Even when you don't remember the exact branch name or commit hash, you can complete everyday git
 operations just by filtering and selecting. Every subcommand follows the same model:
@@ -201,7 +201,7 @@ The current repository is preselected. Tab: toggle the selection / Enter: fetch 
    zulu   origin/main
 ```
 
-![demo](https://github.com/hatohato25/fuzgit/releases/download/v0.9.0/t-rec_2.gif)
+![demo](https://github.com/hatohato25/fuzgit/releases/download/v0.9.0/t-rec_1.gif)
 
 The selected repositories are fetched **in parallel** — the wait is network round trips, and the
 targets are separate repositories. Four run at a time by default; `git config fuzgit.fetchJobs <n>`
