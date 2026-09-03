@@ -14,7 +14,7 @@ use crate::commands::merge::MergeMode;
 use crate::commands::pull::PullMode;
 use crate::commands::restore::RestoreTarget;
 use crate::commands::revert::MessageEditing;
-use crate::commands::stash::{StashAction, UntrackedFiles};
+use crate::commands::stash::StashAction;
 use crate::error;
 use crate::finder::{Highlight, HighlightColor};
 use crate::git::read::{BranchScope, CommitInfo, CommitScope};
@@ -367,22 +367,8 @@ pub fn dispatch(
         }
         Command::Add => add::run(language, messages, &repository),
         Command::Stash { command } => match command {
-            StashCommand::Push {
-                message,
-                include_untracked,
-            } => {
-                let untracked = if *include_untracked {
-                    UntrackedFiles::Include
-                } else {
-                    UntrackedFiles::Exclude
-                };
-                stash::push(
-                    language,
-                    messages,
-                    &repository,
-                    message.as_deref(),
-                    untracked,
-                )
+            StashCommand::Push { message } => {
+                stash::push(language, messages, &repository, message.as_deref())
             }
             StashCommand::Apply => stash::run(language, messages, &repository, StashAction::Apply),
             StashCommand::Pop => stash::run(language, messages, &repository, StashAction::Pop),

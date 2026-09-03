@@ -181,6 +181,10 @@ message instead of by number. The preview is `git stash show -p --color=always`,
 confirmation (`[y/N]`) before running. `gz stash push` supports multi-select with `Tab`, and stashes
 **only the files you picked** (unselected changes stay in the working tree).
 
+**A file you just created is on that list too.** Plain `git stash push` needs `-u` for untracked
+files, but here you are picking them one by one, so there is nothing for a flag to decide: fuzgit
+adds `--include-untracked` when your selection contains one. No `git add` first.
+
 ![demo](https://github.com/hatohato25/fuzgit/releases/download/v0.9.0/t-rec_3.gif)
 
 ### Pick many, run once

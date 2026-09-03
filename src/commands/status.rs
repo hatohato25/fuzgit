@@ -9,7 +9,6 @@ use anyhow::{Context as _, Result, anyhow};
 
 use crate::commands::file_selection::{FileCandidate, RenameOrigin, resolve_changes};
 use crate::commands::restore::RestoreTarget;
-use crate::commands::stash::UntrackedFiles;
 use crate::commands::{HEADER_SEPARATOR, add, commit, restore, stash, status_preview_args};
 use crate::error::Error;
 use crate::finder::{
@@ -406,28 +405,11 @@ fn run_action(
         MenuAction::Restore => {
             restore::run_on_changes(language, messages, RestoreTarget::Worktree, selected)
         }
-        MenuAction::StashPush => stash::push_on_changes(
-            language,
-            messages,
-            None,
-            untracked_files(selected),
-            selected,
-        ),
+        // `-u` を付けるかは `stash::push_on_changes` が選択の中身から決める
+        MenuAction::StashPush => stash::push_on_changes(language, messages, None, selected),
         // メッセージの入力は `gz commit` と同じくエディタ（git）に委ねる
         MenuAction::Commit => commit::run_on_changes(language, messages, None, selected),
         MenuAction::PrintPaths => print_paths(messages, &mut std::io::stdout(), selected),
-    }
-}
-
-/// 選択に未追跡ファイルが含まれるかどうかから `git stash push` の対象範囲を決める。
-///
-/// 未追跡ファイルは `--include-untracked` を付けないと退避できず、pathspec に含めた場合は
-/// git が「did not match any file(s) known to git」で失敗する。
-fn untracked_files(selected: &[&FileChange]) -> UntrackedFiles {
-    if selected.iter().any(|change| change.is_untracked()) {
-        UntrackedFiles::Include
-    } else {
-        UntrackedFiles::Exclude
     }
 }
 
@@ -805,27 +787,6 @@ mod tests {
                 MenuAction::Add
             );
         }
-    }
-
-    #[test]
-    fn a_selection_with_an_untracked_file_stashes_untracked_files_too() {
-        let changes = [change("a.txt", " M"), change("new.txt", "??")];
-
-        assert_eq!(
-            untracked_files(&selected(&changes)),
-            UntrackedFiles::Include,
-            "an untracked path cannot be stashed without the option"
-        );
-    }
-
-    #[test]
-    fn a_selection_of_tracked_files_stashes_them_as_they_are() {
-        let changes = [change("a.txt", " M"), change("b.txt", "M ")];
-
-        assert_eq!(
-            untracked_files(&selected(&changes)),
-            UntrackedFiles::Exclude
-        );
     }
 
     #[test]

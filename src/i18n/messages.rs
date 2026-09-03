@@ -331,9 +331,6 @@ pub trait CliMessages: Sync + std::fmt::Debug {
     /// `gz stash push --message` の説明。
     fn stash_push_message_help(&self) -> &'static str;
 
-    /// `gz stash push --include-untracked` の説明。
-    fn stash_push_include_untracked_help(&self) -> &'static str;
-
     /// `gz stash apply` の説明。
     fn stash_apply_about(&self) -> &'static str;
 

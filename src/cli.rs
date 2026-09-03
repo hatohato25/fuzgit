@@ -368,10 +368,6 @@ pub enum StashCommand {
         /// Message to attach to the stash
         #[arg(short, long, value_name = "MESSAGE")]
         message: Option<String>,
-
-        /// Include untracked files in the candidates (tracked changes only by default)
-        #[arg(short = 'u', long)]
-        include_untracked: bool,
     },
 
     /// Pick a stash and apply it (the stash is kept)
@@ -553,9 +549,6 @@ fn localize_stash(command: ClapCommand, cli: &dyn CliMessages) -> ClapCommand {
                 .mut_arg("message", |argument| {
                     argument.help(cli.stash_push_message_help())
                 })
-                .mut_arg("include_untracked", |argument| {
-                    argument.help(cli.stash_push_include_untracked_help())
-                })
         })
         .mut_subcommand("apply", |apply| apply.about(cli.stash_apply_about()))
         .mut_subcommand("pop", |pop| pop.about(cli.stash_pop_about()))
@@ -664,7 +657,7 @@ mod tests {
         for argv in [
             vec!["gz", "branch", "--all"],
             vec!["gz", "log", "--limit", "5"],
-            vec!["gz", "stash", "push", "-m", "作業中", "-u"],
+            vec!["gz", "stash", "push", "-m", "作業中"],
             vec!["gz", "worktree", "add", "../feature"],
             vec!["gz", "--lang", "en", "diff", "--staged"],
         ] {
@@ -723,44 +716,41 @@ mod tests {
     }
 
     #[test]
-    fn stash_push_takes_a_message_and_the_untracked_flag() {
-        let cli = Cli::try_parse_from(["gz", "stash", "push", "-m", "作業中", "-u"])
+    fn stash_push_takes_only_a_message() {
+        let cli = Cli::try_parse_from(["gz", "stash", "push", "-m", "作業中"])
             .expect("stash push should parse");
 
         match cli.command {
             Command::Stash {
-                command:
-                    StashCommand::Push {
-                        message,
-                        include_untracked,
-                    },
-            } => {
-                assert_eq!(message.as_deref(), Some("作業中"));
-                assert!(include_untracked);
-            }
+                command: StashCommand::Push { message },
+            } => assert_eq!(message.as_deref(), Some("作業中")),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }
 
     #[test]
-    fn stash_push_defaults_to_tracked_changes_without_a_message() {
+    fn stash_push_no_longer_takes_the_untracked_flag() {
+        // 未追跡ファイルは常に候補へ出すため、フラグで切り替える意味が無くなった。
+        // 受け付けたまま無視すると「付けたのに効かない」になるため、綴りごと廃止する
+        assert!(
+            Cli::try_parse_from(["gz", "stash", "push", "-u"]).is_err(),
+            "`-u` は受け付けない"
+        );
+        assert!(
+            Cli::try_parse_from(["gz", "stash", "push", "--include-untracked"]).is_err(),
+            "`--include-untracked` も受け付けない"
+        );
+    }
+
+    #[test]
+    fn stash_push_parses_without_a_message() {
         let cli =
             Cli::try_parse_from(["gz", "stash", "push"]).expect("stash push should parse bare");
 
         match cli.command {
             Command::Stash {
-                command:
-                    StashCommand::Push {
-                        message,
-                        include_untracked,
-                    },
-            } => {
-                assert_eq!(message, None);
-                assert!(
-                    !include_untracked,
-                    "untracked files must be opt-in: they cannot be stashed without `-u`"
-                );
-            }
+                command: StashCommand::Push { message },
+            } => assert_eq!(message, None),
             other => panic!("unexpected subcommand: {other:?}"),
         }
     }

@@ -826,7 +826,7 @@ fn stash_and_reflog_report_when_there_is_nothing_to_select() {
 
     for arguments in [
         vec!["stash", "push"],
-        vec!["stash", "push", "--include-untracked"],
+        vec!["stash", "push"],
         vec!["stash", "apply"],
         vec!["stash", "pop"],
         vec!["stash", "drop"],
@@ -1151,7 +1151,7 @@ fn every_stash_subcommand_has_its_own_help() {
 
 /// `gz stash push` のオプションがヘルプに載っていることを確認する。
 #[test]
-fn stash_push_documents_its_message_and_untracked_options() {
+fn stash_push_documents_its_message_option() {
     let output = gz()
         .args(["stash", "push", "--help"])
         .output()
@@ -1163,10 +1163,18 @@ fn stash_push_documents_its_message_and_untracked_options() {
     );
 
     let stdout = String::from_utf8(output.stdout).expect("help output should be utf-8");
-    for option in ["-m", "--message", "-u", "--include-untracked"] {
+    for option in ["-m", "--message"] {
         assert!(
             stdout.contains(option),
             "`{option}` should be documented:\n{stdout}"
+        );
+    }
+
+    // 未追跡ファイルは常に候補へ出るため、切り替えるフラグは持たない
+    for removed in ["-u,", "--include-untracked"] {
+        assert!(
+            !stdout.contains(removed),
+            "`{removed}` should be gone:\n{stdout}"
         );
     }
 }

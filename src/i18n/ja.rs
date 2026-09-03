@@ -1754,10 +1754,6 @@ impl CliMessages for JapaneseCliMessages {
         "stash に付けるメッセージ"
     }
 
-    fn stash_push_include_untracked_help(&self) -> &'static str {
-        "未追跡ファイルも候補に含める（既定は追跡済みの変更のみ）"
-    }
-
     fn stash_apply_about(&self) -> &'static str {
         "stash を選択して適用する（stash は残す）"
     }

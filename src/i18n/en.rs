@@ -1886,10 +1886,6 @@ impl CliMessages for EnglishCliMessages {
         "Message to attach to the stash"
     }
 
-    fn stash_push_include_untracked_help(&self) -> &'static str {
-        "Include untracked files in the candidates (tracked changes only by default)"
-    }
-
     fn stash_apply_about(&self) -> &'static str {
         "Pick a stash and apply it (the stash is kept)"
     }

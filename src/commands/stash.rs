@@ -71,7 +71,7 @@ impl StashAction {
 /// 候補の範囲と `git stash push` へ渡すオプションの両方がこれで決まる。真偽値を持ち回すと
 /// 片方だけ反映して「候補には出るが git 側が対象にできない」不整合を招くため、型で表す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UntrackedFiles {
+enum UntrackedFiles {
     /// 追跡済みファイルの変更のみを対象にする（既定）。
     Exclude,
     /// 未追跡ファイルも対象に含める（`-u` / `--include-untracked`）。
@@ -79,14 +79,6 @@ pub enum UntrackedFiles {
 }
 
 impl UntrackedFiles {
-    /// 候補として並べる変更の範囲。
-    fn change_scope(self) -> ChangeScope {
-        match self {
-            UntrackedFiles::Exclude => ChangeScope::Tracked,
-            UntrackedFiles::Include => ChangeScope::TrackedOrUntracked,
-        }
-    }
-
     /// `git stash push` に付けるオプション。
     fn option(self) -> Option<&'static str> {
         match self {
@@ -110,9 +102,12 @@ pub fn push(
     messages: &dyn Messages,
     repository: &gix::Repository,
     message: Option<&str>,
-    untracked: UntrackedFiles,
 ) -> Result<()> {
-    let changes = changes(repository, untracked.change_scope())
+    // **未追跡ファイルも必ず候補に載せる。**新しく作ったファイルを退避するために
+    // `git add` を求めるのは、「選ぶだけで済ませる」という fuzgit の前提に反する
+    // （`gz add` / `gz commit` / `gz status` はいずれも既定で未追跡を候補にしている）。
+    // git へ `-u` を付けるかどうかは、選択の中身から [`untracked_files`] が決める
+    let changes = changes(repository, ChangeScope::TrackedOrUntracked)
         .context(messages.common().changed_files_read_failed())?;
 
     let mut items = Vec::with_capacity(changes.len());
@@ -124,7 +119,7 @@ pub fn push(
     let selected = select_many(items)?;
     let selected = resolve_changes(messages, &changes, &selected)?;
 
-    push_on_changes(language, messages, message, untracked, &selected)
+    push_on_changes(language, messages, message, &selected)
 }
 
 /// 選択済みの変更ファイルを `git stash push` で退避する。
@@ -140,9 +135,9 @@ pub fn push_on_changes(
     language: Language,
     messages: &dyn Messages,
     message: Option<&str>,
-    untracked: UntrackedFiles,
     selected: &[&FileChange],
 ) -> Result<()> {
+    let untracked = untracked_files(selected);
     let candidates: Vec<FileCandidate> =
         selected.iter().map(|change| to_candidate(change)).collect();
     let paths = target_paths(&candidates.iter().collect::<Vec<&FileCandidate>>());
@@ -213,6 +208,22 @@ pub fn run(
 /// `git stash push [--message <message>] [--include-untracked] -- <pathspec>...` の引数を組み立てる。
 ///
 /// パスは必ず `--` の後ろへ置き、オプションとして解釈される余地を排除する。
+/// 選択に未追跡ファイルが含まれるかどうかから、git へ `-u` を付けるかを決める。
+///
+/// 未追跡ファイルは `--include-untracked` を付けないと退避できず、pathspec に含めた場合は
+/// git が「did not match any file(s) known to git」で失敗する（実測確認済み）。
+///
+/// 逆に、選択が追跡済みだけのときに `-u` を付けても**他の未追跡ファイルを巻き込むことは無い**
+/// （pathspec が対象を限るため。実測確認済み）。それでも選択から導くのは、実行する
+/// コマンドと選んだ内容を一致させ、デバッグログを読んだときに食い違わせないためである。
+fn untracked_files(selected: &[&FileChange]) -> UntrackedFiles {
+    if selected.iter().any(|change| change.is_untracked()) {
+        UntrackedFiles::Include
+    } else {
+        UntrackedFiles::Exclude
+    }
+}
+
 fn push_args(message: Option<&str>, untracked: UntrackedFiles, paths: &[String]) -> Vec<String> {
     let mut args = vec!["stash".to_owned(), "push".to_owned()];
     if let Some(message) = message {
@@ -388,6 +399,31 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_with_an_untracked_file_adds_the_option() {
+        // 未追跡ファイルは `-u` を付けないと退避できず、pathspec に含めると
+        // git が「did not match any file(s) known to git」で失敗する（実測確認済み）
+        let changes = [change("a.txt", " M"), change("new.txt", "??")];
+        let selected: Vec<&FileChange> = changes.iter().collect();
+
+        assert_eq!(untracked_files(&selected), UntrackedFiles::Include);
+    }
+
+    #[test]
+    fn a_selection_of_tracked_files_leaves_the_option_off() {
+        // 付けても他の未追跡ファイルを巻き込むことは無いが、実行するコマンドと
+        // 選んだ内容を一致させるため、選択に無ければ付けない
+        let changes = [change("a.txt", " M"), change("b.txt", "M ")];
+        let selected: Vec<&FileChange> = changes.iter().collect();
+
+        assert_eq!(untracked_files(&selected), UntrackedFiles::Exclude);
+    }
+
+    #[test]
+    fn an_empty_selection_leaves_the_option_off() {
+        assert_eq!(untracked_files(&[]), UntrackedFiles::Exclude);
+    }
+
+    #[test]
     fn pushing_without_options_only_lists_the_paths() {
         assert_eq!(
             push_args(None, UntrackedFiles::Exclude, &paths(&["a.txt"])),
@@ -464,16 +500,11 @@ mod tests {
     }
 
     #[test]
-    fn the_candidate_scope_matches_the_option_passed_to_git() {
-        // 候補に未追跡ファイルを出しながら `--include-untracked` を渡さないと、
-        // git 側が対象にできず「pathspec did not match」で失敗する
-        assert_eq!(UntrackedFiles::Exclude.change_scope(), ChangeScope::Tracked);
+    fn the_option_follows_the_selection_not_a_flag() {
+        // 候補には常に未追跡ファイルを出す。git へ `--include-untracked` を渡すかは
+        // 選択の中身が決める——渡さずに未追跡を pathspec へ含めると、git が
+        // 「pathspec did not match」で失敗する（実測確認済み）
         assert_eq!(UntrackedFiles::Exclude.option(), None);
-
-        assert_eq!(
-            UntrackedFiles::Include.change_scope(),
-            ChangeScope::TrackedOrUntracked
-        );
         assert_eq!(
             UntrackedFiles::Include.option(),
             Some(INCLUDE_UNTRACKED_OPTION)
@@ -603,7 +634,10 @@ mod tests {
     }
 
     #[test]
-    fn a_staged_only_change_is_offered_as_a_candidate() {
+    fn the_candidates_always_include_untracked_files() {
+        // 新しく作ったファイルを退避するために `git add` を求めるのは、
+        // 「選ぶだけで済ませる」という fuzgit の前提に反する。`gz add` / `gz commit` /
+        // `gz status` と同じく、未追跡ファイルは既定で候補に出す
         let dir = TempDir::new("stash-push-candidates");
         init_repository(dir.path());
         write_file(dir.path(), "tracked.txt", "original\n");
@@ -614,25 +648,16 @@ mod tests {
         write_file(dir.path(), "untracked.txt", "new\n");
         let repository = discover(dir.path()).expect("test repository should be discoverable");
 
-        let tracked = changes(&repository, UntrackedFiles::Exclude.change_scope())
-            .expect("status should be read");
-        assert_eq!(
-            tracked
-                .iter()
-                .map(|change| change.path.as_str())
-                .collect::<Vec<_>>(),
-            ["tracked.txt"],
-            "a staged change is stashed too, an untracked file is not"
-        );
+        let candidates =
+            changes(&repository, ChangeScope::TrackedOrUntracked).expect("status should be read");
 
-        let with_untracked = changes(&repository, UntrackedFiles::Include.change_scope())
-            .expect("status should be read");
         assert_eq!(
-            with_untracked
+            candidates
                 .iter()
                 .map(|change| change.path.as_str())
                 .collect::<Vec<_>>(),
-            ["tracked.txt", "untracked.txt"]
+            ["tracked.txt", "untracked.txt"],
+            "ステージ済みの変更も未追跡ファイルも、どちらも候補に出る"
         );
     }
 }

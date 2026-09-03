@@ -1536,7 +1536,7 @@ gz stash drop                      # discard the picked stash (with confirmation
                 <thead><tr><th scope="col">Subcommand</th><th scope="col">Option</th><th scope="col">Description</th></tr></thead>
                 <tbody>
                   <tr><td><code>push</code></td><td><code>-m</code>, <code>--message &lt;MESSAGE&gt;</code></td><td>Message attached to the stash</td></tr>
-                  <tr><td><code>push</code></td><td><code>-u</code>, <code>--include-untracked</code></td><td>Also list untracked files (by default only tracked changes)</td></tr>
+
                   <tr><td><code>apply</code> / <code>pop</code> / <code>drop</code></td><td>(none)</td><td>Pick one entry from the stash list</td></tr>
                 </tbody>
               </table>
@@ -1547,6 +1547,8 @@ gz stash drop                      # discard the picked stash (with confirmation
                 <strong>only the files you picked</strong> are stashed (the rest
                 stay in the working tree). Staged changes are stashed too, so the
                 preview is the diff against HEAD (<code>git diff HEAD</code>).
+                <strong>Files you have just created are listed as well</strong>
+                &mdash; no <code>git add</code> first.
               </li>
               <li>
                 Candidates for <code>apply</code> / <code>pop</code> /
@@ -1582,7 +1584,7 @@ gz stash drop                      # 選んだ stash を破棄する（確認あ
                 <thead><tr><th scope="col">サブコマンド</th><th scope="col">オプション</th><th scope="col">説明</th></tr></thead>
                 <tbody>
                   <tr><td><code>push</code></td><td><code>-m</code>, <code>--message &lt;MESSAGE&gt;</code></td><td>stash に付けるメッセージ</td></tr>
-                  <tr><td><code>push</code></td><td><code>-u</code>, <code>--include-untracked</code></td><td>未追跡ファイルも候補に含める（既定は追跡済みの変更のみ）</td></tr>
+
                   <tr><td><code>apply</code> / <code>pop</code> / <code>drop</code></td><td>（なし）</td><td>stash 一覧から 1 件選ぶ</td></tr>
                 </tbody>
               </table>
@@ -1592,6 +1594,8 @@ gz stash drop                      # 選んだ stash を破棄する（確認あ
                 <code>push</code> は <kbd>Tab</kbd> で複数選択でき、<strong>選んだファイルだけ</strong>が
                 退避されます（選ばなかった変更は作業ツリーに残ります）。ステージ済みの変更も
                 退避対象になるため、プレビューは HEAD との差分（<code>git diff HEAD</code>）です。
+                <strong>作ったばかりのファイルも候補に並びます</strong>（先に
+                <code>git add</code> する必要はありません）。
               </li>
               <li>
                 <code>apply</code> / <code>pop</code> / <code>drop</code> の候補は
