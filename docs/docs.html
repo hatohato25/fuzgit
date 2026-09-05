@@ -168,8 +168,15 @@
                 prediction of <code>gz merge</code>.</strong> The prediction
                 needs <code>git merge-tree --write-tree</code>. On older git
                 <strong>the prediction is skipped and the merge still
-                runs</strong>; the confirmation prompt says so. Nothing else has
-                a minimum git version.
+                runs</strong>; the confirmation prompt says so.
+              </li>
+              <li>
+                <strong>Git 2.32 or newer &mdash; only for the
+                <code>gz stash</code> preview.</strong> It asks
+                <code>git stash show</code> for
+                <code>--include-untracked</code>. Older git shows an error in the
+                preview pane; picking and applying a stash still works. Anything
+                that satisfies the 2.38 above satisfies this too.
               </li>
               <li>
                 <strong>A stable Rust toolchain &mdash; only to build from
@@ -193,8 +200,13 @@
                 <strong>Git 2.38 以降 &mdash; <code>gz merge</code> のコンフリクト予測にのみ必要</strong><br />
                 予測には <code>git merge-tree --write-tree</code> を使います。それより古い git
                 では<strong>予測だけを省略し、merge はそのまま実行します</strong>
-                （省略した旨は確認プロンプトに表示されます）。これ以外に git の最低バージョン
-                要件はありません。
+                （省略した旨は確認プロンプトに表示されます）。
+              </li>
+              <li>
+                <strong>Git 2.32 以降 &mdash; <code>gz stash</code> のプレビューにのみ必要</strong><br />
+                <code>git stash show</code> に <code>--include-untracked</code> を渡すためです。
+                これより古い git ではプレビューにエラーが出ますが、stash の選択と適用は動きます。
+                上の 2.38 を満たしていれば、こちらも満たされます。
               </li>
               <li>
                 <strong>stable の Rust ツールチェイン &mdash; ソースからビルドする場合のみ</strong><br />
@@ -1553,8 +1565,11 @@ gz stash drop                      # discard the picked stash (with confirmation
               <li>
                 Candidates for <code>apply</code> / <code>pop</code> /
                 <code>drop</code> are <code>stash@{n}: &lt;message&gt;</code>, so
-                you can filter by message. The preview is
-                <code>git stash show -p --color=always</code>.
+                you can filter by message. The preview has two sections:
+                <code>files</code> (which paths the stash holds and how much each
+                changed) and <code>diff</code> underneath. Both ask git for
+                <code>--include-untracked</code>, so a stash made only of
+                brand-new files is not a blank pane.
               </li>
             </ul>
             <div class="note danger">
@@ -1600,7 +1615,10 @@ gz stash drop                      # 選んだ stash を破棄する（確認あ
               <li>
                 <code>apply</code> / <code>pop</code> / <code>drop</code> の候補は
                 <code>stash@{n}: &lt;メッセージ&gt;</code> で、メッセージで絞り込めます。
-                プレビューは <code>git stash show -p --color=always</code>。
+                プレビューは 2 段構成で、上に <code>files</code>（含まれるパスと変更量）、
+                下に <code>diff</code> が出ます。どちらも
+                <code>--include-untracked</code> 付きで取るため、新規ファイルだけを
+                退避した stash でも空にはなりません。
               </li>
             </ul>
             <div class="note danger">

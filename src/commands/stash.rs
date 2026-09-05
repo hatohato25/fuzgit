@@ -302,15 +302,53 @@ fn display_line(entry: &StashEntry) -> String {
     )
 }
 
+/// stash に含まれるファイルを見せるプレビューセクションの見出し。
+///
+/// `gz status` の `staged` / `unstaged` と同じく、git の語彙をそのまま使うため翻訳しない。
+const FILES_LABEL: &str = "files";
+
+/// stash の差分を見せるプレビューセクションの見出し。
+const DIFF_LABEL: &str = "diff";
+
+/// プレビューを組み立てる。
+///
+/// **2 つのセクションに分ける。**先頭に「何が入っているのか」（`--stat` によるファイル名と
+/// 変更量）を置き、その下に差分を置く。差分だけだと、ファイル数の多い stash で
+/// 「結局どれが入っているのか」を掴むのに画面を送ることになる（利用者からの要望）。
+///
+/// 出力が空になったセクションは見出しごと省かれる（[`PreviewSource::Composite`]）。
+fn stash_preview(entry: &StashEntry) -> PreviewSource {
+    PreviewSource::Composite(vec![
+        (
+            FILES_LABEL.to_owned(),
+            PreviewSource::Git(stash_show_args(entry, "--stat")),
+        ),
+        (
+            DIFF_LABEL.to_owned(),
+            PreviewSource::Git(stash_show_args(entry, "-p")),
+        ),
+    ])
+}
+
 /// プレビュー用の `git stash show` の引数を組み立てる。
-fn stash_preview_args(entry: &StashEntry) -> Vec<String> {
+///
+/// **`--include-untracked` を必ず付ける。**`git stash show` は既定で未追跡ファイルを
+/// 出さないため、未追跡だけを退避した stash（`gz stash push` は候補に未追跡を含む）では
+/// プレビューが**丸ごと空になる**（実測確認済み）。未追跡を含まない stash に付けても
+/// 出力は変わらない（同）。
+///
+/// このオプションは **Git 2.32 以降**でのみ使える（2.30 では失敗する。実測確認済み）。
+/// それ未満の git ではプレビューにエラーが出るが、stash の選択と適用そのものは動く。
+fn stash_show_args(entry: &StashEntry, format: &str) -> Vec<String> {
     [
-        "stash".to_owned(),
-        "show".to_owned(),
-        "-p".to_owned(),
-        "--color=always".to_owned(),
-        entry.selector(),
+        "stash",
+        "show",
+        format,
+        INCLUDE_UNTRACKED_OPTION,
+        "--color=always",
+        &entry.selector(),
     ]
+    .map(str::to_owned)
     .to_vec()
 }
 
@@ -319,7 +357,7 @@ fn to_stash_item(language: Language, entry: &StashEntry) -> FinderItem {
     FinderItem::new(
         display_line(entry),
         entry.selector(),
-        PreviewSource::Git(stash_preview_args(entry)),
+        stash_preview(entry),
         language.messages(),
     )
 }
@@ -384,10 +422,62 @@ mod tests {
     }
 
     #[test]
-    fn the_preview_shows_the_diff_of_that_stash() {
+    fn the_preview_shows_the_files_and_then_the_diff() {
+        // 差分だけだと、ファイル数の多い stash で「何が入っているのか」を掴むのに
+        // 画面を送ることになる。先に一覧を出す
+        let PreviewSource::Composite(sections) = stash_preview(&entry(1, "WIP on main: 5d21a8c"))
+        else {
+            panic!("プレビューは 2 つのセクションで構成する");
+        };
+
+        let labels: Vec<&str> = sections.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(labels, [FILES_LABEL, DIFF_LABEL]);
+    }
+
+    #[test]
+    fn the_preview_always_asks_for_untracked_files() {
+        // `git stash show` は既定で未追跡を出さない。`gz stash push` は未追跡も候補に
+        // 含めるため、これが無いと未追跡だけの stash でプレビューが丸ごと空になる
+        let PreviewSource::Composite(sections) = stash_preview(&entry(1, "WIP on main: 5d21a8c"))
+        else {
+            panic!("プレビューは 2 つのセクションで構成する");
+        };
+
+        for (label, source) in &sections {
+            let PreviewSource::Git(args) = source else {
+                panic!("{label} は git の実行であること");
+            };
+            assert!(
+                args.iter().any(|arg| arg == INCLUDE_UNTRACKED_OPTION),
+                "{label} に {INCLUDE_UNTRACKED_OPTION} が要る: {args:?}"
+            );
+            assert_eq!(args.last().map(String::as_str), Some("stash@{1}"));
+        }
+    }
+
+    #[test]
+    fn the_two_sections_ask_git_for_different_shapes() {
         assert_eq!(
-            stash_preview_args(&entry(1, "WIP on main: 5d21a8c first")),
-            ["stash", "show", "-p", "--color=always", "stash@{1}"]
+            stash_show_args(&entry(1, "x"), "--stat"),
+            [
+                "stash",
+                "show",
+                "--stat",
+                "--include-untracked",
+                "--color=always",
+                "stash@{1}"
+            ]
+        );
+        assert_eq!(
+            stash_show_args(&entry(1, "x"), "-p"),
+            [
+                "stash",
+                "show",
+                "-p",
+                "--include-untracked",
+                "--color=always",
+                "stash@{1}"
+            ]
         );
     }
 

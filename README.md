@@ -177,7 +177,9 @@ $ gz branch --all
 **[`gz stash`](https://hatohato25.github.io/fuzgit/docs.html#stash) — search stashes and restore them**
 
 Candidates for `apply` / `pop` / `drop` are shown as `stash@{n}: <message>`, so you can filter by
-message instead of by number. The preview is `git stash show -p --color=always`, and `drop` asks for
+message instead of by number. The preview opens with the files the stash holds and their change
+counts, then the full diff underneath — both asked for with `--include-untracked`, so a stash of
+brand-new files is not a blank pane. `drop` asks for
 confirmation (`[y/N]`) before running. `gz stash push` supports multi-select with `Tab`, and stashes
 **only the files you picked** (unselected changes stay in the working tree).
 
