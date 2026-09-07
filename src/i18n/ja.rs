@@ -1116,6 +1116,31 @@ impl WorktreeMessages for JapaneseWorktreeMessages {
         "整理する worktree はありません"
     }
 
+    /// キー名（`Tab` / `Enter`）は skim のキー表記であるため訳さない。
+    fn install_header(&self) -> &'static str {
+        "コマンドを叩いた位置を選択済みにしています。Tab: 選択の切替 / Enter: 依存をインストール"
+    }
+
+    fn install_unavailable_label(&self) -> &'static str {
+        "（実行できません）"
+    }
+
+    fn install_root_label(&self) -> &'static str {
+        "（worktree のルート）"
+    }
+
+    fn install_selection_not_found(&self, selected: &str) -> String {
+        format!("選択したディレクトリ `{selected}` が候補一覧にありません")
+    }
+
+    fn install_progress(&self, position: usize, total: usize, label: &str) -> String {
+        format!("[{position}/{total}] {label}")
+    }
+
+    fn install_no_target(&self) -> &'static str {
+        "lockfile が見つからなかったため、依存インストールは行いません"
+    }
+
     fn install_running(&self, directory: &Path, command: &str) -> String {
         format!(
             "{directory} で `{command}` を実行します",

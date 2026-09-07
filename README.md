@@ -317,7 +317,10 @@ the number, print the URL — the same shape as `gz log --action`.
 
 **`gz pr --worktree <name>` opens the pull request in its own worktree**, next to the
 repository root, and then does what `gz worktree add` does afterwards: copies your
-gitignored `.claude/` across and installs dependencies from the lockfile it finds. Reviewing
+gitignored `.claude/` across and installs dependencies from the lockfiles it finds. When there is
+more than one directory to install into, it lists them and you pick — the one you ran the command
+in starts selected, and a single-project repository skips the picker entirely. The search asks
+`git ls-files`, so `node_modules/` and `target/` never slow it down. Reviewing
 a pull request no longer disturbs the tree you are working in.
 
 ```sh

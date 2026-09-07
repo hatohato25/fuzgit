@@ -1032,6 +1032,27 @@ pub trait WorktreeMessages: Sync + std::fmt::Debug {
     /// `-b` 指定時に作成元の候補が 1 件も無い場合のエラー。
     fn no_base_candidate(&self) -> &'static str;
 
+    /// 依存インストールの対象を選ぶ finder のヘッダー。
+    fn install_header(&self) -> &'static str;
+
+    /// 実行できない候補の最終列に置く印。
+    ///
+    /// 一覧から消さない代わりに、列を空欄のままにしない（空欄では「何も要らない」のか
+    /// 「実行できない」のかが読み取れない）。理由は選んだあとに出す。
+    fn install_unavailable_label(&self) -> &'static str;
+
+    /// 候補一覧で worktree のルート自身を指す印。
+    fn install_root_label(&self) -> &'static str;
+
+    /// 選択結果が候補一覧に無い場合のエラー。
+    fn install_selection_not_found(&self, selected: &str) -> String;
+
+    /// 複数対象を実行するときの進捗（`[<n>/<全体>] <パス>`）。
+    fn install_progress(&self, position: usize, total: usize, label: &str) -> String;
+
+    /// 依存インストールの対象が 1 件も無いことを伝える。
+    fn install_no_target(&self) -> &'static str;
+
     /// 作成しようとした場所に worktree が既に登録されている場合のエラー。
     ///
     /// finder を開く前に停止するために使う（選ばせたあとに失敗させない）。

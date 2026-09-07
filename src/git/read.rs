@@ -1431,6 +1431,48 @@ fn parse_changed_files(output: &[u8]) -> Result<Vec<String>> {
         .collect()
 }
 
+/// 追跡ファイルのうち、`names` のいずれかの**ファイル名**を持つものを列挙する。
+///
+/// `gz worktree add` の依存インストールが lockfile を探すために使う（FR-30 改訂）。
+///
+/// # ファイルシステムを歩かない
+///
+/// 走査で探すと `target/` や `node_modules/` を踏んで秒単位に達する（実測 800ms）。
+/// `git ls-files` は**追跡ファイルしか返さない**ため、それらを踏まないことが
+/// オプションではなく**コマンドの選択で担保される**（`gz fetch --siblings` の
+/// プレビューから `git status` を外した判断と同型）。深さ制限も要らない。
+///
+/// 返るのは作業ツリールートからの相対パスであり、並びは git の出力順（辞書順）。
+///
+/// # Errors
+///
+/// `git ls-files` の実行に失敗した場合、出力が UTF-8 でない場合にエラーを返す。
+pub fn tracked_files_named(workdir: &Path, names: &[&str]) -> Result<Vec<String>> {
+    // `-z` で NUL 区切りにする。パスに改行を含み得るため（`--name-only` と同じ扱い）
+    let output = capture_git_in(workdir, &["ls-files", "-z"])?;
+
+    parse_tracked_files_named(&output, names)
+}
+
+/// [`tracked_files_named`] の出力から、指定したファイル名を持つパスだけを取り出す。
+fn parse_tracked_files_named(output: &[u8], names: &[&str]) -> Result<Vec<String>> {
+    nul_records(output)
+        .map(|record| to_utf8(record.as_bstr(), ReadOperation::PathDecode))
+        .filter(|path| match path {
+            // 読めなかったパスは呼び出し側へ伝える（黙って捨てない）
+            Err(_) => true,
+            Ok(path) => names.contains(&base_name(path)),
+        })
+        .collect()
+}
+
+/// パスの最後の要素（ファイル名）。
+///
+/// git は区切りに常に `/` を使う（Windows でも）ため、`std::path` を通さずに切り出す。
+fn base_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
 /// 比較範囲に変更のあるファイルのパス一覧を、git が返す順で取得する。
 ///
 /// `range` には `git diff` のサブコマンド名の後ろ・`--` の前に置く引数

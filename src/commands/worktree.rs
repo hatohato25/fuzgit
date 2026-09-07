@@ -19,10 +19,13 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use crate::cli::WorktreeCommand;
 use crate::commands::confirmation::confirm;
 use crate::commands::worktree_claude::copy_agent_config;
-use crate::commands::worktree_install::{InstallMode, install_dependencies};
-use crate::commands::{COLUMN_SEPARATOR, aligned_candidates, branch_manage, selection_header};
+use crate::commands::worktree_install::{self, InstallMode};
+use crate::commands::{
+    COLUMN_SEPARATOR, aligned_candidates, branch_manage, last_column_range, selection_header,
+};
 use crate::finder::{
-    FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one, select_one_with,
+    FinderItem, FinderOptions, Highlight, HighlightColor, PreviewPanel, PreviewSource,
+    SelectionMode, select_many_with, select_one, select_one_with,
 };
 use crate::git::exec::{capture_git_stderr_in, run_git};
 use crate::git::read::{
@@ -307,7 +310,7 @@ pub fn finish_creation(
     );
 
     if install == InstallMode::Run {
-        install_where_the_command_was_run(messages, repository, &directory)?;
+        install_selected(messages, repository, &directory)?;
     }
 
     Ok(())
@@ -364,47 +367,229 @@ pub fn resolve_new_name(
     Ok(path)
 }
 
-/// `gz worktree add` を叩いた位置に対応するディレクトリで、依存インストールを実行する。
+/// 依存インストールの対象を選ばせて実行する（FR-30 改訂）。
 ///
-/// リポジトリルートから見た cwd の相対位置を、そのまま新しい worktree へ写す
-/// （[`relative_prefix`]）。リポジトリルートで叩いた場合は相対位置が空になり、
-/// worktree のルートを対象とする従来の挙動と完全に一致する。
+/// # 候補が 1 件なら finder を開かない
 ///
-/// 写した先が存在しない場合（選んだブランチにそのサブディレクトリがまだ無い等）は、
-/// **worktree のルートへ暗黙に落とさず**、その旨を伝えて何もしない。ルートには利用者が
-/// 意図したものと別の lockfile が置かれ得るためである。
+/// 単一プロジェクトのリポジトリでは対象が 1 つしか無く、そこで選択画面を出しても
+/// 「候補 1 件の finder が毎回開くだけ」の摩擦になる（`gz push` を廃止した判断が
+/// そのまま跳ね返る）。`gz fetch` / `gz pull` と同じく、選ぶ余地があるときだけ開く。
 ///
-/// # Errors
+/// # 叩いた位置を事前選択する
 ///
-/// 標準エラーへの書き込みに失敗した場合にエラーを返す。
-fn install_where_the_command_was_run(
+/// 改訂前は「叩いた位置だけ」を対象にしていた。その結果は**事前選択のまま Enter を
+/// 押せば再現できる**ようにしておく（`gz fetch --siblings` が現在のリポジトリを、
+/// `gz pull` が現在のブランチを事前選択するのと同型）。
+fn install_selected(
     messages: &dyn Messages,
     repository: &gix::Repository,
     worktree: &Path,
 ) -> Result<()> {
-    let Some(prefix) = relative_prefix(repository) else {
-        // 相対位置を測れない（bare リポジトリから叩いた等）。worktree のルートを対象と
-        // する従来の挙動をそのまま採る。写す基準が無い以上、これ以外の解釈が無いため
-        install_dependencies(messages, worktree, &mut std::io::stderr());
-        return Ok(());
-    };
+    let targets = worktree_install::targets(worktree)?;
+    match targets.len() {
+        0 => report_no_install_target(messages, &mut std::io::stderr()),
+        // 選ぶ余地が無い。従来どおりそのまま実行する
+        1 => install_targets(messages, worktree, &targets, &mut std::io::stderr()),
+        _ => {
+            let selected = select_install_targets(messages, repository, worktree, &targets)?;
+            install_targets(messages, worktree, &selected, &mut std::io::stderr())
+        }
+    }
+}
 
-    let directory = worktree.join(&prefix);
-    if !directory.is_dir() {
-        writeln!(
-            std::io::stderr(),
-            "{message}",
-            message = messages
-                .worktree()
-                .install_subdirectory_missing(&prefix.display().to_string())
-        )
-        .context(messages.common().stderr_write_failed())?;
-        return Ok(());
+/// 対象を選ばせる。
+fn select_install_targets<'a>(
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    worktree: &Path,
+    targets: &'a [worktree_install::Target],
+) -> Result<Vec<&'a worktree_install::Target>> {
+    let rows = aligned_candidates(targets, |target| {
+        vec![
+            install_label(messages, target),
+            install_command_cell(messages, target),
+        ]
+    });
+    let items: Vec<FinderItem> = rows
+        .iter()
+        .map(|(target, display)| {
+            FinderItem::new(
+                display.clone(),
+                target.relative.clone(),
+                install_preview(worktree, target),
+                messages.language().messages(),
+            )
+            .with_highlights(install_highlights(messages, display, target))
+            .with_panel(install_panel(target))
+        })
+        .collect();
+
+    // 改訂前の挙動（叩いた位置だけ）を Enter 1 回で再現できるようにする
+    let preselect: Vec<String> = relative_prefix(repository)
+        .and_then(|prefix| prefix.to_str().map(str::to_owned))
+        .and_then(|prefix| {
+            rows.iter()
+                .find(|(target, _)| target.relative == prefix)
+                .map(|(_, display)| display.clone())
+        })
+        .into_iter()
+        .collect();
+
+    let options = FinderOptions::new(SelectionMode::Multi)
+        .with_header(messages.worktree().install_header().to_owned())
+        .with_preselect(preselect);
+    let selected = select_many_with(items, &options)?;
+
+    // 選択結果は候補一覧との照合を経てから実行対象にする（design.md セキュリティ設計）
+    selected
+        .iter()
+        .map(|key| {
+            targets
+                .iter()
+                .find(|target| &target.relative == key)
+                .ok_or_else(|| anyhow!(messages.worktree().install_selection_not_found(key)))
+        })
+        .collect()
+}
+
+/// 候補行に出す対象の名前。ルート自身は空文字になるため印を置く。
+fn install_label(messages: &dyn Messages, target: &worktree_install::Target) -> String {
+    if target.relative.is_empty() {
+        messages.worktree().install_root_label().to_owned()
+    } else {
+        target.relative.clone()
+    }
+}
+
+/// 候補行の最終列。実行されるコマンド、または実行できない旨。
+///
+/// 実行できない候補（同一エコシステムの lockfile が複数ある等）を**一覧から消さない**
+/// 代わりに、列を空欄のままにしない。空欄だと「何も要らない」のか「実行できない」のかが
+/// 読み取れないためである。
+fn install_command_cell(messages: &dyn Messages, target: &worktree_install::Target) -> String {
+    let summary = target.summary();
+    if summary.is_empty() {
+        messages.worktree().install_unavailable_label().to_owned()
+    } else {
+        summary
+    }
+}
+
+/// 候補行のうち色を付ける範囲。
+///
+/// **色を付けるのは最終列（実行されるコマンド）だけ**である。左端のパスは絞り込みの
+/// 主対象であり一覧の大半を占めるため、色を付けると目印が埋もれる
+/// （`commit_highlights` / `sibling_highlights` と同じ判断）。
+///
+/// 実行できる候補は緑、実行できない候補は装飾で弱める。選べてしまう一覧に
+/// 「押しても動かない行」が混ざるため、**強調ではなく後退させる**のが正しい
+/// （`gz pr` が draft を Dim にしたのと同じ）。
+fn install_highlights(
+    messages: &dyn Messages,
+    line: &str,
+    target: &worktree_install::Target,
+) -> Vec<Highlight> {
+    let cell = install_command_cell(messages, target);
+    let range = last_column_range(line, &cell);
+    if range.is_empty() {
+        return Vec::new();
     }
 
-    install_dependencies(messages, &directory, &mut std::io::stderr());
+    let color = if target.summary().is_empty() {
+        HighlightColor::Dim
+    } else {
+        HighlightColor::Green
+    };
+
+    vec![Highlight::new(range.start, range.end, color)]
+}
+
+/// プレビュー先頭の要約枠。
+///
+/// 枠の 1 行目は「候補行＋右寄せの指標」である。候補行はパスと実行コマンドを持つため、
+/// 指標には**その根拠になった lockfile 名**を置く（候補行に出ていない唯一の情報）。
+fn install_panel(target: &worktree_install::Target) -> PreviewPanel {
+    PreviewPanel::new().with_metric(target.lockfiles().join(LOCKFILE_SEPARATOR), Vec::new())
+}
+
+/// 複数の lockfile 名を枠の指標へ並べるときの区切り。
+const LOCKFILE_SEPARATOR: &str = " ";
+
+/// 対象のプレビュー。
+///
+/// **lockfile ではなくマニフェスト（`package.json` 等）を見せる。**lockfile は依存の
+/// 解決結果であり、先頭に並ぶのは `integrity` の羅列で「これは何のプロジェクトか」が
+/// 読み取れない（実プロジェクトでは数千〜数万行になる）。判断の材料になるのは、
+/// 名前と直接依存が書かれているマニフェストのほうである。
+///
+/// マニフェストが無いディレクトリ（lockfile だけが追跡されている等）はセクションごと
+/// 省く。読めないファイルのエラーを並べても判断の助けにならないため。
+fn install_preview(worktree: &Path, target: &worktree_install::Target) -> PreviewSource {
+    let directory = worktree.join(&target.relative);
+    let sections: Vec<(String, PreviewSource)> = target
+        .manifests()
+        .into_iter()
+        .map(|manifest| (manifest, directory.join(manifest)))
+        .filter(|(_, path)| path.is_file())
+        .map(|(manifest, path)| (manifest.to_owned(), PreviewSource::File(path)))
+        .collect();
+
+    if sections.is_empty() {
+        // 見せられるものが無い。枠だけが出る（[`install_panel`] が lockfile 名を示す）
+        return PreviewSource::None;
+    }
+
+    PreviewSource::Composite(sections)
+}
+
+/// 選ばれた対象を候補順に直列で実行する。
+///
+/// `gz fetch --siblings` と同じく、各件の前に `[<n>/<全体>]` を出す。何を待っているのかが
+/// 分からないまま端末が止まらないようにするため。
+fn install_targets(
+    messages: &dyn Messages,
+    worktree: &Path,
+    targets: &[impl std::borrow::Borrow<worktree_install::Target>],
+    writer: &mut impl std::io::Write,
+) -> Result<()> {
+    let total = targets.len();
+    for (index, target) in targets.iter().enumerate() {
+        let target = target.borrow();
+        if total > 1 {
+            writeln!(
+                writer,
+                "{line}",
+                line = messages.worktree().install_progress(
+                    index + 1,
+                    total,
+                    &install_label(messages, target)
+                )
+            )
+            .context(messages.common().stderr_write_failed())?;
+        }
+
+        worktree_install::install_steps(
+            messages,
+            &worktree.join(&target.relative),
+            &target.steps,
+            writer,
+        );
+    }
 
     Ok(())
+}
+
+/// 対象が 1 件も無いことを伝える。
+fn report_no_install_target(
+    messages: &dyn Messages,
+    writer: &mut impl std::io::Write,
+) -> Result<()> {
+    writeln!(
+        writer,
+        "{message}",
+        message = messages.worktree().install_no_target()
+    )
+    .context(messages.common().stderr_write_failed())
 }
 
 /// 現在の worktree のルートから見た cwd の相対位置。
@@ -872,6 +1057,135 @@ fn report_nothing_to_prune(
 
 #[cfg(test)]
 mod tests {
+
+    /// FR-30 改訂: 依存インストールの候補一覧。
+    mod install_candidates {
+        use super::*;
+        use crate::commands::worktree_install::Target;
+        use crate::commands::{aligned_candidates, worktree_install};
+        use crate::test_support::TempDir;
+
+        fn target(relative: &str, lockfiles: &[&str]) -> Target {
+            Target {
+                relative: relative.to_owned(),
+                steps: worktree_install::plan(lockfiles, None),
+            }
+        }
+
+        fn messages() -> &'static dyn Messages {
+            Language::English.messages()
+        }
+
+        /// 候補 1 件を整形し、行と対で返す。
+        fn row(target: &Target) -> String {
+            let targets = [target.clone()];
+            let rows = aligned_candidates(&targets, |t| {
+                vec![
+                    install_label(messages(), t),
+                    install_command_cell(messages(), t),
+                ]
+            });
+            rows[0].1.clone()
+        }
+
+        #[test]
+        fn a_runnable_target_shows_the_command_in_green() {
+            let target = target("projectA", &["package-lock.json"]);
+            let line = row(&target);
+
+            let highlights = install_highlights(messages(), &line, &target);
+            let expected = last_column_range(&line, "npm ci");
+
+            assert_eq!(
+                highlights,
+                [Highlight::new(
+                    expected.start,
+                    expected.end,
+                    HighlightColor::Green
+                )],
+                "色を付けるのは実行コマンドの列だけ（行: {line}）"
+            );
+        }
+
+        #[test]
+        fn a_target_that_cannot_run_is_dimmed_rather_than_highlighted() {
+            // 押しても動かない行は、強調ではなく後退させる
+            let target = target("projectA", &["pnpm-lock.yaml", "package-lock.json"]);
+            let line = row(&target);
+
+            let highlights = install_highlights(messages(), &line, &target);
+
+            assert_eq!(highlights.len(), 1);
+            let cell = messages().worktree().install_unavailable_label();
+            let expected = last_column_range(&line, cell);
+            assert_eq!(
+                highlights,
+                [Highlight::new(
+                    expected.start,
+                    expected.end,
+                    HighlightColor::Dim
+                )]
+            );
+        }
+
+        #[test]
+        fn the_command_column_is_never_left_blank() {
+            // 空欄では「何も要らない」のか「実行できない」のかが読み取れない
+            let target = target("projectA", &["pnpm-lock.yaml", "package-lock.json"]);
+
+            assert_eq!(
+                install_command_cell(messages(), &target),
+                messages().worktree().install_unavailable_label()
+            );
+        }
+
+        #[test]
+        fn the_path_itself_is_never_coloured() {
+            // 一覧の大半を占める列に色を付けると、目印にしたい部分が埋もれる
+            let target = target("projectA", &["package-lock.json"]);
+            let line = row(&target);
+
+            let highlights = install_highlights(messages(), &line, &target);
+
+            assert!(
+                highlights.iter().all(|highlight| {
+                    let path = last_column_range(&line, "npm ci");
+                    *highlight == Highlight::new(path.start, path.end, HighlightColor::Green)
+                }),
+                "パスの範囲に色が乗っている: {line}"
+            );
+        }
+
+        #[test]
+        fn the_panel_names_the_lockfile_that_justifies_the_command() {
+            // 候補行に出ていない唯一の情報が lockfile 名である
+            let target = target("projectA", &["package-lock.json"]);
+
+            let rendered = format!("{:?}", install_panel(&target));
+
+            assert!(rendered.contains("package-lock.json"), "{rendered}");
+        }
+
+        #[test]
+        fn the_preview_shows_the_manifest_not_the_lockfile() {
+            // lockfile の先頭は integrity の羅列で、何のプロジェクトかが読めない
+            assert_eq!(
+                target("projectA", &["package-lock.json"]).manifests(),
+                ["package.json"]
+            );
+            assert_eq!(target("x", &["uv.lock"]).manifests(), ["pyproject.toml"]);
+            assert_eq!(target("x", &["Gemfile.lock"]).manifests(), ["Gemfile"]);
+        }
+
+        #[test]
+        fn a_directory_without_a_manifest_gets_no_preview_body() {
+            // 読めないファイルのエラーを並べても判断の助けにならない
+            let dir = TempDir::new("install-preview-no-manifest");
+            let target = target("", &["package-lock.json"]);
+
+            assert_eq!(install_preview(dir.path(), &target), PreviewSource::None);
+        }
+    }
 
     /// worktree の作成先は、叩いた場所ではなくリポジトリルートの兄弟になる。
     #[test]

@@ -49,6 +49,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::git::exec::{DEBUG_PREFIX, debug_enabled};
+use crate::git::read::tracked_files_named;
 use crate::i18n::Messages;
 
 /// `yarn.lock` の版判別のために読む先頭バイト数。
@@ -167,6 +168,12 @@ struct Recipe {
     ecosystem: Ecosystem,
     /// worktree のルート直下に在るかどうかを見るファイル名。
     lockfile: &'static str,
+    /// そのエコシステムで人が書く側のファイル名（プレビューに出す）。
+    ///
+    /// lockfile は依存の解決結果であり、先頭に並ぶのは `integrity` の羅列で
+    /// 「これは何のプロジェクトか」が読み取れない。判断の材料になるのは
+    /// **名前と直接依存が書かれているこちら**である。
+    manifest: &'static str,
     /// 起動するプログラム名。
     program: &'static str,
     /// 起動時に渡す引数。
@@ -220,12 +227,14 @@ const RECIPES: [Recipe; 6] = [
     Recipe {
         ecosystem: Ecosystem::Node,
         lockfile: "pnpm-lock.yaml",
+        manifest: "package.json",
         program: "pnpm",
         arguments: Arguments::Fixed(&["install", "--frozen-lockfile"]),
     },
     Recipe {
         ecosystem: Ecosystem::Node,
         lockfile: "yarn.lock",
+        manifest: "package.json",
         program: "yarn",
         arguments: Arguments::PerYarnFlavour {
             v1: &["install", "--frozen-lockfile"],
@@ -235,24 +244,28 @@ const RECIPES: [Recipe; 6] = [
     Recipe {
         ecosystem: Ecosystem::Node,
         lockfile: "package-lock.json",
+        manifest: "package.json",
         program: "npm",
         arguments: Arguments::Fixed(&["ci"]),
     },
     Recipe {
         ecosystem: Ecosystem::Python,
         lockfile: "uv.lock",
+        manifest: "pyproject.toml",
         program: "uv",
         arguments: Arguments::Fixed(&["sync", "--frozen"]),
     },
     Recipe {
         ecosystem: Ecosystem::Ruby,
         lockfile: "Gemfile.lock",
+        manifest: "Gemfile",
         program: "bundle",
         arguments: Arguments::Fixed(&["install"]),
     },
     Recipe {
         ecosystem: Ecosystem::Php,
         lockfile: "composer.lock",
+        manifest: "composer.json",
         program: "composer",
         arguments: Arguments::Fixed(&["install"]),
     },
@@ -277,7 +290,7 @@ impl Plan {
     ///
     /// **あくまで表示専用**であり、この文字列をコマンドとして実行することはない
     /// （`exec::display_args` と同じ注記）。実行は常に引数配列で行う。
-    fn command_line(&self) -> String {
+    pub fn command_line(&self) -> String {
         if self.arguments.is_empty() {
             return self.program.to_owned();
         }
@@ -330,6 +343,118 @@ pub enum Outcome {
 /// 実体は検出テーブルの件数（6 回）の `is_file()` であり、判断そのものは
 /// 純関数 [`plan`] が持つ。
 #[must_use]
+/// 依存インストールの対象になり得るディレクトリ 1 件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    /// worktree のルートから見た相対パス（ルート自身は空文字）。
+    pub relative: String,
+    /// そのディレクトリで行う手順。
+    pub steps: Vec<Step>,
+}
+
+impl Target {
+    /// 候補一覧に出す、実行内容の要約。
+    ///
+    /// 実行するコマンドをそのまま並べる。**何が走るのかを選ぶ前に見せる**ためであり、
+    /// この文字列を実行することはない（実行は常に引数配列）。
+    pub fn summary(&self) -> String {
+        let commands: Vec<String> = self
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Run(plan) => Some(plan.command_line()),
+                _ => None,
+            })
+            .collect();
+
+        if commands.is_empty() {
+            // 実行できない理由がある候補（同一エコシステムの lockfile が複数など）。
+            // 一覧から消さずに残し、選んだときに理由を出す
+            return String::new();
+        }
+
+        commands.join(COMMAND_SEPARATOR)
+    }
+
+    /// この対象で参照するマニフェストの名前（プレビューに出す）。
+    ///
+    /// 同じディレクトリに Node と Ruby が同居する場合など、複数返り得る。
+    pub fn manifests(&self) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = self
+            .lockfiles()
+            .into_iter()
+            .filter_map(|lockfile| {
+                RECIPES
+                    .iter()
+                    .find(|recipe| recipe.lockfile == lockfile)
+                    .map(|recipe| recipe.manifest)
+            })
+            .collect();
+        names.dedup();
+        names
+    }
+
+    /// この対象で検出した lockfile の名前（プレビューに出す）。
+    pub fn lockfiles(&self) -> Vec<&'static str> {
+        self.steps
+            .iter()
+            .flat_map(|step| match step {
+                Step::Run(plan) => vec![plan.lockfile],
+                Step::Ambiguous { lockfiles, .. } => lockfiles.clone(),
+                Step::UnknownFlavour { lockfile } => vec![*lockfile],
+            })
+            .collect()
+    }
+}
+
+/// [`Target::summary`] で複数のコマンドを並べるときの区切り。
+const COMMAND_SEPARATOR: &str = " + ";
+
+/// 検出テーブルが見る lockfile の名前一覧。
+fn lockfile_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = RECIPES.iter().map(|recipe| recipe.lockfile).collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// worktree の中から、依存インストールの対象になり得るディレクトリを列挙する。
+///
+/// **`git ls-files` で引き、ファイルシステムを歩かない。**走査で探すと `target/` や
+/// `node_modules/` を踏んで秒単位に達する（実測 800ms）。`git ls-files` は追跡ファイルしか
+/// 返さないため、それらを踏まないことが**コマンドの選択で担保される**。
+///
+/// 返る並びは git の出力順（辞書順）であり、ルートが先に来る。
+///
+/// # Errors
+///
+/// `git ls-files` の実行に失敗した場合にエラーを返す。
+pub fn targets(worktree: &Path) -> crate::error::Result<Vec<Target>> {
+    let names = lockfile_names();
+    let names: Vec<&str> = names.to_vec();
+    let paths = tracked_files_named(worktree, &names)?;
+
+    let mut directories: Vec<String> = paths
+        .iter()
+        .map(|path| match path.rsplit_once('/') {
+            Some((directory, _file)) => directory.to_owned(),
+            // ルート直下の lockfile
+            None => String::new(),
+        })
+        .collect();
+    directories.sort();
+    directories.dedup();
+
+    Ok(directories
+        .into_iter()
+        .map(|relative| {
+            let steps = detect(&worktree.join(&relative));
+            Target { relative, steps }
+        })
+        .filter(|target| !target.steps.is_empty())
+        .collect())
+}
+
 pub fn found(root: &Path) -> Vec<&'static str> {
     RECIPES
         .iter()
@@ -443,6 +568,19 @@ fn read_yarn_header(root: &Path) -> Option<String> {
 /// 空けたままにする。
 pub fn install_dependencies(messages: &dyn Messages, directory: &Path, writer: &mut impl Write) {
     install(messages, directory, &detect(directory), spawn, writer);
+}
+
+/// 検出済みの手順をそのまま実行する。
+///
+/// 候補として先に検出しておいた [`Target::steps`] を、選択後に実行するために使う
+/// （[`install_dependencies`] は検出と実行を続けて行うが、こちらは検出をやり直さない）。
+pub fn install_steps(
+    messages: &dyn Messages,
+    directory: &Path,
+    steps: &[Step],
+    writer: &mut impl Write,
+) {
+    install(messages, directory, steps, spawn, writer);
 }
 
 /// 組み立てた手順を 1 つずつ実行する。
@@ -585,6 +723,75 @@ fn log_spawn_error(plan: &Plan, error: &std::io::Error) {
 
 #[cfg(test)]
 mod tests {
+
+    /// FR-30 改訂: 対象の列挙と要約。
+    mod targets {
+        use super::*;
+
+        #[test]
+        fn the_summary_lists_the_commands_that_would_run() {
+            let target = Target {
+                relative: "projectA".to_owned(),
+                steps: plan(&["package-lock.json"], None),
+            };
+
+            assert_eq!(target.summary(), "npm ci");
+        }
+
+        #[test]
+        fn several_ecosystems_in_one_directory_are_joined() {
+            // Rails + JS のように同居する構成では、そのディレクトリで 2 つ走る
+            let target = Target {
+                relative: String::new(),
+                steps: plan(&["package-lock.json", "Gemfile.lock"], None),
+            };
+
+            let summary = target.summary();
+            assert!(summary.contains("npm ci"), "{summary}");
+            assert!(summary.contains("bundle"), "{summary}");
+            assert!(summary.contains(COMMAND_SEPARATOR), "{summary}");
+        }
+
+        #[test]
+        fn a_target_that_cannot_run_has_an_empty_summary_but_stays_a_candidate() {
+            // 同一エコシステムの lockfile が複数ある。選んだときに理由を出すため、
+            // 一覧からは消さない
+            let target = Target {
+                relative: "projectA".to_owned(),
+                steps: plan(&["pnpm-lock.yaml", "package-lock.json"], None),
+            };
+
+            assert!(target.summary().is_empty());
+            assert!(!target.steps.is_empty());
+        }
+
+        #[test]
+        fn the_lockfiles_of_a_target_are_reported_for_the_preview() {
+            let target = Target {
+                relative: String::new(),
+                steps: plan(&["package-lock.json", "Gemfile.lock"], None),
+            };
+
+            let lockfiles = target.lockfiles();
+            assert!(lockfiles.contains(&"package-lock.json"));
+            assert!(lockfiles.contains(&"Gemfile.lock"));
+        }
+
+        #[test]
+        fn every_recipe_lockfile_is_searched_for() {
+            // 検出テーブルに行を足したら、探す名前も自動で増えること
+            let names = lockfile_names();
+
+            for recipe in &RECIPES {
+                assert!(
+                    names.contains(&recipe.lockfile),
+                    "{} を探していない",
+                    recipe.lockfile
+                );
+            }
+        }
+    }
+
     use super::*;
     use crate::i18n::Language;
     use crate::test_support::TempDir;

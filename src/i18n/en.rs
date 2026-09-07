@@ -1217,6 +1217,32 @@ Drop `-b` to put that branch in the worktree instead"
         "There is no worktree to prune"
     }
 
+    /// キー名（`Tab` / `Enter`）は skim のキー表記であるため訳さない。
+    fn install_header(&self) -> &'static str {
+        "Where the command was run is preselected. \
+Tab: toggle the selection / Enter: install the dependencies"
+    }
+
+    fn install_unavailable_label(&self) -> &'static str {
+        "(cannot run)"
+    }
+
+    fn install_root_label(&self) -> &'static str {
+        "(worktree root)"
+    }
+
+    fn install_selection_not_found(&self, selected: &str) -> String {
+        format!("The selected directory `{selected}` is not among the candidates")
+    }
+
+    fn install_progress(&self, position: usize, total: usize, label: &str) -> String {
+        format!("[{position}/{total}] {label}")
+    }
+
+    fn install_no_target(&self) -> &'static str {
+        "No lockfile was found, so nothing is installed"
+    }
+
     fn install_running(&self, directory: &Path, command: &str) -> String {
         format!(
             "Running `{command}` in {directory}",

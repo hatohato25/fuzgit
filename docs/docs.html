@@ -3401,6 +3401,41 @@ gz worktree prune            # tidy up bookkeeping for worktrees whose directory
               </li>
             </ul>
 
+            <h3>Installing dependencies</h3>
+            <p>
+              After the worktree exists, fuzgit looks for lockfiles and installs
+              the dependencies. <strong>What it searches is the tracked files</strong>
+              &mdash; it asks <code>git ls-files</code> rather than walking the
+              filesystem, so <code>node_modules/</code> and <code>target/</code>
+              are never in the way and there is no depth limit.
+            </p>
+            <ul>
+              <li>
+                <strong>With more than one directory to install into, you pick
+                them.</strong> A line is
+                <code>&lt;path&gt;  &lt;the commands that would run&gt;</code>, and
+                the preview is the lockfile itself. <kbd>Tab</kbd> selects several;
+                they run in order with <code>[&lt;n&gt;/&lt;total&gt;]</code> in front.
+              </li>
+              <li>
+                <strong>The directory you ran the command in starts
+                selected</strong>, so pressing <kbd>Enter</kbd> installs exactly
+                what it would have installed before this was a choice.
+              </li>
+              <li>
+                <strong>With only one directory the finder does not open</strong>
+                &mdash; a single-project repository behaves as it always did.
+              </li>
+              <li>
+                Cargo and Go are not offered. Their dependencies live in a global
+                cache and are fetched at build time, so a fresh worktree has
+                nothing to install.
+              </li>
+              <li>
+                <code>--no-install</code> skips all of this, finder included.
+              </li>
+            </ul>
+
             <h3><code>gz worktree remove</code></h3>
             <ul>
               <li>Candidates are linked worktrees only &mdash; <strong>the main worktree is not offered</strong> (git does not allow removing it).</li>
@@ -3532,6 +3567,37 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
               <li>
                 <code>-b</code> と <code>--no-install</code> は<strong>独立</strong>です。
                 依存インストールと <code>.claude/</code> の複写は <code>-b</code> でも走ります。
+              </li>
+            </ul>
+
+            <h3>依存インストール</h3>
+            <p>
+              worktree ができたあと、fuzgit は lockfile を探して依存をインストールします。
+              <strong>探すのは追跡ファイルです</strong> &mdash; ファイルシステムを走査せず
+              <code>git ls-files</code> に引かせるため、<code>node_modules/</code> や
+              <code>target/</code> を踏むことがなく、深さの制限もありません。
+            </p>
+            <ul>
+              <li>
+                <strong>対象が複数あるときは選べます。</strong>候補行は
+                <code>&lt;パス&gt;  &lt;実行されるコマンド&gt;</code> で、プレビューは
+                lockfile そのものです。<kbd>Tab</kbd> で複数選択でき、
+                <code>[&lt;n&gt;/&lt;全体&gt;]</code> を頭に付けて順に実行します。
+              </li>
+              <li>
+                <strong>コマンドを叩いたディレクトリは選択済み</strong>で開くため、
+                そのまま <kbd>Enter</kbd> を押せば、選べるようになる前と同じものが入ります。
+              </li>
+              <li>
+                <strong>対象が 1 件のときは finder を開きません</strong> &mdash;
+                単一プロジェクトのリポジトリでは従来どおりの挙動です。
+              </li>
+              <li>
+                Cargo と Go は候補になりません。依存がグローバルキャッシュに置かれ、
+                ビルド時に取得されるため、新しい worktree に入れるものがありません。
+              </li>
+              <li>
+                <code>--no-install</code> を付けると、finder を含めて一切行いません。
               </li>
             </ul>
 
