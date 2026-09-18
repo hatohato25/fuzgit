@@ -1257,14 +1257,6 @@ Tab: toggle the selection / Enter: install the dependencies"
         )
     }
 
-    /// オプション名は訳さない（design.md「翻訳しないもの」）。
-    fn install_flavour_unknown(&self, lockfile: &str) -> String {
-        format!(
-            "Skipping the dependencies: the Yarn version cannot be told from {lockfile} \
-(`--immutable` is Yarn 2 and later, `--frozen-lockfile` is Yarn 1)"
-        )
-    }
-
     fn install_command_missing(&self, program: &str) -> String {
         format!("Skipped the dependencies: `{program}` was not found")
     }

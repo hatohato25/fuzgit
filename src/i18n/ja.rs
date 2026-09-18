@@ -1155,14 +1155,6 @@ impl WorktreeMessages for JapaneseWorktreeMessages {
         )
     }
 
-    /// オプション名は訳さない（design.md「翻訳しないもの」）。
-    fn install_flavour_unknown(&self, lockfile: &str) -> String {
-        format!(
-            "{lockfile} から Yarn の版を判別できないため依存インストールを実行しません\
-（`--immutable` は Yarn 2 以降、`--frozen-lockfile` は Yarn 1 の綴りです）"
-        )
-    }
-
     fn install_command_missing(&self, program: &str) -> String {
         format!("`{program}` が見つからないため依存インストールを実行しませんでした")
     }

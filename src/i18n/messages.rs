@@ -1106,12 +1106,6 @@ pub trait WorktreeMessages: Sync + std::fmt::Debug {
     /// あるため翻訳しない（design.md「翻訳しないもの」）。
     fn install_ambiguous(&self, ecosystem: &str, lockfiles: &str) -> String;
 
-    /// `yarn.lock` の版を判別できず、インストールを実行しないことを伝える。
-    ///
-    /// `--immutable`（Yarn 2 以降）と `--frozen-lockfile`（Yarn 1）は綴りが版で異なる
-    /// ため、判別できないまま暗黙にどちらかへ倒さない。
-    fn install_flavour_unknown(&self, lockfile: &str) -> String;
-
     /// インストールコマンドが PATH に無く、実行できなかったことを伝える。
     ///
     /// 通知（FR-29）と違って黙って握り潰さないのは、ここでの不実行が「依存の入って

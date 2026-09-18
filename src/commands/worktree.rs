@@ -1068,7 +1068,7 @@ mod tests {
         fn target(relative: &str, lockfiles: &[&str]) -> Target {
             Target {
                 relative: relative.to_owned(),
-                steps: worktree_install::plan(lockfiles, None),
+                steps: worktree_install::plan(lockfiles),
             }
         }
 
@@ -1094,7 +1094,7 @@ mod tests {
             let line = row(&target);
 
             let highlights = install_highlights(messages(), &line, &target);
-            let expected = last_column_range(&line, "npm ci");
+            let expected = last_column_range(&line, "npm install");
 
             assert_eq!(
                 highlights,
@@ -1149,7 +1149,7 @@ mod tests {
 
             assert!(
                 highlights.iter().all(|highlight| {
-                    let path = last_column_range(&line, "npm ci");
+                    let path = last_column_range(&line, "npm install");
                     *highlight == Highlight::new(path.start, path.end, HighlightColor::Green)
                 }),
                 "パスの範囲に色が乗っている: {line}"
