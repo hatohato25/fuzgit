@@ -3292,6 +3292,7 @@ cd "$(gz worktree)"          # shell integration (move to the picked worktree)
 gz worktree add &lt;name&gt;       # pick a branch and create a new worktree next to the repository
 gz worktree add -b &lt;branch&gt; &lt;name&gt;   # create a new branch for it, picking its starting point
 gz worktree remove           # pick a worktree and remove it (with confirmation)
+gz worktree remove --force   # same, discarding modified and untracked files inside it (with a warning)
 gz worktree prune            # tidy up bookkeeping for worktrees whose directory is gone (with confirmation)</code></pre>
 
             <h3>No arguments (list, then print the path)</h3>
@@ -3439,14 +3440,16 @@ gz worktree prune            # tidy up bookkeeping for worktrees whose directory
             <h3><code>gz worktree remove</code></h3>
             <ul>
               <li>Candidates are linked worktrees only &mdash; <strong>the main worktree is not offered</strong> (git does not allow removing it).</li>
-              <li>Locked worktrees and worktrees with uncommitted changes fail with git&rsquo;s message as-is and a non-zero exit code.</li>
+              <li>Locked worktrees, and worktrees with modified or untracked files when <code>--force</code> is not given, fail with git&rsquo;s message as-is and a non-zero exit code.</li>
+              <li><code>-f</code> / <code>--force</code> passes <code>--force</code> to <code>git worktree remove</code> (once &mdash; a locked worktree is still refused), and the confirmation prompt then warns that modified and untracked files inside the worktree are discarded as well.</li>
             </ul>
             <div class="note danger">
               <span class="note-label">Deletes a directory</span>
               <p>
-                A confirmation prompt (<code>[y/N]</code>) comes first. There is
-                no <code>--force</code>: a worktree holding uncommitted changes
-                is refused by git, and fuzgit does not offer a way past that.
+                A confirmation prompt (<code>[y/N]</code>) comes first. Without
+                <code>--force</code>, a worktree holding modified or untracked
+                files is refused by git; with it, those files are discarded
+                along with the directory, so the prompt says so explicitly.
               </p>
             </div>
 
@@ -3463,6 +3466,7 @@ cd "$(gz worktree)"          # シェル連携（選んだ worktree へ移動す
 gz worktree add &lt;name&gt;       # ブランチを選び、リポジトリの兄弟として worktree を作る
 gz worktree add -b &lt;branch&gt; &lt;name&gt;   # 新しいブランチを作って入れる（作成元を選ぶ）
 gz worktree remove           # worktree を選んで削除する（確認あり）
+gz worktree remove --force   # 変更済み・未追跡のファイルごと削除する（警告つきの確認あり）
 gz worktree prune            # 実体を失った worktree の管理情報を整理する（確認あり）</code></pre>
 
             <h3>引数なし（一覧 → パス出力）</h3>
@@ -3604,14 +3608,16 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
             <h3><code>gz worktree remove</code></h3>
             <ul>
               <li>候補は linked worktree のみで、<strong>main worktree は候補に含めません</strong>（git が削除を許可しないため）。</li>
-              <li>locked な worktree・未コミット変更を含む worktree は、git のエラーをそのまま表示して非ゼロ終了します。</li>
+              <li>locked な worktree、および <code>--force</code> 無しでの変更済み・未追跡ファイルを含む worktree は、git のエラーをそのまま表示して非ゼロ終了します。</li>
+              <li><code>-f</code> / <code>--force</code> は <code>git worktree remove</code> に <code>--force</code> を（1 回だけ &mdash; locked な worktree は引き続き拒否されます）渡し、確認プロンプトに「worktree 内の変更済み・未追跡のファイルも破棄される」旨の警告を追記します。</li>
             </ul>
             <div class="note danger">
               <span class="note-label">ディレクトリを削除します</span>
               <p>
-                実行前に確認プロンプト（<code>[y/N]</code>）を表示します。<code>--force</code> は
-                提供していません &mdash; 未コミットの変更を抱えた worktree は git が拒否し、
-                fuzgit はそれを迂回する手段を用意していません。
+                実行前に確認プロンプト（<code>[y/N]</code>）を表示します。<code>--force</code>
+                無しでは変更済み・未追跡のファイルを抱えた worktree を git が拒否します。
+                付けた場合はそれらのファイルごとディレクトリが消えるため、プロンプトが
+                その旨を明示します。
               </p>
             </div>
 
@@ -4375,8 +4381,12 @@ gz pr --worktree review-142 --no-install   # …依存インストールは行�
                     <td>Rarely needed. Tags are still offered as the base of <code>gz branch create</code>, which is where they earn their place</td>
                   </tr>
                   <tr>
-                    <td><code>gz worktree</code> move / lock / unlock / repair, and <code>remove --force</code></td>
-                    <td>Rarely needed day to day, and each is a single plain git command. Discarding uncommitted changes is hard to justify behind a confirmation prompt alone</td>
+                    <td><code>gz worktree</code> move / lock / unlock / repair</td>
+                    <td>Rarely needed day to day, and each is a single plain git command</td>
+                  </tr>
+                  <tr>
+                    <td><code>gz worktree remove --force --force</code> (forcing a locked worktree)</td>
+                    <td>A lock is an explicit &ldquo;do not delete&rdquo; mark. One <code>--force</code> (discarding modified and untracked files) is offered; nothing goes past the lock</td>
                   </tr>
                   <tr>
                     <td>A text input UI for branch names and worktree paths</td>
@@ -4502,8 +4512,12 @@ gz pr --worktree review-142 --no-install   # …依存インストールは行�
                     <td>使用頻度が低い。タグは <code>gz branch create</code> のベース候補として引き続き選べる</td>
                   </tr>
                   <tr>
-                    <td><code>gz worktree</code> の move / lock / unlock / repair、<code>remove --force</code></td>
-                    <td>日常頻度が低く、いずれも素の git で 1 コマンドで済む。未コミット変更の破棄は確認プロンプトだけでは担保しにくい</td>
+                    <td><code>gz worktree</code> の move / lock / unlock / repair</td>
+                    <td>日常頻度が低く、いずれも素の git で 1 コマンドで済む</td>
+                  </tr>
+                  <tr>
+                    <td><code>gz worktree remove --force --force</code>（locked な worktree の強制削除）</td>
+                    <td>lock は「消すな」という明示の印。<code>--force</code> 1 回（変更済み・未追跡ファイルの破棄）までを提供し、それを越える手段は用意しない</td>
                   </tr>
                   <tr>
                     <td>ブランチ名・worktree パスのテキスト入力 UI</td>

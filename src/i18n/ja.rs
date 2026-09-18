@@ -1096,6 +1096,15 @@ impl WorktreeMessages for JapaneseWorktreeMessages {
 （作業ツリーのディレクトリと管理情報が削除されます。ブランチは残ります）"
     }
 
+    fn remove_force_confirmation(&self) -> String {
+        format!(
+            "{base}\n\
+             警告: `--force` が指定されています。worktree 内の変更済み・未追跡のファイルも\
+             破棄されます（locked な worktree は引き続き拒否されます）",
+            base = self.remove_confirmation()
+        )
+    }
+
     fn removal_failed(&self, path: &str) -> String {
         format!("worktree `{path}` の削除に失敗しました")
     }
@@ -1941,6 +1950,10 @@ impl CliMessages for JapaneseCliMessages {
 
     fn worktree_remove_about(&self) -> &'static str {
         "worktree を選択して削除する（main worktree は候補に含めない）"
+    }
+
+    fn worktree_remove_force_help(&self) -> &'static str {
+        "変更済み・未追跡のファイルがあっても削除する（`git worktree remove --force`）"
     }
 
     fn worktree_prune_about(&self) -> &'static str {

@@ -7,9 +7,11 @@
 //! （gix の `Repository::worktrees()` は main worktree を含まず、チェックアウト中のブランチも
 //! 持たないため。design.md「追加機能の技術調査」）。
 //!
-//! move / lock / unlock / repair と `remove --force` は提供しない
-//! （requirements.md「スコープ外」。いずれも素の git で 1 コマンドで済み、未コミット変更を
-//! 破棄する強制削除は確認プロンプトだけでは担保しにくいため git に委ねる）。
+//! move / lock / unlock / repair は提供しない（requirements.md「スコープ外」。いずれも
+//! 素の git で 1 コマンドで済む）。`remove --force` は提供する：git 自身が失敗時に
+//! `use --force to delete it` と案内するため、fuzgit にその綴りが無いと利用者は
+//! 素の git へ戻る 1 手を強いられる。未コミット変更を破棄する操作であるため、
+//! `gz branch delete --force` と同じく**明示指定と警告付きの確認**が揃って初めて実行する。
 
 use std::io::Write as _;
 use std::path::Path;
@@ -100,7 +102,14 @@ pub fn run(
             branch.as_deref(),
             InstallMode::from_no_install(*no_install),
         ),
-        Some(WorktreeCommand::Remove) => remove(language, messages, repository),
+        // `--force` の真偽値をここで型へ畳み、commands 層へ `bool` を持ち回さない
+        // （`DeleteMode` と同方針）
+        Some(WorktreeCommand::Remove { force }) => remove(
+            language,
+            messages,
+            repository,
+            RemoveMode::from_force(*force),
+        ),
         Some(WorktreeCommand::Prune) => prune(language, messages, repository),
     }
 }
@@ -731,17 +740,66 @@ fn report_install_directory_not_found(
     Ok(())
 }
 
+/// `git worktree remove` に `--force` を付けるかどうか。
+///
+/// 変更済み・未追跡のファイルを破棄する操作であるため、真偽値を持ち回さず
+/// ユーザーの明示指定（`--force`）だけで有効になることを型で表す
+/// （`DeleteMode` / `PruneMode` と同方針）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoveMode {
+    /// 変更済み・未追跡のファイルがあれば git に拒否させる（既定）。
+    Clean,
+    /// 変更済み・未追跡のファイルごと削除する（`--force`）。
+    ///
+    /// `--force` は 1 つだけ付ける。locked な worktree まで削除するには git は
+    /// `--force` を 2 回要求するが、lock は「消すな」という明示の印であり、
+    /// それを越える手段は用意しない（unlock は素の git で 1 コマンド）。
+    Force,
+}
+
+impl RemoveMode {
+    /// `--force` の指定から組み立てる。
+    ///
+    /// 変換をここに 1 か所だけ置き、`bool` が届く範囲を CLI の境界に閉じ込める
+    /// （`InstallMode::from_no_install` と同じ形）。
+    #[must_use]
+    pub fn from_force(force: bool) -> Self {
+        if force {
+            RemoveMode::Force
+        } else {
+            RemoveMode::Clean
+        }
+    }
+
+    /// `git worktree remove` に付けるオプション。
+    fn option(self) -> Option<&'static str> {
+        match self {
+            RemoveMode::Clean => None,
+            RemoveMode::Force => Some(FORCE_REMOVE_OPTION),
+        }
+    }
+}
+
+/// `git worktree remove` の強制削除オプション。
+const FORCE_REMOVE_OPTION: &str = "--force";
+
 /// linked worktree を 1 件選び、確認のうえ削除する。
 ///
 /// main worktree は `git worktree remove` の対象外であるため候補に含めない。
-/// locked / 未コミット変更ありの worktree は git が拒否するため、その理由は git の
-/// メッセージのまま表示する（fuzgit 側で判定を二重に実装しない）。
+/// locked な worktree、および `--force` 無しでの未コミット変更ありの worktree は git が
+/// 拒否するため、その理由は git のメッセージのまま表示する（fuzgit 側で判定を二重に
+/// 実装しない。git の案内する `--force` は `gz worktree remove --force` にそのまま対応する）。
 ///
 /// # Errors
 ///
 /// 一覧の取得、選択（中断を含む）、`git worktree remove` の実行に失敗した場合にエラーを返す。
 /// 確認プロンプトで承認が得られなかった場合は [`crate::error::Error::Cancelled`]。
-fn remove(language: Language, messages: &dyn Messages, repository: &gix::Repository) -> Result<()> {
+fn remove(
+    language: Language,
+    messages: &dyn Messages,
+    repository: &gix::Repository,
+    mode: RemoveMode,
+) -> Result<()> {
     let worktrees = read_worktrees(messages, repository)?;
     let candidates = removable(&worktrees);
     if candidates.is_empty() {
@@ -753,11 +811,11 @@ fn remove(language: Language, messages: &dyn Messages, repository: &gix::Reposit
     // 削除されるのは作業ツリーのディレクトリごとであるため、対象を示して同意を求める
     confirm(
         messages,
-        messages.worktree().remove_confirmation(),
+        &remove_confirm_header(messages, mode),
         &[&display_line(selected)],
     )?;
 
-    let arguments = remove_args(&selected.path);
+    let arguments = remove_args(mode, &selected.path);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     run_git(language, &arguments)
         .with_context(|| messages.worktree().removal_failed(&selected.path))?;
@@ -1001,13 +1059,27 @@ fn add_with_branch_args(path: &str, new_branch: &str, start_point: &str) -> Vec<
         .collect()
 }
 
-/// `git worktree remove -- <path>` の引数を組み立てる。
+/// 削除の確認プロンプトに示す説明を組み立てる。
+///
+/// `--force` のときだけ、失われるもの（変更済み・未追跡のファイル）を名指しで警告する。
+/// 対象が実際に dirty かどうかは調べない（判定を git と二重に持たない。`--force` は
+/// 利用者の明示指定であり、その指定が何を意味するかを示せば足りる）。
+fn remove_confirm_header(messages: &dyn Messages, mode: RemoveMode) -> String {
+    match mode {
+        RemoveMode::Clean => messages.worktree().remove_confirmation().to_owned(),
+        RemoveMode::Force => messages.worktree().remove_force_confirmation(),
+    }
+}
+
+/// `git worktree remove [--force] -- <path>` の引数を組み立てる。
 ///
 /// パスは `git worktree list` の出力に由来する値だが、`-` で始まるディレクトリを
 /// 作ることはできるため、`--` の後ろへ置く点は [`add_args`] と揃える。
-fn remove_args(path: &str) -> Vec<String> {
-    ["worktree", "remove", "--", path]
+fn remove_args(mode: RemoveMode, path: &str) -> Vec<String> {
+    ["worktree", "remove"]
         .into_iter()
+        .chain(mode.option())
+        .chain(["--", path])
         .map(str::to_owned)
         .collect()
 }
@@ -1486,9 +1558,53 @@ mod tests {
     #[test]
     fn removing_puts_the_path_after_the_separator() {
         assert_eq!(
-            remove_args("/repo/../feature"),
+            remove_args(RemoveMode::Clean, "/repo/../feature"),
             ["worktree", "remove", "--", "/repo/../feature"]
         );
+    }
+
+    #[test]
+    fn removing_with_force_adds_the_option_once_before_the_separator() {
+        // `--force` を 2 回付けると locked な worktree まで消える。1 回に固定する
+        let arguments = remove_args(RemoveMode::Force, "/repo/feature");
+
+        assert_eq!(
+            arguments,
+            ["worktree", "remove", "--force", "--", "/repo/feature"]
+        );
+        assert_eq!(
+            arguments
+                .iter()
+                .filter(|argument| *argument == FORCE_REMOVE_OPTION)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_force_flag_becomes_a_mode() {
+        assert_eq!(RemoveMode::from_force(true), RemoveMode::Force);
+        assert_eq!(RemoveMode::from_force(false), RemoveMode::Clean);
+    }
+
+    #[test]
+    fn the_confirmation_warns_about_discarded_files_only_with_force() {
+        for language in [Language::Japanese, Language::English] {
+            let messages = language.messages();
+            let clean = remove_confirm_header(messages, RemoveMode::Clean);
+            let force = remove_confirm_header(messages, RemoveMode::Force);
+
+            assert_eq!(clean, messages.worktree().remove_confirmation());
+            assert!(
+                force.starts_with(&clean),
+                "the warning must extend the plain confirmation: {force}"
+            );
+            assert!(
+                force.contains("--force"),
+                "the option that caused the warning must be named: {force}"
+            );
+            assert!(!clean.contains("--force"), "{clean}");
+        }
     }
 
     #[test]
@@ -1790,6 +1906,7 @@ Removing worktrees/old: gitdir file points to non-existent location\n";
                 worktree.no_available_branch(),
                 worktree.no_removable(),
                 worktree.remove_confirmation(),
+                &worktree.remove_force_confirmation(),
                 worktree.prune_targets_read_failed(),
                 worktree.prune_confirmation(),
                 worktree.prune_failed(),
@@ -1856,6 +1973,10 @@ Removing worktrees/old: gitdir file points to non-existent location\n";
         assert_ne!(
             japanese.remove_confirmation(),
             english.remove_confirmation()
+        );
+        assert_ne!(
+            japanese.remove_force_confirmation(),
+            english.remove_force_confirmation()
         );
         assert_ne!(
             japanese.removal_failed("/repo"),

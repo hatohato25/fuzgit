@@ -349,7 +349,13 @@ pub enum WorktreeCommand {
     },
 
     /// Pick a worktree and remove it (the main worktree is not offered)
-    Remove,
+    Remove {
+        /// Remove it even when it has modified or untracked files (`git worktree remove --force`)
+        //
+        // `-f` は `git worktree remove -f` と同じ綴り
+        #[arg(short, long)]
+        force: bool,
+    },
 
     /// Tidy up the bookkeeping of worktrees whose directory is gone
     Prune,
@@ -571,7 +577,13 @@ fn localize_worktree(command: ClapCommand, cli: &dyn CliMessages) -> ClapCommand
                     argument.help(cli.worktree_add_no_install_help())
                 })
         })
-        .mut_subcommand("remove", |remove| remove.about(cli.worktree_remove_about()))
+        .mut_subcommand("remove", |remove| {
+            remove
+                .about(cli.worktree_remove_about())
+                .mut_arg("force", |argument| {
+                    argument.help(cli.worktree_remove_force_help())
+                })
+        })
         .mut_subcommand("prune", |prune| prune.about(cli.worktree_prune_about()))
 }
 
@@ -1231,7 +1243,7 @@ mod tests {
         }
 
         for (argument, expected) in [
-            ("remove", WorktreeCommand::Remove),
+            ("remove", WorktreeCommand::Remove { force: false }),
             ("prune", WorktreeCommand::Prune),
         ] {
             let cli = Cli::try_parse_from(["gz", "worktree", argument])
@@ -1267,6 +1279,24 @@ mod tests {
             Cli::try_parse_from(["gz", "worktree", "add", "--new-branch", "x", "wt"]).is_err(),
             "長綴りは設けない"
         );
+    }
+
+    #[test]
+    fn worktree_remove_takes_force_in_both_spellings() {
+        // `git worktree remove -f` / `--force` と同じ綴り
+        for argument in ["-f", "--force"] {
+            let cli =
+                Cli::try_parse_from(["gz", "worktree", "remove", argument]).unwrap_or_else(|err| {
+                    panic!("`gz worktree remove {argument}` should parse: {err}")
+                });
+
+            match cli.command {
+                Command::Worktree { command } => {
+                    assert_eq!(command, Some(WorktreeCommand::Remove { force: true }));
+                }
+                other => panic!("unexpected subcommand: {other:?}"),
+            }
+        }
     }
 
     #[test]

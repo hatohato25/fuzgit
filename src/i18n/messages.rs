@@ -465,6 +465,9 @@ pub trait CliMessages: Sync + std::fmt::Debug {
     /// `gz worktree remove` の説明。
     fn worktree_remove_about(&self) -> &'static str;
 
+    /// `gz worktree remove --force` の説明。
+    fn worktree_remove_force_help(&self) -> &'static str;
+
     /// `gz worktree prune` の説明。
     fn worktree_prune_about(&self) -> &'static str;
 
@@ -1068,6 +1071,14 @@ pub trait WorktreeMessages: Sync + std::fmt::Debug {
     ///
     /// 対象の worktree は [`crate::commands::confirmation::confirm`] が別途列挙する。
     fn remove_confirmation(&self) -> &'static str;
+
+    /// `--force` 付きで worktree を削除することへの同意を求める見出し。
+    ///
+    /// [`WorktreeMessages::remove_confirmation`] に、失われるもの（変更済み・未追跡の
+    /// ファイル）を名指しする警告を加えた複数行の説明を返す
+    /// （`gz branch delete --force` の `unmerged_confirmation` と同じ形）。
+    /// オプション名 `--force` は訳さない。
+    fn remove_force_confirmation(&self) -> String;
 
     /// worktree の削除に失敗したことを伝える。
     fn removal_failed(&self, path: &str) -> String;

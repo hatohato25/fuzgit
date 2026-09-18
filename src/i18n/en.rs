@@ -1197,6 +1197,15 @@ Drop `-b` to put that branch in the worktree instead"
 (its directory and administrative files are deleted; the branch itself stays)"
     }
 
+    fn remove_force_confirmation(&self) -> String {
+        format!(
+            "{base}\n\
+             Warning: `--force` is given. Modified and untracked files inside the worktree \
+             are discarded as well (a locked worktree is still refused)",
+            base = self.remove_confirmation()
+        )
+    }
+
     fn removal_failed(&self, path: &str) -> String {
         format!("Failed to remove the worktree `{path}`")
     }
@@ -2074,6 +2083,10 @@ impl CliMessages for EnglishCliMessages {
 
     fn worktree_remove_about(&self) -> &'static str {
         "Pick a worktree and remove it (the main worktree is not offered)"
+    }
+
+    fn worktree_remove_force_help(&self) -> &'static str {
+        "Remove it even when it has modified or untracked files (`git worktree remove --force`)"
     }
 
     fn worktree_prune_about(&self) -> &'static str {
