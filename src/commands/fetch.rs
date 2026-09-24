@@ -27,7 +27,7 @@ use std::time::Instant;
 use anyhow::{Context as _, Result, anyhow, bail};
 use gix::bstr::ByteSlice as _;
 
-use crate::color::Painter;
+use crate::color::{OutputKind, Painter};
 use crate::commands::{HEADER_SEPARATOR, aligned_candidates, last_column_range, selection_header};
 use crate::error::Error;
 use crate::finder::{
@@ -35,7 +35,7 @@ use crate::finder::{
     select_many_with, select_one_with,
 };
 use crate::git::exec::{
-    CapturedRun, capture_git_noninteractive_in, run_git_painted, run_git_painted_in,
+    CapturedRun, PaintedStreams, capture_git_noninteractive_in, run_git_painted, run_git_painted_in,
 };
 use crate::git::read::{branch_tracking_args, remote_tracking_refs_args, remote_url_args, remotes};
 use crate::git::siblings::{self, SiblingRepository, SiblingScan};
@@ -256,8 +256,12 @@ fn run_current(
 
     let arguments = fetch_args(&target, prune, painter);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git_painted(language, &arguments, painter)
-        .with_context(|| messages.fetch().fetch_failed(&target.description(messages)))?;
+    run_git_painted(
+        language,
+        &arguments,
+        PaintedStreams::stderr_only(OutputKind::FetchTable),
+    )
+    .with_context(|| messages.fetch().fetch_failed(&target.description(messages)))?;
 
     Ok(())
 }
@@ -319,7 +323,14 @@ fn run_siblings(
         },
         &mut std::io::stderr(),
         |directory, arguments| capture_git_noninteractive_in(language, directory, arguments),
-        |directory, arguments| run_git_painted_in(language, directory, arguments, painter),
+        |directory, arguments| {
+            run_git_painted_in(
+                language,
+                directory,
+                arguments,
+                PaintedStreams::stderr_only(OutputKind::FetchTable),
+            )
+        },
     )?;
     let elapsed = started.elapsed();
     report_line(
@@ -953,10 +964,17 @@ impl<W: std::io::Write> ParallelPhase<'_, W> {
             // 標準エラーの相対順序は保てないが、`git fetch` の更新表は実質すべて標準エラーへ
             // 出るため、読み手には 1 続きの本文に見える
             self.writer
-                .write_all(&self.painter.paint_fetch_output(&run.stdout))
+                .write_all(
+                    &self
+                        .painter
+                        .paint_output(OutputKind::FetchTable, &run.stdout),
+                )
                 .and_then(|()| {
-                    self.writer
-                        .write_all(&self.painter.paint_fetch_output(&run.stderr))
+                    self.writer.write_all(
+                        &self
+                            .painter
+                            .paint_output(OutputKind::FetchTable, &run.stderr),
+                    )
                 })
                 .context(messages.common().stderr_write_failed())?;
         }

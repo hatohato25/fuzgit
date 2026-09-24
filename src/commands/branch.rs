@@ -2,12 +2,13 @@
 
 use anyhow::{Context as _, Result, anyhow};
 
+use crate::color::OutputKind;
 use crate::commands::selection_header;
 use crate::finder::{
     FinderItem, FinderOptions, Highlight, HighlightColor, PreviewPanel, PreviewSource,
     SelectionMode, select_one_with,
 };
-use crate::git::exec::run_git;
+use crate::git::exec::{PaintedStreams, run_git_painted};
 use crate::git::read::{BranchDetail, BranchInfo, BranchScope, branch_details, branches};
 use crate::i18n::{Language, Messages};
 
@@ -61,8 +62,14 @@ pub fn run(
         .ok_or_else(|| anyhow!(messages.branch().selection_not_found(&selected)))?;
 
     let target = switch_target(messages, branch)?;
-    run_git(language, &["switch", &target])
-        .with_context(|| messages.common().switch_failed(&target))?;
+    // `git switch` は持ち越した変更の一覧を標準出力へ、切り替えの結果を標準エラーへ出す
+    // （実測）。両方を着色するため、ストリームごとに端末かどうかを判定する（FR-36）
+    run_git_painted(
+        language,
+        &["switch", &target],
+        PaintedStreams::both(OutputKind::SwitchReport),
+    )
+    .with_context(|| messages.common().switch_failed(&target))?;
 
     Ok(())
 }

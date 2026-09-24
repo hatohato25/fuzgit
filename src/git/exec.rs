@@ -29,7 +29,7 @@ use std::io::{ErrorKind, Write as _};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::color::{FetchOutputStream, Painter};
+use crate::color::{OutputKind, OutputStream, Painter};
 use crate::error::{Error, Result};
 use crate::i18n::Language;
 
@@ -462,32 +462,78 @@ pub fn run_git_in(language: Language, directory: &Path, args: &[&str]) -> Result
     run(Some(directory), args, LocaleIntent::Display(language))
 }
 
-/// `git` を実行し、**標準エラーだけ**を着色しながら中継する（**(B) 系**）。
+/// 着色して中継するストリームの組み合わせ。
 ///
-/// `git fetch` の更新表（` * [new branch] ...`）へ色を乗せるためだけに存在する。
-/// 出力を読むのは変わらずユーザーであり、fuzgit が見るのは行頭の状態コードだけである
+/// **git は 1 つのコマンドの報告を 2 つのストリームへ振り分ける。**`git switch` は
+/// 持ち越した変更の一覧を標準出力へ、`Switched to branch` を標準エラーへ出す（実測）。
+/// どちらを中継するかと、それぞれを着色してよいかは別々に決まるため、組み合わせを型で表す。
+#[derive(Debug, Clone, Copy)]
+pub struct PaintedStreams {
+    /// 標準出力の着色の可否。色を出さない場合は中継せず継承する。
+    stdout: Painter,
+    /// 標準エラーの着色の可否。色を出さない場合は中継せず継承する。
+    stderr: Painter,
+    /// 行の読み方。
+    kind: OutputKind,
+}
+
+impl PaintedStreams {
+    /// 標準エラーだけを着色する（`git fetch` の更新表）。
+    ///
+    /// `git fetch` は報告をすべて標準エラーへ出すため、標準出力は継承のまま残す
+    /// （`gz` の標準出力はパイプ用途のために空けておく方針とも揃う）。
+    #[must_use]
+    pub fn stderr_only(kind: OutputKind) -> Self {
+        Self {
+            stdout: Painter::disabled(),
+            stderr: Painter::for_stderr(),
+            kind,
+        }
+    }
+
+    /// 標準出力と標準エラーの両方を、それぞれの端末判定に従って着色する（`git switch` の報告）。
+    #[must_use]
+    pub fn both(kind: OutputKind) -> Self {
+        Self {
+            stdout: Painter::for_stdout(),
+            stderr: Painter::for_stderr(),
+            kind,
+        }
+    }
+
+    /// 中継するストリームが 1 つも無いか。
+    fn inherits_everything(self) -> bool {
+        !self.stdout.is_enabled() && !self.stderr.is_enabled()
+    }
+}
+
+/// `git` を実行し、指定されたストリームを着色しながら中継する（**(B) 系**）。
+///
+/// `git fetch` の更新表（` * [new branch] ...`）や `git switch` の報告（`M\ta.txt`）へ
+/// 色を乗せるためだけに存在する。出力を読むのは変わらずユーザーであり、fuzgit が見るのは
+/// 行頭の状態コードと定型の書き出しだけである
 /// （着色の規則と、その例外性の説明は [`crate::color`] のモジュール doc comment）。
 ///
 /// # 継承したままにするもの
 ///
-/// **標準入力と標準出力は継承する。**入力を塞がないのは、資格情報の入力や SSH の
+/// **標準入力は必ず継承する。**入力を塞がないのは、資格情報の入力や SSH の
 /// パスフレーズを git（および ssh）が要求できるようにするためである。これらの
 /// プロンプトは標準エラーではなく `/dev/tty` を直接開いて表示されるため、
-/// 標準エラーを中継しても対話は成立する。
+/// 出力を中継しても対話は成立する。
 ///
 /// # 端末でない場合は中継しない
 ///
-/// `painter` が色を出さない状況（パイプ・リダイレクト・`NO_COLOR`）では
-/// [`run_git_in`] と同じく**完全に継承する**。中継を挟むと、git が「標準エラーが端末で
-/// ない」と判断して進捗表示を止める副作用まで持ち込むことになり、色を出さない場面で
-/// 出力が変わってしまうためである。
+/// 色を出さない状況（パイプ・リダイレクト・`NO_COLOR`）のストリームは中継せず継承する。
+/// 中継を挟むと、git が「そのストリームが端末でない」と判断して進捗表示を止める副作用まで
+/// 持ち込むことになり、色を出さない場面で出力が変わってしまうためである。
+/// どちらも着色しない場合は [`run_git_in`] と完全に同じ経路を通る。
 ///
 /// # Errors
 ///
 /// [`run_git`] と同じ。中継の失敗は git の終了コードを変えないため、
 /// 書き込みエラーは握り潰す（色を出せなかったことで操作の成否を変えない）。
-pub fn run_git_painted(language: Language, args: &[&str], painter: Painter) -> Result<()> {
-    run_painted(None, language, args, painter)
+pub fn run_git_painted(language: Language, args: &[&str], streams: PaintedStreams) -> Result<()> {
+    run_painted(None, language, args, streams)
 }
 
 /// [`run_git_painted`] と同じだが、`directory` をカレントディレクトリとして実行する（**(B) 系**）。
@@ -499,32 +545,47 @@ pub fn run_git_painted_in(
     language: Language,
     directory: &Path,
     args: &[&str],
-    painter: Painter,
+    streams: PaintedStreams,
 ) -> Result<()> {
-    run_painted(Some(directory), language, args, painter)
+    run_painted(Some(directory), language, args, streams)
 }
 
-/// 標準エラーを着色しながら中継して `git` を実行する。
+/// 指定されたストリームを着色しながら中継して `git` を実行する。
 fn run_painted(
     directory: Option<&Path>,
     language: Language,
     args: &[&str],
-    painter: Painter,
+    streams: PaintedStreams,
 ) -> Result<()> {
-    if !painter.is_enabled() {
+    if streams.inherits_everything() {
         return run(directory, args, LocaleIntent::Display(language));
     }
 
     let mut command = build_command(directory, args, LocaleIntent::Display(language));
-    command.stderr(Stdio::piped());
+    if streams.stdout.is_enabled() {
+        command.stdout(Stdio::piped());
+    }
+    if streams.stderr.is_enabled() {
+        command.stderr(Stdio::piped());
+    }
 
     let mut child = command
         .spawn()
         .map_err(|source| map_spawn_error(source, args))?;
 
-    if let Some(stderr) = child.stderr.take() {
-        relay_painted(stderr);
-    }
+    let child_stdout = child.stdout.take();
+    let child_stderr = child.stderr.take();
+
+    // 両方を中継する場合は別々に読む。片方を読み切ってからもう片方を読むと、
+    // 先に埋まったパイプで git が書き込みをブロックしたまま進まなくなる
+    std::thread::scope(|scope| {
+        if let Some(source) = child_stdout {
+            scope.spawn(move || relay_painted(source, streams.kind, &mut std::io::stdout()));
+        }
+        if let Some(source) = child_stderr {
+            relay_painted(source, streams.kind, &mut std::io::stderr());
+        }
+    });
 
     let status = child
         .wait()
@@ -540,14 +601,13 @@ fn run_painted(
     }
 }
 
-/// 子プロセスの標準エラーを、着色しながら fuzgit の標準エラーへ流す。
+/// 子プロセスの出力を、着色しながら `sink` へ流す。
 ///
 /// 読み取りと書き込みの失敗はどちらも無視する。中継できなかったことで git の実行結果を
 /// 変えないためであり、失敗の理由は git の終了コードが伝える。
-fn relay_painted(mut source: impl std::io::Read) {
-    let mut stream = FetchOutputStream::new();
+fn relay_painted(mut source: impl std::io::Read, kind: OutputKind, sink: &mut impl std::io::Write) {
+    let mut stream = OutputStream::new(kind);
     let mut buffer = [0_u8; RELAY_CHUNK_BYTES];
-    let mut stderr = std::io::stderr();
 
     loop {
         let read = match source.read(&mut buffer) {
@@ -557,13 +617,14 @@ fn relay_painted(mut source: impl std::io::Read) {
 
         let mut painted = Vec::new();
         stream.push(&buffer[..read], &mut painted);
-        // 進捗表示は復帰で上書きされるため、溜めずにその場で送り出す
-        let _ = stderr.write_all(&painted).and_then(|()| stderr.flush());
+        // 進捗表示は復帰で上書きされるため、溜めずにその場で送り出す。
+        // 2 つのストリームを別々に中継するため、順序を保つにも即時に流す必要がある
+        let _ = sink.write_all(&painted).and_then(|()| sink.flush());
     }
 
     let mut painted = Vec::new();
     stream.flush(&mut painted);
-    let _ = stderr.write_all(&painted).and_then(|()| stderr.flush());
+    let _ = sink.write_all(&painted).and_then(|()| sink.flush());
 }
 
 /// `git` を標準入出力を継承したまま実行する。`directory` 指定時はそこを作業ディレクトリとする。
@@ -959,6 +1020,86 @@ mod tests {
         let text = String::from_utf8(stdout).expect("git config emits utf-8");
 
         assert_eq!(text.trim(), "written");
+    }
+
+    #[test]
+    fn the_relay_colours_the_real_output_of_git_switch() {
+        // FR-36: 解析の規則は `crate::color` の単体テストが固定する。ここで確かめるのは
+        // **実物の `git switch` の出力が、2 つのストリームを通って着色されて出てくること**
+        // （git の書式の思い込みと、中継そのものの取りこぼしを同時に検出する）
+        use crate::finder::HighlightColor;
+        use crate::test_support::{TempDir, commit, git_in, init_repository};
+
+        let dir = TempDir::new("exec-painted-switch");
+        init_repository(dir.path());
+        commit(dir.path(), "init");
+        git_in(dir.path(), &["branch", "other"]);
+
+        // 持ち越される変更を作る。この一覧が標準出力へ、切り替えの結果が標準エラーへ出る
+        std::fs::write(dir.path().join("carried.txt"), "local\n").expect("writable");
+        git_in(dir.path(), &["add", "carried.txt"]);
+
+        let mut child = build_command(
+            Some(dir.path()),
+            &["switch", "other"],
+            LocaleIntent::Display(Language::English),
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git switch should start");
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        relay_painted(
+            child.stdout.take().expect("stdout is piped"),
+            OutputKind::SwitchReport,
+            &mut out,
+        );
+        relay_painted(
+            child.stderr.take().expect("stderr is piped"),
+            OutputKind::SwitchReport,
+            &mut err,
+        );
+        child.wait().expect("git switch should finish");
+
+        let out = String::from_utf8(out).expect("the paths are ascii");
+        let err = String::from_utf8(err).expect("the wording is ascii");
+
+        assert!(
+            out.contains(&format!(
+                "{green}A{reset}\tcarried.txt",
+                green = HighlightColor::Green.to_ansi(),
+                reset = crate::finder::ANSI_RESET
+            )),
+            "the carried change must be coloured on stdout: {out:?}"
+        );
+        assert!(
+            err.starts_with(HighlightColor::Green.to_ansi()) && err.contains("other"),
+            "the outcome must be coloured on stderr: {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_is_not_coloured_is_inherited_whole() {
+        // 中継を挟むと git が「端末でない」と判断して表示を変える。色を出さない場面で
+        // 出力が変わらないことを、経路の選択で担保する
+        assert!(
+            PaintedStreams {
+                stdout: Painter::disabled(),
+                stderr: Painter::disabled(),
+                kind: OutputKind::SwitchReport,
+            }
+            .inherits_everything()
+        );
+        assert!(
+            !PaintedStreams {
+                stdout: Painter::disabled(),
+                stderr: Painter::enabled(),
+                kind: OutputKind::FetchTable,
+            }
+            .inherits_everything()
+        );
     }
 
     #[test]

@@ -14,13 +14,14 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Context as _, Result, anyhow, bail};
 
 use crate::cli::BranchCommand;
+use crate::color::OutputKind;
 use crate::commands::confirmation::confirm;
 use crate::commands::{aligned_candidates, selection_header};
 use crate::finder::{
     FinderItem, FinderOptions, Highlight, HighlightColor, PreviewSource, SelectionMode,
     select_many_with, select_one_with,
 };
-use crate::git::exec::run_git;
+use crate::git::exec::{PaintedStreams, run_git, run_git_painted};
 use crate::git::read::{
     BranchInfo, BranchScope, TagInfo, branch_activity, branches, checked_out_branches,
     default_branch, merged_branches, tags, upstream, worktrees,
@@ -298,7 +299,13 @@ fn create(
     if switch == SwitchAfterCreate::Switch {
         let arguments = switch_args(name);
         let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        run_git(language, &arguments).with_context(|| messages.common().switch_failed(name))?;
+        // 報告の形は `gz branch` の切り替えと同じであるため、着色も同じにする（FR-36）
+        run_git_painted(
+            language,
+            &arguments,
+            PaintedStreams::both(OutputKind::SwitchReport),
+        )
+        .with_context(|| messages.common().switch_failed(name))?;
     }
 
     Ok(())

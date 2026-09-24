@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::color::Painter;
+use crate::color::{OutputKind, Painter};
 use crate::commands::confirmation::confirm;
 use crate::commands::fetch::{
     NOTICE_COLOR, PROGRESS_COLOR, SUMMARY_FAILED_COLOR, SUMMARY_OK_COLOR,
@@ -27,7 +27,7 @@ use crate::commands::in_progress;
 use crate::commands::{HEADER_SEPARATOR, aligned_candidates, command_display};
 use crate::error::Error;
 use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with};
-use crate::git::exec::{run_git, run_git_painted};
+use crate::git::exec::{PaintedStreams, run_git, run_git_painted};
 use crate::git::read::{
     PullScan, PullTarget, ahead_behind, current_branch, operation_in_progress, pull_targets,
     remotes, upstream as read_upstream,
@@ -163,7 +163,13 @@ pub fn run(
         &targets,
         painter,
         &mut std::io::stderr(),
-        |arguments| run_git_painted(language, arguments, painter),
+        |arguments| {
+            run_git_painted(
+                language,
+                arguments,
+                PaintedStreams::stderr_only(OutputKind::FetchTable),
+            )
+        },
     )?;
     let elapsed = started.elapsed();
     report_summary(messages, &mut std::io::stderr(), &summary, painter)?;
@@ -666,8 +672,12 @@ fn integrate_current_branch(
     let arguments = remote_fetch_args(&target.remote);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
     // 取得の更新表は `gz pull` でも同じ形で出るため、着色も同じにする
-    run_git_painted(language, &arguments, Painter::for_stderr())
-        .with_context(|| messages.pull().fetch_failed(&target.remote))?;
+    run_git_painted(
+        language,
+        &arguments,
+        PaintedStreams::stderr_only(OutputKind::FetchTable),
+    )
+    .with_context(|| messages.pull().fetch_failed(&target.remote))?;
 
     // fetch で追跡参照が更新されているため、取り込む量はここで初めて確定する
     let position = ahead_behind(workdir(repository)?, &target.branch, &target.reference)

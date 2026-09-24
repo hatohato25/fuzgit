@@ -14,13 +14,14 @@ use std::io::Write;
 
 use anyhow::{Context as _, Result, anyhow};
 
+use crate::color::OutputKind;
 use crate::commands::fixup::FixupKind;
 use crate::commands::revert::MessageEditing;
 use crate::commands::{
     cherry_pick, commit_preview_args, confirmation, fixup, revert, selection_header,
 };
 use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_one_with};
-use crate::git::exec::run_git;
+use crate::git::exec::{PaintedStreams, run_git, run_git_painted};
 use crate::i18n::{Language, Messages};
 
 /// メニューで選べる操作。
@@ -232,8 +233,13 @@ fn run_action(
         MenuAction::SwitchDetach => {
             let arguments = switch_args(target.id);
             let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-            run_git(language, &arguments)
-                .with_context(|| messages.commit_menu().switch_failed(target.id))
+            // 報告の形は `gz branch` の切り替えと同じであるため、着色も同じにする（FR-36）
+            run_git_painted(
+                language,
+                &arguments,
+                PaintedStreams::both(OutputKind::SwitchReport),
+            )
+            .with_context(|| messages.commit_menu().switch_failed(target.id))
         }
         MenuAction::CherryPick => cherry_pick::run_on_commit(language, messages, target.id),
         MenuAction::Revert => revert::run_on_commit(

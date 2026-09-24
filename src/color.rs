@@ -4,7 +4,9 @@
 //!
 //! 1. **fuzgit 自身が組み立てた行**（`[3/11] koebon` のような進捗行、集計行、
 //!    選択を省略した理由の行）。
-//! 2. **git が出力した fetch の更新表**（` * [new branch]  foo -> origin/foo`）。
+//! 2. **git が出力した報告**（[`OutputKind`]）。`fetch` の更新表
+//!    （` * [new branch]  foo -> origin/foo`）と `switch` の報告
+//!    （`M\ta.txt` / `Switched to branch 'main'`）。
 //!
 //! # git の出力を解釈する唯一の場所である
 //!
@@ -17,9 +19,15 @@
 //!
 //! # 色を出す条件
 //!
-//! 書き出し先（標準エラー）が端末であり、かつ `NO_COLOR` が設定されていない場合だけ
-//! 色を付ける（[`Painter::for_stderr`]）。**非端末での出力は 1 バイトも変わらない。**
-//! パイプやリダイレクトで受けているスクリプトの挙動を変えないためである。
+//! 書き出し先が端末であり、かつ `NO_COLOR` が設定されていない場合だけ色を付ける
+//! （[`Painter::for_stderr`] / [`Painter::for_stdout`]）。
+//! **非端末での出力は 1 バイトも変わらない。**パイプやリダイレクトで受けている
+//! スクリプトの挙動を変えないためである。
+//!
+//! **判定はストリームごとに行う。**git は 1 つのコマンドの報告を標準出力と標準エラーへ
+//! 振り分けることがあり（`git switch` は変更済みファイルの一覧を標準出力へ、
+//! `Switched to branch` を標準エラーへ出す。実測）、片方だけがパイプで受けられている
+//! 場合にもう片方の判定を流用すると、パイプへ色が漏れる。
 
 use std::io::IsTerminal as _;
 
@@ -47,12 +55,56 @@ const SUMMARY_START_INDEX: usize = 3;
 /// git のヒント行を状態行と取り違えない。
 const REF_ARROW: &[u8] = b" -> ";
 
+/// `git switch` が変更済みファイルを報告する行の、状態コードと経路の区切り。
+///
+/// `M\ta.txt` のようにタブ 1 つで区切られる（実測。git 2.55.0）。
+const SWITCH_SEPARATOR: u8 = b'\t';
+
+/// `git switch` が切り替えの結果を伝える行の書き出し（git の英語表記）。
+///
+/// 翻訳された git ではこの一致が外れるが、そのときは**色が付かないだけ**で行はそのまま出る。
+const SWITCHED_PREFIXES: [&[u8]; 2] = [b"Switched to branch ", b"Switched to a new branch "];
+
+/// 切り替えが起きなかったことを伝える行の書き出し（git の英語表記）。
+const ALREADY_ON_PREFIX: &[u8] = b"Already on ";
+
+/// 追跡状況・追跡設定など、操作の結果に付随する情報を伝える行の書き出し（git の英語表記）。
+const TRACKING_PREFIXES: [&[u8]; 2] = [b"Your branch ", b"branch "];
+
+/// git が操作のあとに添える助言の行の字下がり。
+///
+/// `  (use "git push" to publish your local commits)` の形で、括弧で始まる。
+const HINT_INDENT: &[u8] = b"  (";
+
 /// 新しいタグであることを示す要約（git の英語表記）。
 ///
 /// 状態コードは新しいブランチと同じ `*` であり、ブランチとタグを分けるにはここを見るしかない。
 /// git の表示言語が英語以外に翻訳されている場合はこの一致が外れるが、そのときは
 /// **タグも新規追加として緑になるだけ**で色が失われることはない（安全側に落ちる）。
 const NEW_TAG_SUMMARY: &[u8] = b"[new tag]";
+
+/// 着色する git の出力の種類。
+///
+/// 行の読み方はコマンドごとに違うため、**どの読み方をするかを呼び出し側が型で選ぶ**。
+/// 種類を増やすときはここへ 1 つ足し、対応する解析関数を 1 つ書く
+/// （どの行をどう読むかがこの列挙で一覧できる状態を保つ）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputKind {
+    /// `git fetch` の更新表（` * [new branch]  foo -> origin/foo`）。
+    FetchTable,
+    /// `git switch` の報告（`M\ta.txt` / `Switched to branch 'main'`）。
+    SwitchReport,
+}
+
+impl OutputKind {
+    /// 1 行から、着色する範囲（半開区間）と色を求める。
+    fn range(self, line: &[u8]) -> Option<(usize, usize, HighlightColor)> {
+        match self {
+            Self::FetchTable => fetch_range(line),
+            Self::SwitchReport => switch_range(line),
+        }
+    }
+}
 
 /// 着色の可否を握り、実際に色を乗せる。
 ///
@@ -74,6 +126,18 @@ impl Painter {
     pub fn for_stderr() -> Self {
         Self {
             enabled: std::io::stderr().is_terminal() && !no_color_requested(),
+        }
+    }
+
+    /// 標準出力の状態から組み立てる。
+    ///
+    /// `git switch` は変更済みファイルの一覧を**標準出力へ**出す（実測）。
+    /// 標準エラーの判定を流用すると、`gz branch > file` のように片方だけを
+    /// リダイレクトした場合にそのファイルへ色が混ざる。
+    #[must_use]
+    pub fn for_stdout() -> Self {
+        Self {
+            enabled: std::io::stdout().is_terminal() && !no_color_requested(),
         }
     }
 
@@ -116,21 +180,21 @@ impl Painter {
         )
     }
 
-    /// git の fetch 更新表を着色する。
+    /// git の出力を着色する。
     ///
-    /// **バイト列のまま扱う。**ブランチ名は UTF-8 とは限らず、文字列へ変換すると
+    /// **バイト列のまま扱う。**ブランチ名やパスは UTF-8 とは限らず、文字列へ変換すると
     /// 不正なバイトが置換文字へ潰れて情報が失われるためである。解析に使うのは
     /// 行頭の状態コードと ASCII の区切りだけであり、符号化に依存しない。
     ///
     /// 色を出さない場合は受け取ったバイト列をそのまま返す。
     #[must_use]
-    pub fn paint_fetch_output(self, output: &[u8]) -> Vec<u8> {
+    pub fn paint_output(self, kind: OutputKind, output: &[u8]) -> Vec<u8> {
         if !self.enabled {
             return output.to_vec();
         }
 
         let mut painted = Vec::with_capacity(output.len());
-        let mut stream = FetchOutputStream::new();
+        let mut stream = OutputStream::new(kind);
         stream.push(output, &mut painted);
         stream.flush(&mut painted);
 
@@ -155,20 +219,23 @@ fn no_color_requested() -> bool {
 ///
 /// 逐次実行（[`crate::git::exec::run_git_painted_in`]）では受け取った分から順に書き出す
 /// 必要があるため、状態を持つこの型で扱う。一括で受け取る経路
-/// （[`Painter::paint_fetch_output`]）も同じ実装を通す。
-pub(crate) struct FetchOutputStream {
+/// （[`Painter::paint_output`]）も同じ実装を通す。
+pub(crate) struct OutputStream {
+    /// 行の読み方。
+    kind: OutputKind,
     /// 区切りがまだ現れていない末尾。
     pending: Vec<u8>,
 }
 
-impl FetchOutputStream {
+impl OutputStream {
     /// 空の状態で作る。
     ///
     /// 着色するかどうかの判定は呼び出し側で済んでいる（この型へ流すのは着色する場合だけ）。
     /// 判定を二重に持たないことで、「色を出さないときは 1 バイトも変えない」という
     /// 保証の根拠を [`Painter`] 1 か所に閉じる。
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(kind: OutputKind) -> Self {
         Self {
+            kind,
             pending: Vec::new(),
         }
     }
@@ -182,7 +249,7 @@ impl FetchOutputStream {
                 // 改行で終わる 1 行だけが更新表の候補である
                 b'\n' => {
                     let line = std::mem::take(&mut self.pending);
-                    paint_line(&line, out);
+                    paint_line(self.kind, &line, out);
                 }
                 // 進捗表示の断片。解析せずそのまま通す
                 b'\r' => out.append(&mut self.pending),
@@ -200,8 +267,8 @@ impl FetchOutputStream {
 }
 
 /// 改行で終わる 1 行を着色して `out` へ積む。
-fn paint_line(line: &[u8], out: &mut Vec<u8>) {
-    let Some((start, end, color)) = status_range(line) else {
+fn paint_line(kind: OutputKind, line: &[u8], out: &mut Vec<u8>) {
+    let Some((start, end, color)) = kind.range(line) else {
         out.extend_from_slice(line);
         return;
     };
@@ -221,7 +288,7 @@ fn paint_line(line: &[u8], out: &mut Vec<u8>) {
 ///
 /// 更新表の行と判断できない場合は `None` を返す。判断の材料は
 /// 「行頭の桁の形」と「`->` を含むこと」の 2 つだけで、参照名の中身は見ない。
-fn status_range(line: &[u8]) -> Option<(usize, usize, HighlightColor)> {
+fn fetch_range(line: &[u8]) -> Option<(usize, usize, HighlightColor)> {
     // 更新表以外の行（`From <URL>` の見出し、git のヒント）を除く
     if !contains(line, REF_ARROW) {
         return None;
@@ -272,6 +339,82 @@ fn flag_color(flag: u8, summary: &[u8]) -> Option<HighlightColor> {
         b'=' => Some(HighlightColor::Dim),
         _ => None,
     }
+}
+
+/// `git switch` の報告 1 行から、着色する範囲（半開区間）と色を求める（純関数）。
+///
+/// 読むのは 3 種類の行である。
+///
+/// | 行 | 出る先 | 着色 |
+/// |---|---|---|
+/// | `M\ta.txt`（持ち越された変更） | 標準出力 | 状態コード 1 文字だけ |
+/// | `Switched to branch 'main'` | 標準エラー | 行全体 |
+/// | `Your branch is ...` / `branch 'x' set up to track ...` / `  (use ...)` | 標準出力 | 行全体を Dim |
+///
+/// 変更済みファイルの行は**構造だけで判別できる**（行頭 1 文字が状態コード、次がタブ）ため
+/// git の表示言語に左右されない。結果と付随情報の行は英語表記との一致で見分けるため、
+/// 翻訳された git では**色が付かないだけ**で行はそのまま出る（安全側に落ちる）。
+fn switch_range(line: &[u8]) -> Option<(usize, usize, HighlightColor)> {
+    if let Some(color) = carried_change_color(line) {
+        // 状態コード 1 文字だけを塗る。行の大半を占めるパスを塗ると目印が埋もれる
+        return Some((0, 1, color));
+    }
+
+    let body = trimmed_end(line);
+    if SWITCHED_PREFIXES
+        .iter()
+        .any(|prefix| body.starts_with(prefix))
+    {
+        // コマンドの結果そのもの。`gz fetch` の集計行と同じ役割であるため同じ緑にする
+        return Some((0, body.len(), HighlightColor::Green));
+    }
+
+    if body.starts_with(ALREADY_ON_PREFIX) {
+        // 何も起きていない。`= [up to date]` と同じく目立たせない
+        return Some((0, body.len(), HighlightColor::Dim));
+    }
+
+    if body.starts_with(HINT_INDENT)
+        || TRACKING_PREFIXES
+            .iter()
+            .any(|prefix| body.starts_with(prefix))
+    {
+        // 操作の結果ではなく付随情報。読めなくてもいけないため色ではなく装飾で弱める
+        return Some((0, body.len(), HighlightColor::Dim));
+    }
+
+    None
+}
+
+/// 切り替えに持ち越された変更の行であれば、その状態コードの色を返す。
+///
+/// 行頭 1 文字が状態コードで、次がタブであることだけを見る（`M\ta.txt`）。
+/// 色は [`fetch_range`] と同じ基準で選ぶ。増えたのか（緑）、変わったのか（黄）、
+/// 失われたのか（赤）を分ける。
+fn carried_change_color(line: &[u8]) -> Option<HighlightColor> {
+    if line.get(1) != Some(&SWITCH_SEPARATOR) {
+        return None;
+    }
+
+    match *line.first()? {
+        b'A' => Some(HighlightColor::Green),
+        b'M' => Some(HighlightColor::Yellow),
+        b'D' => Some(HighlightColor::Red),
+        _ => None,
+    }
+}
+
+/// 行末の改行（と復帰）を除いた本体を返す。
+///
+/// 行全体を塗る場合に改行まで色の内側へ入れると、行末までの背景が塗られる端末で
+/// 見え方が変わるため、改行は色の外へ出す。
+fn trimmed_end(line: &[u8]) -> &[u8] {
+    let mut end = line.len();
+    while end > 0 && matches!(line[end - 1], b'\n' | b'\r') {
+        end -= 1;
+    }
+
+    &line[..end]
 }
 
 /// `haystack` が `needle` を含むか。
@@ -325,14 +468,14 @@ mod tests {
     #[test]
     fn the_status_code_and_its_summary_are_the_coloured_part() {
         // 参照名は塗らない。塗ると行の大半が色になり目印が埋もれる
-        let painted = Painter::enabled().paint_fetch_output(NEW_BRANCH);
+        let painted = Painter::enabled().paint_output(OutputKind::FetchTable, NEW_BRANCH);
 
         assert_eq!(painted_part(&painted), "* [new branch]");
     }
 
     #[test]
     fn a_range_of_commit_ids_is_a_summary_as_well() {
-        let painted = Painter::enabled().paint_fetch_output(FORCED);
+        let painted = Painter::enabled().paint_output(OutputKind::FetchTable, FORCED);
 
         assert_eq!(painted_part(&painted), "+ b5df0a5...d152852");
     }
@@ -350,7 +493,7 @@ mod tests {
             (FAST_FORWARD, None),
         ] {
             assert_eq!(
-                status_range(line).map(|(_, _, color)| color),
+                fetch_range(line).map(|(_, _, color)| color),
                 expected,
                 "{line:?}"
             );
@@ -366,9 +509,9 @@ mod tests {
             // 矢印が無い。git のヒント行を状態行と取り違えない
             b" * [new branch] not-a-table-line\n".as_slice(),
         ] {
-            assert_eq!(status_range(line), None, "{line:?}");
+            assert_eq!(fetch_range(line), None, "{line:?}");
             assert_eq!(
-                Painter::enabled().paint_fetch_output(line),
+                Painter::enabled().paint_output(OutputKind::FetchTable, line),
                 line,
                 "{line:?}"
             );
@@ -381,9 +524,142 @@ mod tests {
         let line = b" * [%e6%96%b0]  v1 -> v1\n";
 
         assert_eq!(
-            status_range(line).map(|(_, _, color)| color),
+            fetch_range(line).map(|(_, _, color)| color),
             Some(HighlightColor::Green)
         );
+    }
+
+    /// `git switch` の報告（実測。git 2.55.0）。
+    ///
+    /// 持ち越した変更の一覧と追跡状況は**標準出力**へ、切り替えの結果は**標準エラー**へ出る。
+    mod switch_report {
+        use super::*;
+
+        const MODIFIED: &[u8] = b"M\t.gitignore\n";
+        const DELETED: &[u8] = b"D\tCLAUDE.md\n";
+        const ADDED: &[u8] = b"A\tnew.txt\n";
+        const SWITCHED: &[u8] = b"Switched to branch 'master'\n";
+        const SWITCHED_NEW: &[u8] = b"Switched to a new branch 'feature-x'\n";
+        const ALREADY_ON: &[u8] = b"Already on 'master'\n";
+        const TRACKING: &[u8] = b"Your branch is up to date with 'origin/master'.\n";
+        const SET_UP: &[u8] = b"branch 'feature-x' set up to track 'origin/feature-x'.\n";
+        const HINT: &[u8] = b"  (use \"git push\" to publish your local commits)\n";
+
+        fn painted(line: &[u8]) -> Vec<u8> {
+            Painter::enabled().paint_output(OutputKind::SwitchReport, line)
+        }
+
+        #[test]
+        fn only_the_status_code_of_a_carried_change_is_coloured() {
+            // 行の大半を占めるパスを塗ると目印が埋もれる（更新表と同じ判断）
+            assert_eq!(painted_part(&painted(MODIFIED)), "M");
+            assert_eq!(painted_part(&painted(DELETED)), "D");
+        }
+
+        #[test]
+        fn a_carried_change_takes_the_colour_of_what_happened_to_the_file() {
+            for (line, expected) in [
+                (ADDED, HighlightColor::Green),
+                (MODIFIED, HighlightColor::Yellow),
+                (DELETED, HighlightColor::Red),
+            ] {
+                assert_eq!(
+                    switch_range(line).map(|(_, _, color)| color),
+                    Some(expected),
+                    "{line:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_outcome_is_green_and_a_no_op_is_dimmed() {
+            // 切り替わったことは結果そのもの（集計行と同じ緑）。
+            // 既にそのブランチだったことは何も起きていない（`= [up to date]` と同じ Dim）
+            for line in [SWITCHED, SWITCHED_NEW] {
+                assert_eq!(
+                    switch_range(line).map(|(_, _, color)| color),
+                    Some(HighlightColor::Green),
+                    "{line:?}"
+                );
+            }
+            assert_eq!(
+                switch_range(ALREADY_ON).map(|(_, _, color)| color),
+                Some(HighlightColor::Dim)
+            );
+        }
+
+        #[test]
+        fn information_that_comes_with_the_result_is_dimmed() {
+            for line in [TRACKING, SET_UP, HINT] {
+                assert_eq!(
+                    switch_range(line).map(|(_, _, color)| color),
+                    Some(HighlightColor::Dim),
+                    "{line:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_newline_stays_outside_the_colour() {
+            // 行末までの背景が塗られる端末で見え方が変わらないようにする
+            let out = painted(SWITCHED);
+
+            assert!(out.ends_with(b"\n"), "{out:?}");
+            assert!(
+                out.ends_with(&[ANSI_RESET.as_bytes(), b"\n"].concat()),
+                "the reset must come before the newline: {out:?}"
+            );
+        }
+
+        #[test]
+        fn a_line_that_is_not_part_of_the_report_is_left_alone() {
+            for line in [
+                b"HEAD is now at 1f0c9a4 subject\n".as_slice(),
+                b"error: Your local changes would be overwritten\n".as_slice(),
+                b"\n".as_slice(),
+                // 状態コードの次がタブでない。`Merge` のような語を取り違えない
+                b"Merge branch 'x'\n".as_slice(),
+                // detached HEAD の助言。括弧で始まらない字下げ行は読まない
+                b"  git switch -c <new-branch-name>\n".as_slice(),
+            ] {
+                assert_eq!(switch_range(line), None, "{line:?}");
+                assert_eq!(painted(line), line, "{line:?}");
+            }
+        }
+
+        #[test]
+        fn a_path_that_is_not_utf8_is_passed_through_untouched() {
+            let mut line = b"M\t".to_vec();
+            line.extend_from_slice(&[0xff, 0xfe]);
+            line.push(b'\n');
+
+            let out = painted(&line);
+
+            assert!(
+                out.windows(2).any(|window| window == [0xff, 0xfe]),
+                "the raw bytes must survive: {out:?}"
+            );
+            assert_eq!(painted_part(&out), "M");
+        }
+
+        #[test]
+        fn a_localised_report_loses_the_colour_but_not_the_line() {
+            // 翻訳された git では定型の書き出しと一致しない。安全側に落ちる
+            let line = "ブランチ 'master' に切り替えました\n".as_bytes();
+
+            assert_eq!(switch_range(line), None);
+            assert_eq!(painted(line), line);
+        }
+
+        #[test]
+        fn a_disabled_painter_changes_not_a_single_byte() {
+            let block = [MODIFIED, DELETED, SWITCHED, TRACKING].concat();
+
+            assert_eq!(
+                Painter::disabled().paint_output(OutputKind::SwitchReport, &block),
+                block
+            );
+        }
     }
 
     #[test]
@@ -391,7 +667,10 @@ mod tests {
         // パイプ・リダイレクトで受けているスクリプトの挙動を変えない
         let table = [NEW_BRANCH, NEW_TAG, DELETED, FORCED, HEADER].concat();
 
-        assert_eq!(Painter::disabled().paint_fetch_output(&table), table);
+        assert_eq!(
+            Painter::disabled().paint_output(OutputKind::FetchTable, &table),
+            table
+        );
         assert_eq!(
             Painter::disabled().paint("[1/3] alpha", HighlightColor::Cyan),
             "[1/3] alpha"
@@ -418,7 +697,7 @@ mod tests {
     #[test]
     fn every_line_of_a_block_is_examined() {
         let block = [HEADER, NEW_BRANCH, FAST_FORWARD, NEW_TAG].concat();
-        let painted = Painter::enabled().paint_fetch_output(&block);
+        let painted = Painter::enabled().paint_output(OutputKind::FetchTable, &block);
         let text = String::from_utf8(painted).expect("the sample is ASCII");
 
         assert_eq!(
@@ -433,7 +712,7 @@ mod tests {
         // `git fetch` の進捗は復帰で同じ行を上書きする。改行だけを境目にすると
         // 進捗が画面へ出ないまま溜まる
         let mut painted = Vec::new();
-        let mut stream = FetchOutputStream::new();
+        let mut stream = OutputStream::new(OutputKind::FetchTable);
 
         stream.push(b"Receiving objects:  42% (42/100)\r", &mut painted);
         assert_eq!(painted, b"Receiving objects:  42% (42/100)\r");
@@ -450,7 +729,7 @@ mod tests {
     fn a_line_split_across_reads_is_coloured_once_it_is_complete() {
         // 逐次実行では 1 行が複数回の読み取りに分かれて届く
         let mut painted = Vec::new();
-        let mut stream = FetchOutputStream::new();
+        let mut stream = OutputStream::new(OutputKind::FetchTable);
 
         let (head, tail) = NEW_BRANCH.split_at(10);
         stream.push(head, &mut painted);
@@ -464,7 +743,7 @@ mod tests {
     #[test]
     fn a_final_line_without_a_newline_is_not_lost() {
         let mut painted = Vec::new();
-        let mut stream = FetchOutputStream::new();
+        let mut stream = OutputStream::new(OutputKind::FetchTable);
 
         stream.push(b"no trailing newline", &mut painted);
         stream.flush(&mut painted);
@@ -479,7 +758,7 @@ mod tests {
         line.extend_from_slice(&[0xff, 0xfe]);
         line.extend_from_slice(b" -> origin/x\n");
 
-        let painted = Painter::enabled().paint_fetch_output(&line);
+        let painted = Painter::enabled().paint_output(OutputKind::FetchTable, &line);
 
         assert!(
             painted.windows(2).any(|window| window == [0xff, 0xfe]),

@@ -947,8 +947,8 @@ gz --lang ja branch                  # 単発の上書き。全サブコマン�
                 <tr>
                   <td><code>NO_COLOR</code></td>
                   <td>
-                    <span lang="en">Turn the colouring of <code>gz fetch</code> / <code>gz pull</code> / <code>gz worktree add</code> off. Colour is only ever written to a terminal, so a pipe or a redirect is unaffected either way</span>
-                    <span lang="ja"><code>gz fetch</code> / <code>gz pull</code> / <code>gz worktree add</code> の着色を止める。色は端末にしか書かないため、パイプ・リダイレクトでは元から影響しない</span>
+                    <span lang="en">Turn the colouring of <code>gz fetch</code> / <code>gz pull</code> / <code>gz worktree add</code> / <code>gz branch</code> off. Colour is only ever written to a terminal, and stdout and stderr are judged separately, so a pipe or a redirect is unaffected either way</span>
+                    <span lang="ja"><code>gz fetch</code> / <code>gz pull</code> / <code>gz worktree add</code> / <code>gz branch</code> の着色を止める。色は端末にしか書かず、標準出力と標準エラーは別々に判定するため、パイプ・リダイレクトでは元から影響しない</span>
                   </td>
                 </tr>
               </tbody>
@@ -1027,6 +1027,18 @@ gz branch cleanup          # delete every merged branch in one go</code></pre>
                 runs <code>git switch</code> with the short name
                 (<code>feature</code>), so git&rsquo;s DWIM creates the tracking
                 local branch.
+              </li>
+              <li>
+                <strong>git&rsquo;s report after the switch is coloured.</strong>
+                Uncommitted changes carried across show their status letter in
+                colour &mdash; <code>A</code> green, <code>M</code> yellow,
+                <code>D</code> red &mdash; while the path stays plain, and
+                <code>Switched to branch &#39;x&#39;</code> is green.
+                <code>Already on &#39;x&#39;</code> and the tracking lines that
+                follow are dimmed, since nothing happened there. git splits this
+                report across both streams, so stdout and stderr are judged for
+                colour separately: <code>gz branch &gt; file</code> leaves the
+                file clean. Set <code>NO_COLOR</code> to turn it off.
               </li>
             </ul>
 
@@ -1178,6 +1190,17 @@ gz branch cleanup          # merged なブランチを一括で削除する</cod
               <li>
                 リモート追跡ブランチ（<code>origin/feature</code>）を選ぶと短縮名（<code>feature</code>）で
                 <code>git switch</code> するため、git の DWIM により追跡ローカルブランチが作成されます。
+              </li>
+              <li>
+                <strong>切り替え後の git の報告に色が付きます。</strong>
+                持ち越した未コミットの変更は状態コードだけを着色し（<code>A</code> 緑、
+                <code>M</code> 黄、<code>D</code> 赤）、パスは無色のままにします。
+                <code>Switched to branch &#39;x&#39;</code> は緑、
+                <code>Already on &#39;x&#39;</code> と後続の追跡状況の行は
+                何も起きていないため Dim にします。git はこの報告を 2 つのストリームへ
+                振り分けるため、標準出力と標準エラーの着色は別々に判定します
+                （<code>gz branch &gt; file</code> のファイルに色は混ざりません）。
+                <code>NO_COLOR</code> で止められます。
               </li>
             </ul>
 
