@@ -27,13 +27,16 @@ use std::time::Instant;
 use anyhow::{Context as _, Result, anyhow, bail};
 use gix::bstr::ByteSlice as _;
 
+use crate::color::Painter;
 use crate::commands::{HEADER_SEPARATOR, aligned_candidates, last_column_range, selection_header};
 use crate::error::Error;
 use crate::finder::{
     FinderItem, FinderOptions, Highlight, HighlightColor, PreviewSource, SelectionMode,
     select_many_with, select_one_with,
 };
-use crate::git::exec::{CapturedRun, capture_git_noninteractive_in, run_git, run_git_in};
+use crate::git::exec::{
+    CapturedRun, capture_git_noninteractive_in, run_git_painted, run_git_painted_in,
+};
 use crate::git::read::{branch_tracking_args, remote_tracking_refs_args, remote_url_args, remotes};
 use crate::git::siblings::{self, SiblingRepository, SiblingScan};
 use crate::i18n::{Language, Messages};
@@ -53,8 +56,34 @@ const ALL_REMOTES_OPTION: &str = "--all";
 /// リモートで削除されたブランチの追跡参照を掃除する `git fetch` のオプション。
 const PRUNE_OPTION: &str = "--prune";
 
+/// 進捗表示を明示的に要求する `git fetch` のオプション。
+///
+/// git は標準エラーが端末のときだけ進捗を出す。着色のために標準エラーを中継すると
+/// その判定が外れるため、着色する場合にかぎり明示する（[`fetch_args`]）。
+const PROGRESS_OPTION: &str = "--progress";
+
 /// HEAD がブランチを指していない兄弟リポジトリの表示。
 const DETACHED_LABEL: &str = "detached HEAD";
+
+/// 進捗行（`[3/11] koebon`）の色。
+///
+/// 進捗行は git 自身の出力に挟まれて並ぶため、**git が使わない色**を選んで
+/// 「これは fuzgit の行である」ことを一目で分けられるようにする
+/// （[`HighlightColor::Cyan`] の doc comment）。`gz pull` /
+/// `gz worktree add` の進捗行と共有する。
+pub(crate) const PROGRESS_COLOR: HighlightColor = HighlightColor::Cyan;
+
+/// すべて成功した集計行の色。
+pub(crate) const SUMMARY_OK_COLOR: HighlightColor = HighlightColor::Green;
+
+/// 失敗を含む集計行の色。
+pub(crate) const SUMMARY_FAILED_COLOR: HighlightColor = HighlightColor::Red;
+
+/// 選択を省略した理由・飛ばした理由など、操作の結果そのものではない行の色。
+///
+/// 目立たせる必要は無いが読めなくてもいけないため、色ではなく装飾で弱める
+/// （[`HighlightColor::Dim`] の doc comment）。
+pub(crate) const NOTICE_COLOR: HighlightColor = HighlightColor::Dim;
 
 /// 任意のロックを取らずに git を実行するオプション。
 ///
@@ -199,6 +228,8 @@ fn run_current(
     repository: &gix::Repository,
     prune: PruneMode,
 ) -> Result<()> {
+    // 着色の可否は実行のたびに判定せず、コマンドの開始時に 1 度だけ決める
+    let painter = Painter::for_stderr();
     let remotes = remotes(repository).context(messages.common().remote_list_read_failed())?;
 
     let target = match FetchDecision::from_remotes(&remotes) {
@@ -206,7 +237,7 @@ fn run_current(
         FetchDecision::Fixed(target) => {
             // finder を出さない以上、何に対して通信したのかはここでしか示せない
             // （`git fetch` は更新が無ければ何も出力しないことがある）
-            report_target(messages, &mut std::io::stderr(), &target)?;
+            report_target(messages, &mut std::io::stderr(), &target, painter)?;
             target
         }
         FetchDecision::Choose => {
@@ -223,9 +254,9 @@ fn run_current(
         }
     };
 
-    let arguments = fetch_args(&target, prune);
+    let arguments = fetch_args(&target, prune, painter);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(language, &arguments)
+    run_git_painted(language, &arguments, painter)
         .with_context(|| messages.fetch().fetch_failed(&target.description(messages)))?;
 
     Ok(())
@@ -241,6 +272,7 @@ fn run_siblings(
     repository: &gix::Repository,
     prune: PruneMode,
 ) -> Result<()> {
+    let painter = Painter::for_stderr();
     let scan = siblings::discover(repository).context(messages.fetch().sibling_scan_failed())?;
 
     let targets = match SiblingsDecision::from_candidates(&scan.candidates) {
@@ -250,7 +282,7 @@ fn run_siblings(
             report_line(
                 messages,
                 &mut std::io::stderr(),
-                messages.fetch().single_sibling_reason(),
+                &painter.paint(messages.fetch().single_sibling_reason(), NOTICE_COLOR),
             )?;
             scan.candidates.iter().collect()
         }
@@ -280,17 +312,20 @@ fn run_siblings(
     let summary = fetch_each(
         messages,
         &targets,
-        prune,
-        jobs,
+        SiblingRun {
+            prune,
+            jobs,
+            painter,
+        },
         &mut std::io::stderr(),
         |directory, arguments| capture_git_noninteractive_in(language, directory, arguments),
-        |directory, arguments| run_git_in(language, directory, arguments),
+        |directory, arguments| run_git_painted_in(language, directory, arguments, painter),
     )?;
     let elapsed = started.elapsed();
     report_line(
         messages,
         &mut std::io::stderr(),
-        &summary_line(messages, &summary),
+        &summary_line(messages, &summary, painter),
     )?;
 
     // 集計を書き出した**後**に通知する。通知が出ない環境でも集計は必ず出ることを
@@ -693,16 +728,18 @@ fn parse_fetch_jobs(value: Option<&str>) -> crate::error::Result<NonZeroUsize> {
 fn fetch_each(
     messages: &dyn Messages,
     targets: &[&SiblingRepository],
-    prune: PruneMode,
-    jobs: NonZeroUsize,
+    settings: SiblingRun,
     writer: &mut (impl std::io::Write + Send),
     parallel: impl Fn(&Path, &[&str]) -> crate::error::Result<CapturedRun> + Sync,
     mut serial: impl FnMut(&Path, &[&str]) -> crate::error::Result<()>,
 ) -> Result<FetchSummary> {
-    let arguments = sibling_fetch_args(prune);
+    let SiblingRun { jobs, painter, .. } = settings;
+    let arguments = sibling_fetch_args(settings.prune, painter);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
 
-    let outcomes = fetch_in_parallel(messages, targets, &arguments, jobs, writer, parallel)?;
+    let outcomes = fetch_in_parallel(
+        messages, targets, &arguments, jobs, painter, writer, parallel,
+    )?;
 
     let mut summary = FetchSummary::default();
     let mut retries: Vec<&SiblingRepository> = Vec::new();
@@ -720,7 +757,10 @@ fn fetch_each(
         report_line(
             messages,
             writer,
-            &messages.fetch().serial_fallback(retries.len()),
+            &painter.paint(
+                &messages.fetch().serial_fallback(retries.len()),
+                NOTICE_COLOR,
+            ),
         )?;
     }
 
@@ -729,7 +769,7 @@ fn fetch_each(
         report_line(
             messages,
             writer,
-            &progress_line(index, retries.len(), target),
+            &painter.paint(&progress_line(index, retries.len(), target), PROGRESS_COLOR),
         )?;
 
         match serial(&target.workdir, &arguments) {
@@ -761,12 +801,14 @@ fn fetch_in_parallel<W: std::io::Write + Send>(
     targets: &[&SiblingRepository],
     arguments: &[&str],
     jobs: NonZeroUsize,
+    painter: Painter,
     writer: &mut W,
     parallel: impl Fn(&Path, &[&str]) -> crate::error::Result<CapturedRun> + Sync,
 ) -> Result<Vec<Option<Outcome>>> {
     let total = targets.len();
     let shared = Mutex::new(ParallelPhase {
         writer,
+        painter,
         completed: 0,
         outcomes: vec![None; total],
         stopped: false,
@@ -832,6 +874,8 @@ enum Outcome {
 struct ParallelPhase<'writer, W> {
     /// 進捗行と git の出力の書き出し先。
     writer: &'writer mut W,
+    /// 着色の可否。
+    painter: Painter,
     /// 並列フェーズを終えた対象の件数（成否を問わない）。進捗行の分子になる。
     completed: usize,
     /// 対象ごとの結果（候補一覧と同じ添字）。
@@ -881,7 +925,10 @@ impl<W: std::io::Write> ParallelPhase<'_, W> {
             *slot = Some(outcome);
         }
 
-        let line = progress_line(self.completed - 1, total, target);
+        let line = self.painter.paint(
+            &progress_line(self.completed - 1, total, target),
+            PROGRESS_COLOR,
+        );
         if let Err(failure) = self.write_block(messages, &line, run.as_ref()) {
             self.stop(failure);
         }
@@ -901,12 +948,16 @@ impl<W: std::io::Write> ParallelPhase<'_, W> {
         report_line(messages, self.writer, line)?;
 
         if let Some(run) = run {
-            // 中身を解釈せずそのまま渡す（fuzgit は git の出力を読まない）。標準出力と
+            // 見るのは行頭の状態コードだけで、解析できない行はそのまま通す
+            // （着色の規則と、その例外性の説明は [`crate::color`]）。標準出力と
             // 標準エラーの相対順序は保てないが、`git fetch` の更新表は実質すべて標準エラーへ
             // 出るため、読み手には 1 続きの本文に見える
             self.writer
-                .write_all(&run.stdout)
-                .and_then(|()| self.writer.write_all(&run.stderr))
+                .write_all(&self.painter.paint_fetch_output(&run.stdout))
+                .and_then(|()| {
+                    self.writer
+                        .write_all(&self.painter.paint_fetch_output(&run.stderr))
+                })
                 .context(messages.common().stderr_write_failed())?;
         }
 
@@ -936,17 +987,38 @@ fn locked<T>(shared: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// `git fetch [--prune] --all` の引数を組み立てる。
+/// `git fetch [--progress] [--prune] --all` の引数を組み立てる。
 ///
 /// 対象は登録されているすべてのリモート（リポジトリごとにリモートを選ばせない）。
-fn sibling_fetch_args(prune: PruneMode) -> Vec<String> {
+/// `--progress` を付ける条件は [`fetch_args`] と同じ。並列フェーズは出力をキャプチャして
+/// 一括で書き出すため進捗表示は活きないが、**直列フェーズでは継承 stdio のまま流れる**
+/// ため、引数をフェーズごとに変えずに揃える。
+fn sibling_fetch_args(prune: PruneMode, painter: Painter) -> Vec<String> {
     let mut args = vec!["fetch".to_owned()];
+    if painter.is_enabled() {
+        args.push(PROGRESS_OPTION.to_owned());
+    }
     if let Some(option) = prune.option() {
         args.push(option.to_owned());
     }
     args.push(ALL_REMOTES_OPTION.to_owned());
 
     args
+}
+
+/// 兄弟リポジトリの取得を、どう走らせるかの設定。
+///
+/// 対象が決まったあとは変わらない値であり、finder を出す前に 1 度だけ解決する
+/// （不正な設定のまま通信を始めない）。3 つを 1 つの型にまとめているのは、
+/// フェーズをまたいで同じ組み合わせを持ち回るためである。
+#[derive(Debug, Clone, Copy)]
+struct SiblingRun {
+    /// リモートで削除された追跡参照を掃除するか。
+    prune: PruneMode,
+    /// 並列フェーズの同時実行数。
+    jobs: NonZeroUsize,
+    /// 着色の可否。
+    painter: Painter,
 }
 
 /// 進捗の 1 行（`[<位置>/<全体>] <名前>`）を組み立てる。
@@ -964,16 +1036,21 @@ fn progress_line(index: usize, total: usize, target: &SiblingRepository) -> Stri
 }
 
 /// 実行結果の集計を 1 行に組み立てる。
-fn summary_line(messages: &dyn Messages, summary: &FetchSummary) -> String {
+///
+/// 色は結果そのもので決める。1 件でも失敗していれば赤にするのは、**件数を読む前に
+/// 見直しが要ることが分かる**ようにするためで、`11 succeeded / 0 failed` の `0` を
+/// 読み落とす経路を無くす。
+fn summary_line(messages: &dyn Messages, summary: &FetchSummary, painter: Painter) -> String {
     let mut line = messages
         .common()
         .run_summary(summary.succeeded, summary.failed.len());
 
     if summary.has_failure() {
         line.push_str(&messages.common().failed_targets(&summary.failed.join(", ")));
+        return painter.paint(&line, SUMMARY_FAILED_COLOR);
     }
 
-    line
+    painter.paint(&line, SUMMARY_OK_COLOR)
 }
 
 /// 1 行を書き出す。
@@ -1009,11 +1086,12 @@ fn report_target(
     messages: &dyn Messages,
     writer: &mut impl std::io::Write,
     target: &FetchTarget,
+    painter: Painter,
 ) -> Result<()> {
     writeln!(
         writer,
         "{message}",
-        message = fixed_target_message(messages, target)
+        message = painter.paint(&fixed_target_message(messages, target), NOTICE_COLOR)
     )
     .context(messages.common().stderr_write_failed())?;
 
@@ -1105,11 +1183,20 @@ fn resolve(messages: &dyn Messages, remotes: &[String], selected: &str) -> Resul
         .ok_or_else(|| anyhow!(messages.fetch().selection_not_found(selected)))
 }
 
-/// `git fetch [--prune] <remote>` / `git fetch [--prune] --all` の引数を組み立てる。
+/// `git fetch [--progress] [--prune] <remote>` / `... --all` の引数を組み立てる。
 ///
 /// リモート名は gix が列挙した候補に由来する値だけを渡す。
-fn fetch_args(target: &FetchTarget, prune: PruneMode) -> Vec<String> {
+///
+/// `--progress` は**着色する場合にだけ**付ける。着色するとき fuzgit は git の標準エラーを
+/// 中継して受け取るため、git からは「標準エラーが端末でない」と見え、進捗表示
+/// （`Receiving objects: ...`）が止まってしまう。明示的に要求して元の見え方へ戻す。
+/// 着色しない場合（パイプ・リダイレクト）に付けないのは、そこへ進捗の制御文字を
+/// 流し込まないためである（[`PROGRESS_OPTION`]）。
+fn fetch_args(target: &FetchTarget, prune: PruneMode, painter: Painter) -> Vec<String> {
     let mut args = vec!["fetch".to_owned()];
+    if painter.is_enabled() {
+        args.push(PROGRESS_OPTION.to_owned());
+    }
     if let Some(option) = prune.option() {
         args.push(option.to_owned());
     }
@@ -1255,14 +1342,18 @@ mod tests {
     #[test]
     fn fetching_a_remote_passes_its_name_as_it_was_listed() {
         assert_eq!(
-            fetch_args(&FetchTarget::Remote("origin".to_owned()), PruneMode::Keep),
+            fetch_args(
+                &FetchTarget::Remote("origin".to_owned()),
+                PruneMode::Keep,
+                Painter::disabled()
+            ),
             ["fetch", "origin"]
         );
     }
 
     #[test]
     fn fetching_everything_uses_the_all_option_instead_of_a_name() {
-        let arguments = fetch_args(&FetchTarget::All, PruneMode::Keep);
+        let arguments = fetch_args(&FetchTarget::All, PruneMode::Keep, Painter::disabled());
 
         assert_eq!(arguments, ["fetch", ALL_REMOTES_OPTION]);
         assert!(
@@ -1274,11 +1365,15 @@ mod tests {
     #[test]
     fn pruning_is_added_only_when_it_was_asked_for() {
         assert_eq!(
-            fetch_args(&FetchTarget::Remote("origin".to_owned()), PruneMode::Prune),
+            fetch_args(
+                &FetchTarget::Remote("origin".to_owned()),
+                PruneMode::Prune,
+                Painter::disabled()
+            ),
             ["fetch", PRUNE_OPTION, "origin"]
         );
         assert_eq!(
-            fetch_args(&FetchTarget::All, PruneMode::Prune),
+            fetch_args(&FetchTarget::All, PruneMode::Prune, Painter::disabled()),
             ["fetch", PRUNE_OPTION, ALL_REMOTES_OPTION]
         );
     }
@@ -1395,6 +1490,7 @@ mod tests {
             messages(),
             &mut written,
             &FetchTarget::Remote("origin".to_owned()),
+            Painter::disabled(),
         )
         .expect("writing to a buffer should succeed");
 
@@ -1417,9 +1513,12 @@ mod tests {
             panic!("a single remote should be fixed without a selection");
         };
 
-        assert_eq!(fetch_args(&target, PruneMode::Keep), ["fetch", "origin"]);
         assert_eq!(
-            fetch_args(&target, PruneMode::Prune),
+            fetch_args(&target, PruneMode::Keep, Painter::disabled()),
+            ["fetch", "origin"]
+        );
+        assert_eq!(
+            fetch_args(&target, PruneMode::Prune, Painter::disabled()),
             ["fetch", PRUNE_OPTION, "origin"]
         );
     }
@@ -1920,7 +2019,7 @@ mod tests {
     #[test]
     fn every_sibling_is_fetched_from_all_of_its_remotes() {
         assert_eq!(
-            sibling_fetch_args(PruneMode::Keep),
+            sibling_fetch_args(PruneMode::Keep, Painter::disabled()),
             ["fetch", ALL_REMOTES_OPTION]
         );
     }
@@ -1928,7 +2027,7 @@ mod tests {
     #[test]
     fn pruning_applies_to_the_sibling_fetch_as_well() {
         assert_eq!(
-            sibling_fetch_args(PruneMode::Prune),
+            sibling_fetch_args(PruneMode::Prune, Painter::disabled()),
             ["fetch", PRUNE_OPTION, ALL_REMOTES_OPTION]
         );
     }
@@ -2148,8 +2247,11 @@ mod tests {
         let summary = fetch_each(
             messages(),
             &targets,
-            PruneMode::Prune,
-            jobs(1),
+            SiblingRun {
+                prune: PruneMode::Prune,
+                jobs: jobs(1),
+                painter: Painter::disabled(),
+            },
             &mut written,
             parallel_runner(&parallel_calls, &[]),
             serial_runner(&serial_calls, &[]),
@@ -2160,7 +2262,10 @@ mod tests {
         assert!(summary.failed.is_empty());
         assert_eq!(parallel_calls.names(), ["mike", "alpha", "zulu"]);
         for arguments in parallel_calls.arguments() {
-            assert_eq!(arguments, sibling_fetch_args(PruneMode::Prune));
+            assert_eq!(
+                arguments,
+                sibling_fetch_args(PruneMode::Prune, Painter::disabled())
+            );
         }
         assert_eq!(
             serial_calls.count(),
@@ -2180,8 +2285,11 @@ mod tests {
         fetch_each(
             messages(),
             &targets,
-            PruneMode::Keep,
-            jobs(1),
+            SiblingRun {
+                prune: PruneMode::Keep,
+                jobs: jobs(1),
+                painter: Painter::disabled(),
+            },
             &mut written,
             parallel_runner(&parallel_calls, &[]),
             serial_runner(&serial_calls, &[]),
@@ -2206,8 +2314,11 @@ mod tests {
         let summary = fetch_each(
             messages(),
             &targets,
-            PruneMode::Keep,
-            jobs(3),
+            SiblingRun {
+                prune: PruneMode::Keep,
+                jobs: jobs(3),
+                painter: Painter::disabled(),
+            },
             &mut written,
             parallel_runner(&parallel_calls, &[]),
             serial_runner(&serial_calls, &[]),
@@ -2231,8 +2342,11 @@ mod tests {
         fetch_each(
             messages(),
             &targets,
-            PruneMode::Keep,
-            jobs(2),
+            SiblingRun {
+                prune: PruneMode::Keep,
+                jobs: jobs(2),
+                painter: Painter::disabled(),
+            },
             &mut written,
             parallel_runner(&parallel_calls, &[]),
             serial_runner(&serial_calls, &[]),
@@ -2257,8 +2371,11 @@ mod tests {
         fetch_each(
             messages(),
             &targets,
-            PruneMode::Keep,
-            jobs(3),
+            SiblingRun {
+                prune: PruneMode::Keep,
+                jobs: jobs(3),
+                painter: Painter::disabled(),
+            },
             &mut written,
             parallel_runner(&parallel_calls, &["alpha"]),
             serial_runner(&serial_calls, &[]),
@@ -2284,8 +2401,11 @@ mod tests {
         let summary = fetch_each(
             messages(),
             &targets,
-            PruneMode::Keep,
-            jobs(3),
+            SiblingRun {
+                prune: PruneMode::Keep,
+                jobs: jobs(3),
+                painter: Painter::disabled(),
+            },
             &mut written,
             parallel_runner(&parallel_calls, &["alpha"]),
             serial_runner(&serial_calls, &[]),
@@ -2311,8 +2431,11 @@ mod tests {
         let summary = fetch_each(
             messages(),
             &targets,
-            PruneMode::Keep,
-            jobs(3),
+            SiblingRun {
+                prune: PruneMode::Keep,
+                jobs: jobs(3),
+                painter: Painter::disabled(),
+            },
             &mut written,
             // 並列フェーズの実行順は決まらないため、失敗の一覧は候補順でなければ安定しない
             parallel_runner(&parallel_calls, &["zulu", "alpha"]),
@@ -2335,8 +2458,11 @@ mod tests {
         let summary = fetch_each(
             messages(),
             &targets,
-            PruneMode::Keep,
-            jobs(1),
+            SiblingRun {
+                prune: PruneMode::Keep,
+                jobs: jobs(1),
+                painter: Painter::disabled(),
+            },
             &mut written,
             parallel_runner(&parallel_calls, &["alpha"]),
             serial_runner(&serial_calls, &["alpha"]),
@@ -2363,8 +2489,11 @@ mod tests {
         let err = fetch_each(
             messages(),
             &targets,
-            PruneMode::Keep,
-            jobs(1),
+            SiblingRun {
+                prune: PruneMode::Keep,
+                jobs: jobs(1),
+                painter: Painter::disabled(),
+            },
             &mut written,
             parallel_runner_broken_at(&parallel_calls, "alpha", || Error::GitNotFound),
             serial_runner(&serial_calls, &[]),
@@ -2399,8 +2528,11 @@ mod tests {
         let err = fetch_each(
             messages(),
             &targets,
-            PruneMode::Keep,
-            jobs(1),
+            SiblingRun {
+                prune: PruneMode::Keep,
+                jobs: jobs(1),
+                painter: Painter::disabled(),
+            },
             &mut written,
             parallel_runner_broken_at(&parallel_calls, "mike", || Error::GitSpawnFailed {
                 args: "fetch --all".to_owned(),
@@ -2428,8 +2560,11 @@ mod tests {
         let err = fetch_each(
             messages(),
             &targets,
-            PruneMode::Keep,
-            jobs(2),
+            SiblingRun {
+                prune: PruneMode::Keep,
+                jobs: jobs(2),
+                painter: Painter::disabled(),
+            },
             &mut written,
             parallel_runner_without_git(&parallel_calls),
             serial_runner(&serial_calls, &[]),
@@ -2460,8 +2595,11 @@ mod tests {
         fetch_each(
             messages(),
             &targets,
-            PruneMode::Keep,
-            jobs(4),
+            SiblingRun {
+                prune: PruneMode::Keep,
+                jobs: jobs(4),
+                painter: Painter::disabled(),
+            },
             &mut written,
             parallel_runner_with_output(&parallel_calls),
             serial_runner(&serial_calls, &[]),
@@ -2499,8 +2637,11 @@ mod tests {
         fetch_each(
             messages(),
             &targets,
-            PruneMode::Keep,
-            jobs(1),
+            SiblingRun {
+                prune: PruneMode::Keep,
+                jobs: jobs(1),
+                painter: Painter::disabled(),
+            },
             &mut written,
             parallel_runner(&parallel_calls, &["alpha"]),
             serial_runner(&serial_calls, &[]),
@@ -2534,8 +2675,11 @@ mod tests {
         fetch_each(
             messages(),
             &targets,
-            PruneMode::Keep,
-            jobs(2),
+            SiblingRun {
+                prune: PruneMode::Keep,
+                jobs: jobs(2),
+                painter: Painter::disabled(),
+            },
             &mut written,
             parallel_runner(&parallel_calls, &[]),
             serial_runner(&serial_calls, &[]),
@@ -2562,7 +2706,98 @@ mod tests {
         };
 
         assert!(!summary.has_failure());
-        assert_eq!(summary_line(messages(), &summary), "成功 3 件 / 失敗 0 件");
+        assert_eq!(
+            summary_line(messages(), &summary, Painter::disabled()),
+            "成功 3 件 / 失敗 0 件"
+        );
+    }
+
+    /// FR-36: 出力の着色。
+    mod colouring {
+        use super::*;
+
+        /// 着色された範囲を数える（色指定の個数で見る）。
+        fn coloured(line: &str) -> usize {
+            line.matches('\u{1b}').count() / 2
+        }
+
+        #[test]
+        fn the_summary_turns_red_as_soon_as_one_target_failed() {
+            // 件数を読む前に見直しが要ることが分かるようにする
+            let succeeded = FetchSummary {
+                succeeded: 3,
+                failed: Vec::new(),
+            };
+            let failed = FetchSummary {
+                succeeded: 1,
+                failed: vec!["alpha".to_owned()],
+            };
+
+            assert!(
+                summary_line(messages(), &succeeded, Painter::enabled())
+                    .starts_with(SUMMARY_OK_COLOR.to_ansi())
+            );
+            assert!(
+                summary_line(messages(), &failed, Painter::enabled())
+                    .starts_with(SUMMARY_FAILED_COLOR.to_ansi())
+            );
+        }
+
+        #[test]
+        fn the_progress_line_is_the_colour_git_does_not_use() {
+            // git の出力に挟まれて並ぶため、fuzgit の行であることが色で分かる
+            let candidates = [sibling("mike", true), sibling("alpha", false)];
+            let line =
+                Painter::enabled().paint(&progress_line(0, 2, &candidates[0]), PROGRESS_COLOR);
+
+            assert!(line.starts_with(PROGRESS_COLOR.to_ansi()), "{line}");
+            assert_eq!(PROGRESS_COLOR, HighlightColor::Cyan);
+        }
+
+        #[test]
+        fn the_progress_option_is_asked_for_only_when_colouring() {
+            // 着色するときは git の標準エラーを中継するため、明示しないと進捗が止まる。
+            // 着色しないときに付けると、パイプへ進捗の制御文字が流れ込む
+            let target = FetchTarget::All;
+
+            assert!(
+                fetch_args(&target, PruneMode::Keep, Painter::enabled())
+                    .iter()
+                    .any(|argument| argument == PROGRESS_OPTION)
+            );
+            assert!(
+                !fetch_args(&target, PruneMode::Keep, Painter::disabled())
+                    .iter()
+                    .any(|argument| argument == PROGRESS_OPTION)
+            );
+            assert!(
+                sibling_fetch_args(PruneMode::Keep, Painter::enabled())
+                    .iter()
+                    .any(|argument| argument == PROGRESS_OPTION)
+            );
+        }
+
+        #[test]
+        fn nothing_is_coloured_when_the_output_is_not_a_terminal() {
+            // パイプ・リダイレクトで受けているスクリプトの挙動を変えない
+            let summary = FetchSummary {
+                succeeded: 1,
+                failed: vec!["alpha".to_owned()],
+            };
+            let candidates = [sibling("mike", true)];
+
+            assert_eq!(
+                coloured(&summary_line(messages(), &summary, Painter::disabled())),
+                0
+            );
+            assert_eq!(
+                coloured(
+                    &Painter::disabled()
+                        .paint(&progress_line(0, 1, &candidates[0]), PROGRESS_COLOR)
+                ),
+                0
+            );
+        }
     }
 
     #[test]
@@ -2573,7 +2808,7 @@ mod tests {
         };
 
         assert!(summary.has_failure());
-        let line = summary_line(messages(), &summary);
+        let line = summary_line(messages(), &summary, Painter::disabled());
         assert!(
             line.contains("成功 1 件 / 失敗 2 件"),
             "both counts should be shown: {line}"
@@ -2691,8 +2926,8 @@ mod tests {
             failed: vec!["alpha".to_owned()],
         };
 
-        let japanese = summary_line(Language::Japanese.messages(), &summary);
-        let english = summary_line(Language::English.messages(), &summary);
+        let japanese = summary_line(Language::Japanese.messages(), &summary, Painter::disabled());
+        let english = summary_line(Language::English.messages(), &summary, Painter::disabled());
 
         assert_ne!(japanese, english, "the summary must be translated");
         assert!(

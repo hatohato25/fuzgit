@@ -67,7 +67,11 @@ const PANEL_RULE: char = '─';
 const PANEL_CONTEXT_SEPARATOR: &str = " · ";
 
 /// ANSI: 装飾をすべて解除する。
-const ANSI_RESET: &str = "\u{1b}[0m";
+///
+/// 端末へ直接書き出す 1 行の着色（[`crate::color`]）とも共有する。色の語彙を
+/// fuzgit 全体で 1 つに保つためであり、候補一覧・プレビュー・標準エラーの 3 経路で
+/// 同じ [`HighlightColor`] が同じ見え方になることをこの共有で担保する。
+pub(crate) const ANSI_RESET: &str = "\u{1b}[0m";
 
 /// ANSI: 前景を暗くする（枠の 2 行目と罫線）。
 ///
@@ -253,6 +257,14 @@ pub enum HighlightColor {
     Yellow,
     /// 青（ANSI 34）。
     Blue,
+    /// シアン（ANSI 36）。
+    ///
+    /// 候補一覧では使わない。複数の対象を順に処理するコマンド（`gz fetch --siblings` /
+    /// `gz pull` / `gz worktree add` の依存インストール）が標準エラーへ出す進捗行
+    /// 専用の色である。進捗行は git 自身の出力に挟まれて並ぶため、**git が使わない色**を
+    /// 選んで「これは fuzgit の行である」ことを一目で分けられるようにしている
+    /// （git は緑・赤・黄を diff / status / branch で使う）。
+    Cyan,
     /// 前景を暗くする（ANSI 2 / faint）。
     ///
     /// **色ではなく装飾である。**「重要でない」「まだ本番ではない」ことを、目立たせずに
@@ -273,23 +285,26 @@ impl HighlightColor {
             Self::Red => style.fg(Color::Red),
             Self::Yellow => style.fg(Color::Yellow),
             Self::Blue => style.fg(Color::Blue),
+            Self::Cyan => style.fg(Color::Cyan),
             // 色ではなく装飾。前景色は端末テーマのまま弱める
             Self::Dim => style.add_modifier(Modifier::DIM),
         }
     }
 
-    /// プレビュー本文へ埋め込む ANSI の前景色指定へ変換する。
+    /// ANSI の前景色指定へ変換する。
     ///
     /// 候補一覧は ratatui の `Style` で描かれるのに対し、プレビューは
-    /// [`ItemPreview::AnsiText`] として渡す文字列であり、色の伝え方が異なる。
-    /// **同じ [`HighlightColor`] から両方を導く**ことで、一覧の色と枠 1 行目の色が
-    /// 食い違わないようにする。
-    fn to_ansi(self) -> &'static str {
+    /// [`ItemPreview::AnsiText`] として渡す文字列、標準エラーへの 1 行
+    /// （[`crate::color`]）はそのまま端末へ流すバイト列であり、色の伝え方が異なる。
+    /// **同じ [`HighlightColor`] からすべてを導く**ことで、一覧の色・枠 1 行目の色・
+    /// 進捗行の色が食い違わないようにする。
+    pub(crate) fn to_ansi(self) -> &'static str {
         match self {
             Self::Green => "\u{1b}[32m",
             Self::Red => "\u{1b}[31m",
             Self::Yellow => "\u{1b}[33m",
             Self::Blue => "\u{1b}[34m",
+            Self::Cyan => "\u{1b}[36m",
             Self::Dim => ANSI_DIM,
         }
     }

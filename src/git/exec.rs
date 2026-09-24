@@ -12,7 +12,7 @@
 //! | 系統 | 出力を読むのは | ロケール | 該当する関数 |
 //! |---|---|---|---|
 //! | **(A)** | fuzgit（パースする） | `LC_MESSAGES=C` に固定 | [`capture_git`] / [`capture_git_in`] / [`capture_git_with_status_in`] |
-//! | **(B)** | ユーザー（端末・プレビューで読む） | 解決された表示言語を伝播 | [`run_git`] / [`run_git_in`] / [`capture_git_stderr_in`] / [`capture_git_display`] / [`capture_git_display_in`] |
+//! | **(B)** | ユーザー（端末・プレビューで読む） | 解決された表示言語を伝播 | [`run_git`] / [`run_git_in`] / [`run_git_painted_in`] / [`capture_git_stderr_in`] / [`capture_git_display`] / [`capture_git_display_in`] |
 //!
 //! **不変条件: `language: Language` を引数に取る関数が (B)、取らない関数が (A)。**
 //! 分類を命名規約ではなく型で表現しているため、新しい呼び出しを書くときは
@@ -29,8 +29,15 @@ use std::io::{ErrorKind, Write as _};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::color::{FetchOutputStream, Painter};
 use crate::error::{Error, Result};
 use crate::i18n::Language;
+
+/// 標準エラーを中継するときの読み取り単位。
+///
+/// `git fetch` の進捗表示は復帰（`\r`）で同じ行を上書きするため、まとめて読んでから
+/// 書き出すと進捗が固まって見える。行より小さい単位で読み、届いた分をそのまま流す。
+const RELAY_CHUNK_BYTES: usize = 1024;
 
 /// デバッグログを有効にする環境変数名。
 const DEBUG_ENV: &str = "FUZGIT_DEBUG";
@@ -455,6 +462,110 @@ pub fn run_git_in(language: Language, directory: &Path, args: &[&str]) -> Result
     run(Some(directory), args, LocaleIntent::Display(language))
 }
 
+/// `git` を実行し、**標準エラーだけ**を着色しながら中継する（**(B) 系**）。
+///
+/// `git fetch` の更新表（` * [new branch] ...`）へ色を乗せるためだけに存在する。
+/// 出力を読むのは変わらずユーザーであり、fuzgit が見るのは行頭の状態コードだけである
+/// （着色の規則と、その例外性の説明は [`crate::color`] のモジュール doc comment）。
+///
+/// # 継承したままにするもの
+///
+/// **標準入力と標準出力は継承する。**入力を塞がないのは、資格情報の入力や SSH の
+/// パスフレーズを git（および ssh）が要求できるようにするためである。これらの
+/// プロンプトは標準エラーではなく `/dev/tty` を直接開いて表示されるため、
+/// 標準エラーを中継しても対話は成立する。
+///
+/// # 端末でない場合は中継しない
+///
+/// `painter` が色を出さない状況（パイプ・リダイレクト・`NO_COLOR`）では
+/// [`run_git_in`] と同じく**完全に継承する**。中継を挟むと、git が「標準エラーが端末で
+/// ない」と判断して進捗表示を止める副作用まで持ち込むことになり、色を出さない場面で
+/// 出力が変わってしまうためである。
+///
+/// # Errors
+///
+/// [`run_git`] と同じ。中継の失敗は git の終了コードを変えないため、
+/// 書き込みエラーは握り潰す（色を出せなかったことで操作の成否を変えない）。
+pub fn run_git_painted(language: Language, args: &[&str], painter: Painter) -> Result<()> {
+    run_painted(None, language, args, painter)
+}
+
+/// [`run_git_painted`] と同じだが、`directory` をカレントディレクトリとして実行する（**(B) 系**）。
+///
+/// # Errors
+///
+/// [`run_git_painted`] と同じ。
+pub fn run_git_painted_in(
+    language: Language,
+    directory: &Path,
+    args: &[&str],
+    painter: Painter,
+) -> Result<()> {
+    run_painted(Some(directory), language, args, painter)
+}
+
+/// 標準エラーを着色しながら中継して `git` を実行する。
+fn run_painted(
+    directory: Option<&Path>,
+    language: Language,
+    args: &[&str],
+    painter: Painter,
+) -> Result<()> {
+    if !painter.is_enabled() {
+        return run(directory, args, LocaleIntent::Display(language));
+    }
+
+    let mut command = build_command(directory, args, LocaleIntent::Display(language));
+    command.stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|source| map_spawn_error(source, args))?;
+
+    if let Some(stderr) = child.stderr.take() {
+        relay_painted(stderr);
+    }
+
+    let status = child
+        .wait()
+        .map_err(|source| map_spawn_error(source, args))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::GitRunFailed {
+            command: command_display(args),
+            code: status.code(),
+        })
+    }
+}
+
+/// 子プロセスの標準エラーを、着色しながら fuzgit の標準エラーへ流す。
+///
+/// 読み取りと書き込みの失敗はどちらも無視する。中継できなかったことで git の実行結果を
+/// 変えないためであり、失敗の理由は git の終了コードが伝える。
+fn relay_painted(mut source: impl std::io::Read) {
+    let mut stream = FetchOutputStream::new();
+    let mut buffer = [0_u8; RELAY_CHUNK_BYTES];
+    let mut stderr = std::io::stderr();
+
+    loop {
+        let read = match source.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+
+        let mut painted = Vec::new();
+        stream.push(&buffer[..read], &mut painted);
+        // 進捗表示は復帰で上書きされるため、溜めずにその場で送り出す
+        let _ = stderr.write_all(&painted).and_then(|()| stderr.flush());
+    }
+
+    let mut painted = Vec::new();
+    stream.flush(&mut painted);
+    let _ = stderr.write_all(&painted).and_then(|()| stderr.flush());
+}
+
 /// `git` を標準入出力を継承したまま実行する。`directory` 指定時はそこを作業ディレクトリとする。
 fn run(directory: Option<&Path>, args: &[&str], intent: LocaleIntent) -> Result<()> {
     let status = build_command(directory, args, intent)
@@ -581,10 +692,11 @@ pub struct CapturedRun {
 ///
 /// # (B) 系である根拠と、その境界条件
 ///
-/// この出力を読むのは**ユーザー**である。fuzgit は行数も文言も見ず、受け取ったバイト列を
-/// そのまま書き出すだけで、分岐に使うのは `Result` の成否（＝終了コード）だけである。
+/// この出力を読むのは**ユーザー**である。fuzgit が触れるのは表示のための着色
+/// （[`crate::color`]）だけで、分岐に使うのは `Result` の成否（＝終了コード）である。
 /// 判断基準「その出力を読むのは誰か」に照らせば (B) であり、[`capture_git_stderr_in`] を
-/// (B) とした判断とまったく同型である。
+/// (B) とした判断とまったく同型である。着色は行頭の状態コードしか見ず、解析できない行は
+/// そのまま通すため、この出力に対する fuzgit の理解が実行の結果を左右することはない。
 ///
 /// **将来この出力から失敗の理由を機械的に読み取るようになった場合は、(A) 系へ移すか、
 /// 理由の判定だけを別の (A) 系の呼び出しへ分ける必要がある。**

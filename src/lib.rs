@@ -4,6 +4,7 @@
 //! こうすることで統合テストからも同じ API を利用できる。
 
 pub mod cli;
+pub mod color;
 pub mod commands;
 pub mod error;
 pub mod finder;

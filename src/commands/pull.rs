@@ -18,12 +18,16 @@ use std::time::Instant;
 
 use anyhow::{Context as _, Result, bail};
 
+use crate::color::Painter;
 use crate::commands::confirmation::confirm;
+use crate::commands::fetch::{
+    NOTICE_COLOR, PROGRESS_COLOR, SUMMARY_FAILED_COLOR, SUMMARY_OK_COLOR,
+};
 use crate::commands::in_progress;
 use crate::commands::{HEADER_SEPARATOR, aligned_candidates, command_display};
 use crate::error::Error;
 use crate::finder::{FinderItem, FinderOptions, PreviewSource, SelectionMode, select_many_with};
-use crate::git::exec::run_git;
+use crate::git::exec::{run_git, run_git_painted};
 use crate::git::read::{
     PullScan, PullTarget, ahead_behind, current_branch, operation_in_progress, pull_targets,
     remotes, upstream as read_upstream,
@@ -118,6 +122,8 @@ pub fn run(
         return integrate_current_branch(language, messages, repository, mode);
     }
 
+    // 着色の可否は実行のたびに判定せず、コマンドの開始時に 1 度だけ決める
+    let painter = Painter::for_stderr();
     let scan = pull_targets(repository).context(messages.pull().targets_read_failed())?;
 
     let targets = match PullDecision::from_targets(&scan.targets) {
@@ -127,7 +133,7 @@ pub fn run(
             // どのブランチを取り込むのかはここでしか示せない
             let targets: Vec<&PullTarget> = scan.targets.iter().collect();
             for target in &targets {
-                report_target(messages, &mut std::io::stderr(), target)?;
+                report_target(messages, &mut std::io::stderr(), target, painter)?;
             }
             targets
         }
@@ -152,11 +158,15 @@ pub fn run(
     // 通知の閾値と比べるのは取り込みに掛かった時間だけであり、finder で候補を選んで
     // いる間は含めない（ユーザーが端末の前にいる時間であるため）
     let started = Instant::now();
-    let summary = pull_each(messages, &targets, &mut std::io::stderr(), |arguments| {
-        run_git(language, arguments)
-    })?;
+    let summary = pull_each(
+        messages,
+        &targets,
+        painter,
+        &mut std::io::stderr(),
+        |arguments| run_git_painted(language, arguments, painter),
+    )?;
     let elapsed = started.elapsed();
-    report_summary(messages, &mut std::io::stderr(), &summary)?;
+    report_summary(messages, &mut std::io::stderr(), &summary, painter)?;
 
     // 集計を書き出した**後**に通知する。通知が出ない環境でも集計は必ず出ることを
     // 構造で担保するためである（FR-29）。本文に [`summary_line`] を使わないのは、
@@ -392,6 +402,7 @@ impl PullSummary {
 fn pull_each(
     messages: &dyn Messages,
     targets: &[&PullTarget],
+    painter: Painter,
     writer: &mut impl std::io::Write,
     mut run: impl FnMut(&[&str]) -> crate::error::Result<()>,
 ) -> Result<PullSummary> {
@@ -404,12 +415,16 @@ fn pull_each(
         report_line(
             messages,
             writer,
-            &progress_line(index, targets.len(), target),
+            &painter.paint(&progress_line(index, targets.len(), target), PROGRESS_COLOR),
         )?;
 
         if failed_remotes.iter().any(|remote| remote == &target.remote) {
             // 黙って飛ばすと成功したように見えるため、理由を示したうえで失敗に数える
-            report_line(messages, writer, &skipped_line(messages, target))?;
+            report_line(
+                messages,
+                writer,
+                &painter.paint(&skipped_line(messages, target), NOTICE_COLOR),
+            )?;
             summary.failed.push(target.branch.clone());
             continue;
         }
@@ -541,16 +556,19 @@ fn skipped_line(messages: &dyn Messages, target: &PullTarget) -> String {
 }
 
 /// 実行結果の集計を 1 行に組み立てる（`gz fetch --siblings` と同形式）。
-fn summary_line(messages: &dyn Messages, summary: &PullSummary) -> String {
+///
+/// 色の決め方も `gz fetch --siblings` と揃える（`crate::commands::fetch` の `summary_line`）。
+fn summary_line(messages: &dyn Messages, summary: &PullSummary, painter: Painter) -> String {
     let mut line = messages
         .common()
         .run_summary(summary.succeeded, summary.failed.len());
 
     if summary.has_failure() {
         line.push_str(&messages.common().failed_targets(&summary.failed.join(", ")));
+        return painter.paint(&line, SUMMARY_FAILED_COLOR);
     }
 
-    line
+    painter.paint(&line, SUMMARY_OK_COLOR)
 }
 
 /// 実行結果の集計を書き出す。
@@ -564,13 +582,18 @@ fn report_summary(
     messages: &dyn Messages,
     writer: &mut impl std::io::Write,
     summary: &PullSummary,
+    painter: Painter,
 ) -> Result<()> {
-    report_line(messages, writer, &summary_line(messages, summary))?;
+    report_line(messages, writer, &summary_line(messages, summary, painter))?;
 
     // 案内は fast-forward できなかった場合にだけ添える。全件成功時や、リモートの取得に
     // 失敗しただけの場合に出すと、実行していない操作を促すことになる
     if summary.has_fast_forward_failure() {
-        report_line(messages, writer, messages.pull().fast_forward_guidance())?;
+        report_line(
+            messages,
+            writer,
+            &painter.paint(messages.pull().fast_forward_guidance(), NOTICE_COLOR),
+        )?;
     }
 
     Ok(())
@@ -607,8 +630,13 @@ fn report_target(
     messages: &dyn Messages,
     writer: &mut impl std::io::Write,
     target: &PullTarget,
+    painter: Painter,
 ) -> Result<()> {
-    report_line(messages, writer, &fixed_target_message(messages, target))
+    report_line(
+        messages,
+        writer,
+        &painter.paint(&fixed_target_message(messages, target), NOTICE_COLOR),
+    )
 }
 
 /// 現在のブランチ 1 本を、指定された方式で upstream へ取り込む（`--rebase` / `--merge`）。
@@ -637,7 +665,9 @@ fn integrate_current_branch(
 
     let arguments = remote_fetch_args(&target.remote);
     let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    run_git(language, &arguments).with_context(|| messages.pull().fetch_failed(&target.remote))?;
+    // 取得の更新表は `gz pull` でも同じ形で出るため、着色も同じにする
+    run_git_painted(language, &arguments, Painter::for_stderr())
+        .with_context(|| messages.pull().fetch_failed(&target.remote))?;
 
     // fetch で追跡参照が更新されているため、取り込む量はここで初めて確定する
     let position = ahead_behind(workdir(repository)?, &target.branch, &target.reference)
@@ -1254,7 +1284,8 @@ mod tests {
         let only = target("main", true);
         let mut written = Vec::new();
 
-        report_target(messages(), &mut written, &only).expect("writing to a buffer should succeed");
+        report_target(messages(), &mut written, &only, Painter::disabled())
+            .expect("writing to a buffer should succeed");
 
         assert_eq!(
             String::from_utf8(written).expect("the message should be utf-8"),
@@ -1338,8 +1369,14 @@ mod tests {
         let (calls, runner) = recording(succeed);
         let mut written = Vec::new();
 
-        let summary = pull_each(messages(), &targets, &mut written, runner)
-            .expect("a successful run should not fail");
+        let summary = pull_each(
+            messages(),
+            &targets,
+            Painter::disabled(),
+            &mut written,
+            runner,
+        )
+        .expect("a successful run should not fail");
 
         assert_eq!(summary.succeeded, 3);
         assert!(summary.failed.is_empty());
@@ -1368,8 +1405,14 @@ mod tests {
         });
         let mut written = Vec::new();
 
-        let summary = pull_each(messages(), &targets, &mut written, runner)
-            .expect("a remote failure is recorded, not propagated");
+        let summary = pull_each(
+            messages(),
+            &targets,
+            Painter::disabled(),
+            &mut written,
+            runner,
+        )
+        .expect("a remote failure is recorded, not propagated");
 
         assert_eq!(
             summary.failed,
@@ -1473,7 +1516,14 @@ mod tests {
         let (_calls, runner) = recording(succeed);
         let mut written = Vec::new();
 
-        pull_each(messages(), &targets, &mut written, runner).expect("the run should succeed");
+        pull_each(
+            messages(),
+            &targets,
+            Painter::disabled(),
+            &mut written,
+            runner,
+        )
+        .expect("the run should succeed");
 
         let text = String::from_utf8(written).expect("the progress should be utf-8");
         assert_eq!(
@@ -1496,8 +1546,14 @@ mod tests {
         });
         let mut written = Vec::new();
 
-        let summary = pull_each(messages(), &targets, &mut written, runner)
-            .expect("a branch failure is recorded, not propagated");
+        let summary = pull_each(
+            messages(),
+            &targets,
+            Painter::disabled(),
+            &mut written,
+            runner,
+        )
+        .expect("a branch failure is recorded, not propagated");
 
         assert_eq!(summary.succeeded, 2);
         assert_eq!(summary.failed, ["alpha"]);
@@ -1516,8 +1572,14 @@ mod tests {
         let (calls, runner) = recording(|_args: &[String]| Err(Error::GitNotFound));
         let mut written = Vec::new();
 
-        let err = pull_each(messages(), &targets, &mut written, runner)
-            .expect_err("a broken environment must stop the run");
+        let err = pull_each(
+            messages(),
+            &targets,
+            Painter::disabled(),
+            &mut written,
+            runner,
+        )
+        .expect_err("a broken environment must stop the run");
 
         assert!(
             err.chain()
@@ -1553,8 +1615,14 @@ mod tests {
         });
         let mut written = Vec::new();
 
-        let err = pull_each(messages(), &targets, &mut written, runner)
-            .expect_err("a broken environment must stop the run");
+        let err = pull_each(
+            messages(),
+            &targets,
+            Painter::disabled(),
+            &mut written,
+            runner,
+        )
+        .expect_err("a broken environment must stop the run");
 
         assert!(
             err.to_string().contains("main"),
@@ -1575,7 +1643,10 @@ mod tests {
         };
 
         assert!(!summary.has_failure());
-        assert_eq!(summary_line(messages(), &summary), "成功 3 件 / 失敗 0 件");
+        assert_eq!(
+            summary_line(messages(), &summary, Painter::disabled()),
+            "成功 3 件 / 失敗 0 件"
+        );
     }
 
     #[test]
@@ -1587,7 +1658,7 @@ mod tests {
         };
 
         assert!(summary.has_failure());
-        let line = summary_line(messages(), &summary);
+        let line = summary_line(messages(), &summary, Painter::disabled());
         assert!(
             line.contains("成功 1 件 / 失敗 2 件"),
             "both counts should be shown: {line}"
@@ -1607,7 +1678,7 @@ mod tests {
         };
         let mut written = Vec::new();
 
-        report_summary(messages(), &mut written, &summary)
+        report_summary(messages(), &mut written, &summary, Painter::disabled())
             .expect("writing to a buffer should succeed");
 
         let text = String::from_utf8(written).expect("the summary should be utf-8");
@@ -1631,7 +1702,7 @@ mod tests {
         };
         let mut written = Vec::new();
 
-        report_summary(messages(), &mut written, &summary)
+        report_summary(messages(), &mut written, &summary, Painter::disabled())
             .expect("writing to a buffer should succeed");
 
         let text = String::from_utf8(written).expect("the summary should be utf-8");
@@ -1653,7 +1724,7 @@ mod tests {
         };
         let mut written = Vec::new();
 
-        report_summary(messages(), &mut written, &summary)
+        report_summary(messages(), &mut written, &summary, Painter::disabled())
             .expect("writing to a buffer should succeed");
 
         let text = String::from_utf8(written).expect("the summary should be utf-8");
@@ -1742,8 +1813,8 @@ mod tests {
             not_fast_forwarded: 1,
         };
 
-        let japanese = summary_line(Language::Japanese.messages(), &summary);
-        let english = summary_line(Language::English.messages(), &summary);
+        let japanese = summary_line(Language::Japanese.messages(), &summary, Painter::disabled());
+        let english = summary_line(Language::English.messages(), &summary, Painter::disabled());
 
         assert_ne!(japanese, english, "the summary must be translated");
         assert!(
@@ -1795,8 +1866,14 @@ mod tests {
             let (calls, runner) = recording(succeed);
             let mut written = Vec::new();
 
-            pull_each(language.messages(), &targets, &mut written, runner)
-                .expect("a successful run should not fail");
+            pull_each(
+                language.messages(),
+                &targets,
+                Painter::disabled(),
+                &mut written,
+                runner,
+            )
+            .expect("a successful run should not fail");
 
             runs.push((
                 recorded(&calls),

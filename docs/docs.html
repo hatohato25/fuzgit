@@ -944,6 +944,13 @@ gz --lang ja branch                  # 単発の上書き。全サブコマン�
                     <span lang="ja">fuzgit が実行した git コマンドをログへ出す &mdash; <a href="#debug">デバッグ</a>参照</span>
                   </td>
                 </tr>
+                <tr>
+                  <td><code>NO_COLOR</code></td>
+                  <td>
+                    <span lang="en">Turn the colouring of <code>gz fetch</code> / <code>gz pull</code> / <code>gz worktree add</code> off. Colour is only ever written to a terminal, so a pipe or a redirect is unaffected either way</span>
+                    <span lang="ja"><code>gz fetch</code> / <code>gz pull</code> / <code>gz worktree add</code> の着色を止める。色は端末にしか書かないため、パイプ・リダイレクトでは元から影響しない</span>
+                  </td>
+                </tr>
               </tbody>
             </table>
           </div>
@@ -2620,6 +2627,22 @@ git@github.com:example/big-repo.git
               </li>
             </ul>
             <div class="note info">
+              <span class="note-label">Colour</span>
+              <p>
+                On a terminal, the lines fuzgit writes itself are coloured so
+                they stand out from git&rsquo;s own output: the
+                <code>[n/N]</code> progress lines are cyan (a colour git does
+                not use), and the closing summary is green, or red as soon as
+                one target failed. In git&rsquo;s update table the status code
+                is coloured too &mdash; green for a new branch, yellow for a
+                tag, red for a deletion, a forced update or a rejection &mdash;
+                while a plain fast-forward, the ordinary result, is left alone.
+                Only the status code is painted, never the reference names.
+                Set <code>NO_COLOR</code> to turn this off; output to a pipe or
+                a file is never coloured to begin with.
+              </p>
+            </div>
+            <div class="note info">
               <span class="note-label">Why no git status in the preview</span>
               <p>
                 <code>git status</code> walks the whole working tree before
@@ -2815,6 +2838,19 @@ git@github.com:example/big-repo.git
 * main → origin/main [behind 4]</code></pre>
               </li>
             </ul>
+            <div class="note info">
+              <span class="note-label">色</span>
+              <p>
+                端末では、fuzgit 自身が出す行に色が付き、git の出力と見分けられます。
+                <code>[n/N]</code> の進捗行はシアン（git が使わない色）、末尾の集計行は
+                成功なら緑、1 件でも失敗すれば赤になります。git の更新表も状態コードだけ
+                着色し、新しいブランチは緑、タグは黄、削除・強制更新・拒否は赤、
+                通常の結果である早送りの更新は無色のままにします。色を乗せるのは
+                状態コードだけで、参照名には乗せません。
+                <code>NO_COLOR</code> を設定すると止められます。パイプやファイルへの
+                出力は元から着色されません。
+              </p>
+            </div>
             <div class="note info">
               <span class="note-label">プレビューに git status を出さない理由</span>
               <p>

@@ -19,7 +19,9 @@ use std::path::Path;
 use anyhow::{Context as _, Result, anyhow, bail};
 
 use crate::cli::WorktreeCommand;
+use crate::color::Painter;
 use crate::commands::confirmation::confirm;
+use crate::commands::fetch::PROGRESS_COLOR;
 use crate::commands::worktree_claude::copy_agent_config;
 use crate::commands::worktree_install::{self, InstallMode};
 use crate::commands::{
@@ -565,13 +567,18 @@ fn install_targets(
     for (index, target) in targets.iter().enumerate() {
         let target = target.borrow();
         if total > 1 {
+            // 進捗行の色は `gz fetch --siblings` / `gz pull` と揃える。この行のすぐ下へ
+            // npm / pnpm 自身の出力が続くため、どこが fuzgit の行なのかが色で分かる
             writeln!(
                 writer,
                 "{line}",
-                line = messages.worktree().install_progress(
-                    index + 1,
-                    total,
-                    &install_label(messages, target)
+                line = Painter::for_stderr().paint(
+                    &messages.worktree().install_progress(
+                        index + 1,
+                        total,
+                        &install_label(messages, target)
+                    ),
+                    PROGRESS_COLOR
                 )
             )
             .context(messages.common().stderr_write_failed())?;
