@@ -1041,8 +1041,15 @@ impl WorktreeMessages for JapaneseWorktreeMessages {
     /// **行き止まりのエラーを残さない。**候補ゼロで止まるとき、`-b` を使えば先へ進める
     /// ことを併せて示す（暗黙に `-b` の動作へ倒すことはしない）。
     fn no_available_branch(&self) -> &'static str {
+        "worktree に割り当てられるブランチがありません\
+（他の worktree でチェックアウト中のブランチは対象になりません）。\
+`-b <branch>` を付けると、新しいブランチを作って worktree に入れられます"
+    }
+
+    fn no_available_local_branch(&self) -> &'static str {
         "worktree に割り当てられるローカルブランチがありません\
 （他の worktree でチェックアウト中のブランチは対象になりません）。\
+`-a` を付けるとリモート追跡ブランチも候補に含められます。\
 `-b <branch>` を付けると、新しいブランチを作って worktree に入れられます"
     }
 
@@ -1958,6 +1965,10 @@ impl CliMessages for JapaneseCliMessages {
 
     fn worktree_prune_about(&self) -> &'static str {
         "実体を失った worktree の管理情報を整理する"
+    }
+
+    fn worktree_add_all_help(&self) -> &'static str {
+        "リモート追跡ブランチも候補に含める"
     }
 
     fn worktree_add_branch_help(&self) -> &'static str {

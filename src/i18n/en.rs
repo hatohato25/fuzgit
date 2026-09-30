@@ -1140,9 +1140,17 @@ impl WorktreeMessages for EnglishWorktreeMessages {
     /// **行き止まりのエラーを残さない。**候補ゼロで止まるとき、`-b` を使えば先へ進める
     /// ことを併せて示す（暗黙に `-b` の動作へ倒すことはしない）。
     fn no_available_branch(&self) -> &'static str {
-        "There is no local branch left to put in a worktree \
+        "There is no branch left to put in a worktree \
 (a branch checked out in another worktree is not offered). \
 Pass `-b <branch>` to create a new branch and put that in the worktree instead"
+    }
+
+    /// オプション名は訳さない（design.md「翻訳しないもの」）。
+    fn no_available_local_branch(&self) -> &'static str {
+        "There is no local branch left to put in a worktree \
+(a branch checked out in another worktree is not offered). \
+Pass `-a` to offer remote-tracking branches as well, \
+or `-b <branch>` to create a new branch and put that in the worktree instead"
     }
 
     fn add_header_subject(&self) -> &'static str {
@@ -2091,6 +2099,10 @@ impl CliMessages for EnglishCliMessages {
 
     fn worktree_prune_about(&self) -> &'static str {
         "Tidy up the bookkeeping of worktrees whose directory is gone"
+    }
+
+    fn worktree_add_all_help(&self) -> &'static str {
+        "Include remote-tracking branches in the candidates"
     }
 
     fn worktree_add_branch_help(&self) -> &'static str {

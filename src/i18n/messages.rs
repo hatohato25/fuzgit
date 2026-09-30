@@ -471,6 +471,9 @@ pub trait CliMessages: Sync + std::fmt::Debug {
     /// `gz worktree prune` の説明。
     fn worktree_prune_about(&self) -> &'static str;
 
+    /// `gz worktree add -a` の説明。
+    fn worktree_add_all_help(&self) -> &'static str;
+
     /// `gz worktree add -b <BRANCH>` の説明。
     fn worktree_add_branch_help(&self) -> &'static str;
 
@@ -1006,8 +1009,17 @@ pub trait WorktreeMessages: Sync + std::fmt::Debug {
     /// `gz worktree add` に渡されたパスを UTF-8 として解釈できなかったことを伝える。
     fn path_not_utf8(&self, path: &Path) -> String;
 
-    /// 新しい worktree に割り当てられるローカルブランチが 1 件も無いことを伝える。
+    /// 新しい worktree に割り当てられるブランチが 1 件も無いことを伝える（`-a` 指定時）。
+    ///
+    /// リモート追跡ブランチまで含めても候補が無い状態であるため、残る手段は `-b` だけになる。
     fn no_available_branch(&self) -> &'static str;
+
+    /// 新しい worktree に割り当てられるローカルブランチが 1 件も無いことを伝える（`-a` 無し）。
+    ///
+    /// **まだ候補を広げる余地がある**ため、`-a`（リモート追跡ブランチも候補に含める）と
+    /// `-b`（新しいブランチを作る）の両方を案内する。オプション名は訳さない
+    /// （design.md「翻訳しないもの」）。
+    fn no_available_local_branch(&self) -> &'static str;
 
     /// 選択されたブランチが候補一覧に見つからなかったことを伝える。
     fn branch_selection_not_found(&self, selected: &str) -> String;

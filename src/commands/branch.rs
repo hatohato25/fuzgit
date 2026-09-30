@@ -3,7 +3,7 @@
 use anyhow::{Context as _, Result, anyhow};
 
 use crate::color::OutputKind;
-use crate::commands::selection_header;
+use crate::commands::{dwim_target, selection_header};
 use crate::finder::{
     FinderItem, FinderOptions, Highlight, HighlightColor, PreviewPanel, PreviewSource,
     SelectionMode, select_one_with,
@@ -173,14 +173,7 @@ fn metric(detail: &BranchDetail) -> (String, Vec<Highlight>) {
 ///
 /// リモート追跡ブランチ名がリモート名を含まない形式で、追跡先の名前を決定できない場合にエラーを返す。
 fn switch_target(messages: &dyn Messages, branch: &BranchInfo) -> Result<String> {
-    if !branch.is_remote {
-        return Ok(branch.name.clone());
-    }
-
-    branch
-        .name
-        .split_once('/')
-        .map(|(_remote, local)| local.to_owned())
+    dwim_target(branch)
         .ok_or_else(|| anyhow!(messages.branch().tracking_target_undetermined(&branch.name)))
 }
 

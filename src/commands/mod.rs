@@ -17,7 +17,7 @@ use crate::commands::revert::MessageEditing;
 use crate::commands::stash::StashAction;
 use crate::error;
 use crate::finder::{Highlight, HighlightColor};
-use crate::git::read::{BranchScope, CommitInfo, CommitScope};
+use crate::git::read::{BranchInfo, BranchScope, CommitInfo, CommitScope};
 use crate::i18n::{Language, Messages};
 
 pub mod add;
@@ -280,6 +280,31 @@ pub(crate) fn last_column_range(line: &str, last_cell: &str) -> std::ops::Range<
 
     let start = line.len().saturating_sub(last_cell.len());
     start..line.len()
+}
+
+/// 選んだブランチを git へ渡すときの名前を求める（純関数）。
+///
+/// ローカルブランチはその名前のまま。**リモート追跡ブランチは先頭のリモート名を落とし、
+/// 短縮名を渡す**（`origin/feature` → `feature`）。git の DWIM が、その名前のローカル
+/// ブランチが無く追跡ブランチがちょうど 1 つある場合に、追跡するローカルブランチを
+/// 作ってくれるためである（`git switch` / `git worktree add` のどちらも同じ規則を持つ。
+/// 実測で確認済み）。
+///
+/// **`gz branch` の切替と `gz worktree add` の両方がこれを使う。**同じ規則を 2 か所へ
+/// 書くと、片方だけ直したときに挙動だけがずれる（`gz branch create` と
+/// `gz worktree add -b` で候補生成を共有しているのと同じ判断）。
+///
+/// 区切りを持たないリモート追跡ブランチ名は `None` を返す。呼び出し側は
+/// **候補から外すか、理由を示して止まる**こと（推測で名前を組み立てない）。
+pub(crate) fn dwim_target(branch: &BranchInfo) -> Option<String> {
+    if !branch.is_remote {
+        return Some(branch.name.clone());
+    }
+
+    branch
+        .name
+        .split_once('/')
+        .map(|(_remote, local)| local.to_owned())
 }
 
 /// 選択中のコミットを色付きで示す `git show` の引数を組み立てる（プレビュー用）。

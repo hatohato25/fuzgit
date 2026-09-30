@@ -25,7 +25,8 @@ use crate::commands::fetch::PROGRESS_COLOR;
 use crate::commands::worktree_claude::copy_agent_config;
 use crate::commands::worktree_install::{self, InstallMode};
 use crate::commands::{
-    COLUMN_SEPARATOR, aligned_candidates, branch_manage, last_column_range, selection_header,
+    COLUMN_SEPARATOR, aligned_candidates, branch_manage, dwim_target, last_column_range,
+    selection_header,
 };
 use crate::finder::{
     FinderItem, FinderOptions, Highlight, HighlightColor, PreviewPanel, PreviewSource,
@@ -94,6 +95,7 @@ pub fn run(
         // （既存の `PruneMode` / `FetchScope` と同方針）
         Some(WorktreeCommand::Add {
             name,
+            all,
             branch,
             no_install,
         }) => add(
@@ -101,6 +103,12 @@ pub fn run(
             messages,
             repository,
             name,
+            // `-a` の真偽値をここで既存の型へ畳み、`gz branch` と同じ語彙で候補範囲を渡す
+            if *all {
+                BranchScope::All
+            } else {
+                BranchScope::Local
+            },
             branch.as_deref(),
             InstallMode::from_no_install(*no_install),
         ),
@@ -137,9 +145,13 @@ fn list(language: Language, messages: &dyn Messages, repository: &gix::Repositor
 
 /// ブランチを 1 件選び、新しい worktree を作成する。
 ///
-/// 候補は他の worktree で使用中でないローカルブランチに限る。git は同じブランチを
+/// 候補は他の worktree で使用中でないブランチに限る。git は同じブランチを
 /// 複数の worktree で同時にチェックアウトできないため、使用中のブランチを選べても
 /// 必ず失敗する選択肢になるだけである。
+///
+/// `scope` が [`BranchScope::All`]（`-a`）のときはリモート追跡ブランチも候補に含める。
+/// 選ばれた場合に git へ渡すのは短縮名であり、DWIM が追跡するローカルブランチを作る
+/// （[`dwim_target`]。`gz branch -a` とまったく同じ規則）。
 ///
 /// 作成に成功したら、[`InstallMode::Run`] の場合に限り依存インストールを試みる
 /// （FR-30。[`crate::commands::worktree_install`]）。**インストールの成否はこの関数の
@@ -157,6 +169,7 @@ fn add(
     messages: &dyn Messages,
     repository: &gix::Repository,
     name: &str,
+    scope: BranchScope,
     new_branch: Option<&str>,
     install: InstallMode,
 ) -> Result<()> {
@@ -168,8 +181,8 @@ fn add(
     let path = path.as_str();
 
     let arguments = match new_branch {
-        // `-b` 無しは従来どおり「既存のローカルブランチを選ぶ」
-        None => existing_branch_args(language, messages, repository, path)?,
+        // `-b` 無しは従来どおり「既存のブランチを選ぶ」（`-a` で候補の範囲が変わる）
+        None => existing_branch_args(language, messages, repository, path, scope)?,
         // `-b` 有りは「新しいブランチの作成元を選ぶ」。**選ばせる対象が入れ替わる**
         Some(new_branch) => new_branch_args(language, messages, repository, path, new_branch)?,
     };
@@ -180,23 +193,27 @@ fn add(
     finish_creation(messages, repository, path, install, PathReport::Needed)
 }
 
-/// 既存のローカルブランチを選んで `git worktree add` の引数を組み立てる（`-b` 無し）。
+/// 既存のブランチを選んで `git worktree add` の引数を組み立てる（`-b` 無し）。
 fn existing_branch_args(
     language: Language,
     messages: &dyn Messages,
     repository: &gix::Repository,
     path: &str,
+    scope: BranchScope,
 ) -> Result<Vec<String>> {
     let worktrees = read_worktrees(messages, repository)?;
     let in_use = checked_out_branches(&worktrees);
-    let locals = branches(repository, BranchScope::Local)
-        .context(messages.common().branch_list_read_failed())?;
-    let candidates = available_branches(&locals, &in_use);
+    let all = branches(repository, scope).context(messages.common().branch_list_read_failed())?;
+    let candidates = available_branches(&all, &in_use);
     if candidates.is_empty() {
-        // 行き止まりのエラーを残さない。`-b` を付ければ先へ進めることを案内する。
-        // **候補ゼロを検出して暗黙に `-b` の動作へ倒すことはしない**
-        //（名前を受け取る手段が無く、暗黙のフォールバック禁止にも反する）
-        bail!(messages.worktree().no_available_branch());
+        // 行き止まりのエラーを残さない。先へ進める手段を案内する。
+        // **候補ゼロを検出して暗黙に `-a` や `-b` の動作へ倒すことはしない**
+        //（`-b` は名前を受け取る手段が無く、暗黙のフォールバック禁止にも反する）
+        bail!(match scope {
+            // まだ広げる余地がある。`-a` と `-b` の両方を示す
+            BranchScope::Local => messages.worktree().no_available_local_branch(),
+            BranchScope::All => messages.worktree().no_available_branch(),
+        });
     }
 
     let items = candidates
@@ -218,7 +235,12 @@ fn existing_branch_args(
         .find(|candidate| candidate.name == selected)
         .ok_or_else(|| anyhow!(messages.worktree().branch_selection_not_found(&selected)))?;
 
-    Ok(add_args(path, &branch.name))
+    // 候補に残っている時点で短縮名は求まっている（[`available_branches`] が求められない
+    // ものを外している）。それでも `?` で受けるのは、推測で名前を組み立てないため
+    let target = dwim_target(branch)
+        .ok_or_else(|| anyhow!(messages.branch().tracking_target_undetermined(&branch.name)))?;
+
+    Ok(add_args(path, &target))
 }
 
 /// 新しいブランチの作成元を選んで `git worktree add -b` の引数を組み立てる（FR-31）。
@@ -920,12 +942,17 @@ fn removable(worktrees: &[WorktreeInfo]) -> Vec<&WorktreeInfo> {
 
 /// 新しい worktree に割り当てられるローカルブランチを候補順のまま抽出する。
 fn available_branches<'a>(
-    locals: &'a [BranchInfo],
+    branches: &'a [BranchInfo],
     in_use: &std::collections::HashSet<String>,
 ) -> Vec<&'a BranchInfo> {
-    locals
+    branches
         .iter()
-        .filter(|branch| !in_use.contains(&branch.name))
+        .filter(|branch| {
+            // 比べるのは**git へ渡す名前**であって表示名ではない。`origin/feature` を
+            // 選んだときに git が触るのはローカルの `feature` であり、それが他の worktree で
+            // 使用中なら必ず失敗する。短縮名を求められないものも同じく候補に残さない
+            dwim_target(branch).is_some_and(|target| !in_use.contains(&target))
+        })
         .collect()
 }
 
@@ -1481,8 +1508,112 @@ mod tests {
         }
     }
 
+    fn remote(name: &str) -> BranchInfo {
+        BranchInfo {
+            name: name.to_owned(),
+            is_current: false,
+            is_remote: true,
+        }
+    }
+
     fn in_use(names: &[&str]) -> HashSet<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// 候補の表示名を並べる。
+    fn names(candidates: &[&BranchInfo]) -> Vec<String> {
+        candidates
+            .iter()
+            .map(|branch| branch.name.clone())
+            .collect()
+    }
+
+    /// FR-21 の改訂: `-a` でリモート追跡ブランチも worktree の対象にする。
+    mod remote_candidates {
+        use super::*;
+
+        #[test]
+        fn a_remote_branch_is_handed_to_git_by_its_short_name() {
+            // git の DWIM が追跡するローカルブランチを作る（`gz branch -a` と同じ規則）
+            let branch = remote("origin/feature");
+
+            assert_eq!(dwim_target(&branch).as_deref(), Some("feature"));
+            assert_eq!(
+                add_args("/repos/wt", &dwim_target(&branch).expect("short name")),
+                ["worktree", "add", "--", "/repos/wt", "feature"]
+            );
+        }
+
+        #[test]
+        fn a_remote_branch_is_dropped_when_its_local_name_is_used_elsewhere() {
+            // 表示名（`origin/wip`）ではなく**git へ渡す名前**（`wip`）で判断する。
+            // そうしないと、選んだ瞬間に必ず失敗する候補が一覧に残る
+            let all = [
+                local("main"),
+                remote("origin/feature"),
+                remote("origin/wip"),
+            ];
+
+            let candidates = available_branches(&all, &in_use(&["wip"]));
+
+            assert_eq!(names(&candidates), ["main", "origin/feature"]);
+        }
+
+        #[test]
+        fn a_remote_branch_whose_name_has_no_remote_prefix_is_dropped() {
+            // 短縮名を求められない。推測で名前を組み立てず、候補にも残さない
+            let all = [remote("detached-looking-name")];
+
+            assert!(available_branches(&all, &in_use(&[])).is_empty());
+        }
+
+        #[test]
+        fn a_local_branch_and_its_remote_counterpart_are_both_offered() {
+            // `gz branch -a` と同じく重複を消さない。どちらを選んでも git へ渡す名前は
+            // 同じであり、消すと「リモート名で絞り込む」使い方ができなくなる
+            let all = [local("feature"), remote("origin/feature")];
+
+            let candidates = available_branches(&all, &in_use(&[]));
+
+            assert_eq!(names(&candidates), ["feature", "origin/feature"]);
+            assert_eq!(
+                dwim_target(candidates[0]),
+                dwim_target(candidates[1]),
+                "どちらを選んでも git へ渡す名前は同じ"
+            );
+        }
+
+        #[test]
+        fn the_two_dead_end_messages_point_at_different_ways_forward() {
+            // `-a` 無しならまだ候補を広げられる。`-a` 済みなら残る手段は `-b` だけ
+            for language in [Language::Japanese, Language::English] {
+                let worktree = language.messages().worktree();
+
+                assert!(
+                    worktree.no_available_local_branch().contains("-a"),
+                    "{language:?}: {}",
+                    worktree.no_available_local_branch()
+                );
+                assert!(
+                    !worktree.no_available_branch().contains("-a"),
+                    "`-a` 済みの行き止まりで `-a` を勧めない: {}",
+                    worktree.no_available_branch()
+                );
+                for message in [
+                    worktree.no_available_branch(),
+                    worktree.no_available_local_branch(),
+                ] {
+                    assert!(message.contains("-b"), "{language:?}: {message}");
+                }
+            }
+        }
+
+        #[test]
+        fn a_local_branch_that_is_used_elsewhere_still_hides_its_remote_counterpart() {
+            let all = [local("feature"), remote("origin/feature")];
+
+            assert!(available_branches(&all, &in_use(&["feature"])).is_empty());
+        }
     }
 
     #[test]
@@ -1911,6 +2042,7 @@ Removing worktrees/old: gitdir file points to non-existent location\n";
 
             for text in [
                 worktree.no_available_branch(),
+                worktree.no_available_local_branch(),
                 worktree.no_removable(),
                 worktree.remove_confirmation(),
                 &worktree.remove_force_confirmation(),
@@ -1967,6 +2099,10 @@ Removing worktrees/old: gitdir file points to non-existent location\n";
         assert_ne!(
             japanese.no_available_branch(),
             english.no_available_branch()
+        );
+        assert_ne!(
+            japanese.no_available_local_branch(),
+            english.no_available_local_branch()
         );
         assert_ne!(
             japanese.branch_selection_not_found("feature"),

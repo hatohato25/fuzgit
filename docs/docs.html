@@ -3349,6 +3349,7 @@ fast-forward できなかったブランチは、そのブランチへ切り替�
             <pre><code>gz worktree                  # pick from the list and print the path to stdout
 cd "$(gz worktree)"          # shell integration (move to the picked worktree)
 gz worktree add &lt;name&gt;       # pick a branch and create a new worktree next to the repository
+gz worktree add -a &lt;name&gt;    # offer remote-tracking branches as well
 gz worktree add -b &lt;branch&gt; &lt;name&gt;   # create a new branch for it, picking its starting point
 gz worktree remove           # pick a worktree and remove it (with confirmation)
 gz worktree remove --force   # same, discarding modified and untracked files inside it (with a warning)
@@ -3378,12 +3379,25 @@ gz worktree prune            # tidy up bookkeeping for worktrees whose directory
                 <thead><tr><th scope="col">Argument</th><th scope="col">Description</th></tr></thead>
                 <tbody>
                   <tr><td><code>&lt;NAME&gt;</code></td><td>Name of the worktree to create (required positional argument). A <strong>name</strong>, not a path &mdash; separators are refused</td></tr>
+                  <tr><td><code>-a</code>, <code>--all</code></td><td>Include remote-tracking branches in the candidates, the same spelling as <code>gz branch -a</code>. Cannot be combined with <code>-b</code></td></tr>
                   <tr><td><code>-b &lt;BRANCH&gt;</code></td><td>Create a new branch with this name and put <em>that</em> in the worktree. <strong>No long spelling</strong> &mdash; <code>git worktree add -b</code> has none either</td></tr>
                 </tbody>
               </table>
             </div>
             <ul>
-              <li>What you pick in the fuzzy finder is the branch to check out. Candidates are limited to local branches <strong>not in use by another worktree</strong> (git cannot check out the same branch in two worktrees at once).</li>
+              <li>What you pick in the fuzzy finder is the branch to check out. Candidates are limited to branches <strong>not in use by another worktree</strong> (git cannot check out the same branch in two worktrees at once).</li>
+              <li>
+                <code>-a</code> adds remote-tracking branches, exactly as
+                <code>gz branch -a</code> does. Picking
+                <code>origin/feature</code> hands git the short name
+                (<code>feature</code>) and git&rsquo;s DWIM creates the local
+                branch that tracks it. The &ldquo;in use elsewhere&rdquo; filter
+                is applied to <strong>that short name</strong>, so
+                <code>origin/feature</code> disappears from the list while a
+                local <code>feature</code> is checked out in another worktree
+                &mdash; picking it could only ever fail. A local branch and its
+                remote counterpart are both listed, as in <code>gz branch -a</code>.
+              </li>
               <li>
                 <strong>The worktree is always created next to the repository root</strong>, whatever
                 directory you run the command from. Given a repository at
@@ -3523,6 +3537,7 @@ gz worktree prune            # tidy up bookkeeping for worktrees whose directory
             <pre><code>gz worktree                  # 一覧から選んでパスを標準出力へ出す
 cd "$(gz worktree)"          # シェル連携（選んだ worktree へ移動する）
 gz worktree add &lt;name&gt;       # ブランチを選び、リポジトリの兄弟として worktree を作る
+gz worktree add -a &lt;name&gt;    # リモート追跡ブランチも候補に含める
 gz worktree add -b &lt;branch&gt; &lt;name&gt;   # 新しいブランチを作って入れる（作成元を選ぶ）
 gz worktree remove           # worktree を選んで削除する（確認あり）
 gz worktree remove --force   # 変更済み・未追跡のファイルごと削除する（警告つきの確認あり）
@@ -3550,6 +3565,7 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
                 <thead><tr><th scope="col">引数</th><th scope="col">説明</th></tr></thead>
                 <tbody>
                   <tr><td><code>&lt;NAME&gt;</code></td><td>作成する worktree の名前（必須の位置引数）。パスではなく<strong>名前</strong>で、区切り文字は受け付けない</td></tr>
+                  <tr><td><code>-a</code>, <code>--all</code></td><td>リモート追跡ブランチも候補に含める（<code>gz branch -a</code> と同じ綴り）。<code>-b</code> とは併用できない</td></tr>
                   <tr><td><code>-b &lt;BRANCH&gt;</code></td><td>この名前で新しいブランチを作り、<em>それ</em>を worktree に入れる。<strong>長綴りは無い</strong>（<code>git worktree add -b</code> にも無いため）</td></tr>
                 </tbody>
               </table>
@@ -3557,8 +3573,17 @@ gz worktree prune            # 実体を失った worktree の管理情報を整
             <ul>
               <li>
                 fuzzy finder で選ぶのはチェックアウトするブランチです。候補は
-                <strong>他の worktree で使用中でない</strong>ローカルブランチに限ります
+                <strong>他の worktree で使用中でない</strong>ブランチに限ります
                 （git は同じブランチを複数の worktree で同時にチェックアウトできないため）。
+              </li>
+              <li>
+                <code>-a</code> でリモート追跡ブランチも候補に含めます（<code>gz branch -a</code>
+                とまったく同じ規則）。<code>origin/feature</code> を選ぶと git へは短縮名
+                （<code>feature</code>）を渡し、git の DWIM が追跡するローカルブランチを作ります。
+                「使用中」の判定は<strong>その短縮名</strong>に対して行うため、ローカルの
+                <code>feature</code> が別の worktree でチェックアウト中なら
+                <code>origin/feature</code> も候補から消えます（選んでも必ず失敗するため）。
+                ローカルブランチとそのリモート側は <code>gz branch -a</code> と同じく両方並びます。
               </li>
               <li>
                 <strong>worktree は必ずリポジトリルートの兄弟に作成します。</strong>どのディレクトリで

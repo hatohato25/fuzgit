@@ -332,6 +332,14 @@ pub enum WorktreeCommand {
         /// Name of the worktree to create (always made next to the repository root)
         name: String,
 
+        /// Include remote-tracking branches in the candidates
+        //
+        // 綴りは `gz branch -a` と揃える（候補へリモート追跡ブランチを足す、という
+        // 意味がまったく同じであるため）。`-b` とは併用できない。`-b` の候補は
+        // 作成元であり、そちらは元からリモート追跡ブランチを含んでいる（FR-31）
+        #[arg(short, long, conflicts_with = "branch")]
+        all: bool,
+
         /// Create a new branch with this name and check it out
         //
         // 長綴りは設けない（git 本体の `git worktree add` にも `-b` の長綴りが無く、
@@ -570,6 +578,7 @@ fn localize_worktree(command: ClapCommand, cli: &dyn CliMessages) -> ClapCommand
                 .mut_arg("name", |argument| {
                     argument.help(cli.worktree_add_path_help())
                 })
+                .mut_arg("all", |argument| argument.help(cli.worktree_add_all_help()))
                 .mut_arg("branch", |argument| {
                     argument.help(cli.worktree_add_branch_help())
                 })
@@ -1235,6 +1244,7 @@ mod tests {
                 command,
                 Some(WorktreeCommand::Add {
                     name: "feature".to_owned(),
+                    all: false,
                     branch: None,
                     no_install: false,
                 })
@@ -1268,6 +1278,7 @@ mod tests {
                 command,
                 Some(WorktreeCommand::Add {
                     name: "wt".to_owned(),
+                    all: false,
                     branch: Some("feature/new".to_owned()),
                     no_install: false,
                 })
@@ -1279,6 +1290,55 @@ mod tests {
             Cli::try_parse_from(["gz", "worktree", "add", "--new-branch", "x", "wt"]).is_err(),
             "長綴りは設けない"
         );
+    }
+
+    #[test]
+    fn worktree_add_takes_all_in_both_spellings() {
+        // 綴りは `gz branch -a` と揃える（候補へリモート追跡ブランチを足す意味が同じ）
+        for argument in ["-a", "--all"] {
+            let cli = Cli::try_parse_from(["gz", "worktree", "add", argument, "review"])
+                .unwrap_or_else(|err| panic!("`gz worktree add {argument}` should parse: {err}"));
+
+            match cli.command {
+                Command::Worktree { command } => assert_eq!(
+                    command,
+                    Some(WorktreeCommand::Add {
+                        name: "review".to_owned(),
+                        all: true,
+                        branch: None,
+                        no_install: false,
+                    })
+                ),
+                other => panic!("unexpected subcommand: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn worktree_add_rejects_all_combined_with_a_new_branch() {
+        // `-b` の候補は「作成元」であり、そちらは元からリモート追跡ブランチを含む。
+        // 併用を許すと `-a` が何に効くのかが読み取れない
+        Cli::try_parse_from(["gz", "worktree", "add", "-a", "-b", "feature", "review"])
+            .expect_err("`-a` and `-b` must not be combined");
+    }
+
+    #[test]
+    fn worktree_add_keeps_all_and_the_install_flag_orthogonal() {
+        let cli = Cli::try_parse_from(["gz", "worktree", "add", "-a", "--no-install", "review"])
+            .expect("`-a --no-install` should parse");
+
+        match cli.command {
+            Command::Worktree { command } => assert_eq!(
+                command,
+                Some(WorktreeCommand::Add {
+                    name: "review".to_owned(),
+                    all: true,
+                    branch: None,
+                    no_install: true,
+                })
+            ),
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
     }
 
     #[test]
@@ -1319,6 +1379,7 @@ mod tests {
                 command,
                 Some(WorktreeCommand::Add {
                     name: "wt".to_owned(),
+                    all: false,
                     branch: Some("feature".to_owned()),
                     no_install: true,
                 })
@@ -1339,6 +1400,7 @@ mod tests {
                 command,
                 Some(WorktreeCommand::Add {
                     name: "feature".to_owned(),
+                    all: false,
                     branch: None,
                     no_install: true,
                 })
