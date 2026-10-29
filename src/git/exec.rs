@@ -502,7 +502,7 @@ impl PaintedStreams {
     }
 
     /// 中継するストリームが 1 つも無いか。
-    fn inherits_everything(self) -> bool {
+    pub(crate) fn inherits_everything(self) -> bool {
         !self.stdout.is_enabled() && !self.stderr.is_enabled()
     }
 }
@@ -561,35 +561,8 @@ fn run_painted(
         return run(directory, args, LocaleIntent::Display(language));
     }
 
-    let mut command = build_command(directory, args, LocaleIntent::Display(language));
-    if streams.stdout.is_enabled() {
-        command.stdout(Stdio::piped());
-    }
-    if streams.stderr.is_enabled() {
-        command.stderr(Stdio::piped());
-    }
-
-    let mut child = command
-        .spawn()
-        .map_err(|source| map_spawn_error(source, args))?;
-
-    let child_stdout = child.stdout.take();
-    let child_stderr = child.stderr.take();
-
-    // 両方を中継する場合は別々に読む。片方を読み切ってからもう片方を読むと、
-    // 先に埋まったパイプで git が書き込みをブロックしたまま進まなくなる
-    std::thread::scope(|scope| {
-        if let Some(source) = child_stdout {
-            scope.spawn(move || relay_painted(source, streams.kind, &mut std::io::stdout()));
-        }
-        if let Some(source) = child_stderr {
-            relay_painted(source, streams.kind, &mut std::io::stderr());
-        }
-    });
-
-    let status = child
-        .wait()
-        .map_err(|source| map_spawn_error(source, args))?;
+    let command = build_command(directory, args, LocaleIntent::Display(language));
+    let status = spawn_painted(command, streams).map_err(|source| map_spawn_error(source, args))?;
 
     if status.success() {
         Ok(())
@@ -599,6 +572,46 @@ fn run_painted(
             code: status.code(),
         })
     }
+}
+
+/// `command` を起動し、`streams` で指定されたストリームを着色しながら中継して終了を待つ。
+///
+/// git 専用の不変条件（ロケールの扱い・エラーの型）を持たない**中継の部分だけ**であり、
+/// `gh pr checkout` が内部で実行する git の報告を着色するために [`crate::gh`] とも共有する。
+/// 標準入力は継承のまま残す（[`run_git_painted`] を参照）。
+///
+/// # Errors
+///
+/// 起動または終了の待機に失敗した場合は、その I/O エラーを返す。
+/// 変換は呼び出し側が行う（起動したプログラムによって対応するドメインエラーが異なるため）。
+pub(crate) fn spawn_painted(
+    mut command: Command,
+    streams: PaintedStreams,
+) -> std::io::Result<std::process::ExitStatus> {
+    if streams.stdout.is_enabled() {
+        command.stdout(Stdio::piped());
+    }
+    if streams.stderr.is_enabled() {
+        command.stderr(Stdio::piped());
+    }
+
+    let mut child = command.spawn()?;
+
+    let child_stdout = child.stdout.take();
+    let child_stderr = child.stderr.take();
+
+    // 両方を中継する場合は別々に読む。片方を読み切ってからもう片方を読むと、
+    // 先に埋まったパイプで子プロセスが書き込みをブロックしたまま進まなくなる
+    std::thread::scope(|scope| {
+        if let Some(source) = child_stdout {
+            scope.spawn(move || relay_painted(source, streams.kind, &mut std::io::stdout()));
+        }
+        if let Some(source) = child_stderr {
+            relay_painted(source, streams.kind, &mut std::io::stderr());
+        }
+    });
+
+    child.wait()
 }
 
 /// 子プロセスの出力を、着色しながら `sink` へ流す。
@@ -1078,6 +1091,39 @@ mod tests {
             err.starts_with(HighlightColor::Green.to_ansi()) && err.contains("other"),
             "the outcome must be coloured on stderr: {err:?}"
         );
+    }
+
+    #[test]
+    fn spawning_with_a_relay_keeps_the_exit_status_of_the_child() {
+        // `gh pr checkout` もこの中継を通る（`crate::gh::run_gh_painted`）。中継を挟んでも
+        // 成否が子プロセスのまま伝わることを確かめる。出力の無い `git diff --quiet` を使い、
+        // テストの出力へ中継結果を混ぜない
+        use crate::test_support::{TempDir, commit, init_repository};
+
+        let dir = TempDir::new("exec-spawn-painted-status");
+        init_repository(dir.path());
+        commit(dir.path(), "init");
+
+        let streams = PaintedStreams {
+            stdout: Painter::enabled(),
+            stderr: Painter::enabled(),
+            kind: OutputKind::SwitchReport,
+        };
+        let diff = || {
+            build_command(
+                Some(dir.path()),
+                &["diff", "--quiet"],
+                LocaleIntent::Display(Language::English),
+            )
+        };
+
+        let clean = spawn_painted(diff(), streams).expect("git diff should run");
+        assert!(clean.success(), "a clean tree has no differences");
+
+        // `commit` が書き込んで追跡させるファイル（`test_support` の `HISTORY_FILE`）
+        std::fs::write(dir.path().join("history.txt"), "changed\n").expect("writable");
+        let dirty = spawn_painted(diff(), streams).expect("git diff should run");
+        assert_eq!(dirty.code(), Some(1), "a difference must be reported as is");
     }
 
     #[test]

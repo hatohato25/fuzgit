@@ -29,7 +29,7 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use crate::error::{Error, Result};
-use crate::git::exec::{DEBUG_PREFIX, debug_enabled};
+use crate::git::exec::{DEBUG_PREFIX, PaintedStreams, debug_enabled, spawn_painted};
 
 /// 実行する GitHub CLI のプログラム名。
 const PROGRAM: &str = "gh";
@@ -105,6 +105,39 @@ pub fn run_gh(args: &[&str]) -> Result<()> {
         .status()
         .map_err(|source| map_spawn_error(source, args))?;
 
+    check_run_status(args, status)
+}
+
+/// [`run_gh`] と同じだが、`gh` の出力のうち `streams` で指定されたストリームを
+/// 着色しながら中継する（**表示用**）。
+///
+/// `gh pr checkout` に用いる。`gh` は内部で `git checkout` 等を実行し、その報告
+/// （`M\ta.txt` / `Switched to branch 'main'`）を自身の標準出力・標準エラーへそのまま流す。
+/// これを `gz branch` と同じ規則で着色する（FR-36。解釈の範囲は [`crate::color`] に閉じる）。
+///
+/// 標準入力は継承するため、認証プロンプトへの応答は [`run_gh`] と同じく成立する。
+/// 色を出さない状況（パイプ・リダイレクト・`NO_COLOR`）では中継せず、[`run_gh`] と
+/// 完全に同じ経路を通る。
+///
+/// # Errors
+///
+/// [`run_gh`] と同じ。
+pub fn run_gh_painted(args: &[&str], streams: PaintedStreams) -> Result<()> {
+    if streams.inherits_everything() {
+        return run_gh(args);
+    }
+
+    log(args, false);
+
+    let mut command = Command::new(PROGRAM);
+    command.args(args);
+    let status = spawn_painted(command, streams).map_err(|source| map_spawn_error(source, args))?;
+
+    check_run_status(args, status)
+}
+
+/// 表示用に実行した `gh` の終了状態を、終了コードに応じたドメインエラーへ変換する。
+fn check_run_status(args: &[&str], status: std::process::ExitStatus) -> Result<()> {
     if status.success() {
         return Ok(());
     }

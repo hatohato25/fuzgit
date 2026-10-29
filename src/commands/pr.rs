@@ -21,6 +21,7 @@ use std::io::Write as _;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 
+use crate::color::OutputKind;
 use crate::commands::worktree_install::InstallMode;
 use crate::commands::{aligned_candidates_with_columns, selection_header, worktree};
 use crate::finder::{
@@ -28,6 +29,7 @@ use crate::finder::{
     SelectionMode, select_one_with,
 };
 use crate::gh;
+use crate::git::exec::PaintedStreams;
 use crate::i18n::{Language, Messages};
 
 /// 候補として取得する PR の最大件数。
@@ -354,10 +356,19 @@ fn checkout(
 
     match target {
         Target::Current => {
-            gh::run_gh(&["pr", "checkout", &number])?;
+            // `gh` が内部で実行する git の報告（持ち越した変更の一覧と `Switched to branch`）を
+            // `gz branch` と同じく着色する。git は両者を標準出力と標準エラーへ振り分けるため、
+            // ストリームごとに端末かどうかを判定する（FR-36）
+            gh::run_gh_painted(
+                &["pr", "checkout", &number],
+                PaintedStreams::both(OutputKind::SwitchReport),
+            )?;
             Ok(())
         }
         Target::NewWorktree { path, install } => {
+            // こちらは着色の中継を挟まない。git の報告は `Preparing worktree` 等で着色の対象に
+            // 当たらず、中継すると `gh` が標準出力を端末でないと判断して
+            // 自身の `✓ Checked out PR …` の色を落とすため
             gh::run_gh(&["pr", "checkout", &number, "--worktree", path])?;
 
             // 作成の手段は違っても、作られたあとにやることは `gz worktree add` と同一である。
